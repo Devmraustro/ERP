@@ -24,7 +24,11 @@ from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_ba
 
 def test_empirical_ocr_benchmark_across_6_algerian_invoice_strata(tmp_path: Path) -> None:
     """Run the 18-document synthetic Algerian invoice benchmark and verify field & line metrics."""
-    bench_dir = Path("/home/user/ERP/benchmarks/results")
+    # Resolve the benchmark output directory from this file, never from an
+    # absolute path: the previous hardcoded path only existed on the machine the
+    # benchmark was authored on, so the test failed with PermissionError on any
+    # other host.
+    bench_dir = Path(__file__).resolve().parent.parent / "benchmarks" / "results"
     report = run_empirical_ocr_benchmark(bench_dir)
 
     assert report["dataset_size_documents"] == 18

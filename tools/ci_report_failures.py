@@ -35,7 +35,7 @@ from typing import List, Tuple
 # GitHub keeps a limited number of annotations per step; anything beyond this is
 # silently dropped, so report the cap explicitly rather than losing the signal.
 MAX_ANNOTATIONS = 40
-MAX_MESSAGE_CHARS = 900
+MAX_MESSAGE_CHARS = 1400
 
 
 def _clean(text: str) -> str:
@@ -58,6 +58,36 @@ def _first_assertion(text: str) -> str:
     return _clean(lines[-1]) if lines else "no message"
 
 
+def _detail(text: str) -> str:
+    """A longer, still single-line digest of a failure.
+
+    A bare ``KeyError: 'invoice_number'`` does not say which side moved, so the
+    annotation also carries the failing source line and the tail of the
+    traceback, where pytest's assertion rewriting puts the useful context.
+    """
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    parts: List[str] = []
+
+    for line in reversed(lines):
+        if line.startswith("E ") or line.startswith("E\t"):
+            parts.append(line[1:].strip())
+            break
+
+    for line in reversed(lines):
+        if line.startswith(">"):
+            parts.append(f"at {line.lstrip('> ').strip()}")
+            break
+
+    # Keep the last few traceback frames so the failing call site is visible.
+    frames = [line for line in lines if line.startswith(("tests/", "dz_erp/", "tools/"))]
+    if frames:
+        parts.append(f"frames: {' | '.join(frames[-3:])}")
+
+    if not parts:
+        parts.append(_clean(lines[-1]) if lines else "no message")
+    return _clean(" :: ".join(parts))
+
+
 def collect_failures(report: Path) -> Tuple[List[Tuple[str, str]], dict]:
     """Return ([(test id, message)], counts) parsed from a JUnit XML report."""
     tree = ET.parse(report)  # raises on malformed XML - surfaced by the caller
@@ -76,7 +106,7 @@ def collect_failures(report: Path) -> Tuple[List[Tuple[str, str]], dict]:
             identifier = f"{case.get('classname', '')}::{case.get('name', '')}".strip(":")
             for problem in case:
                 if problem.tag in ("failure", "error"):
-                    failures.append((identifier, _first_assertion(problem.text or "")))
+                    failures.append((identifier, _detail(problem.text or "")))
                     break
 
     if not counts["time"] or counts["time"] == "0":

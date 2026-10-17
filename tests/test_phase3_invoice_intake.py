@@ -106,6 +106,14 @@ def test_ocr_extraction_raw_immutability_prompt_injection_and_zero_stock_movemen
         db, vault, company_id=1, user_id=10, filename="inv_777.pdf", mime_type="application/pdf", content=pdf_bytes
     )
     assert res1["workflow_state"] == "NeedsReview"
+    # Report what *was* extracted, not just that the key is missing: the OCR
+    # result depends on how the synthetic PDF is rendered, so a bare KeyError
+    # says nothing about which side moved.
+    assert "invoice_number" in res1["fields"], (
+        f"invoice_number was not extracted (engine={res1['engine_name']}, "
+        f"fields={sorted(res1['fields'])}, "
+        f"first_lines={[line['text'] for line in res1['raw_lines'][:6]]})"
+    )
     assert res1["fields"]["invoice_number"]["normalized_value"] == "FAC-2026-0777"
     assert res1["fields"]["supplier_nif"]["normalized_value"] == "001216099123477"
     assert res1["fields"]["amount_ttc_dzd"]["normalized_value"] == "59500.00"

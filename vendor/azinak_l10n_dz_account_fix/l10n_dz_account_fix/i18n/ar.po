@@ -1,0 +1,20 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+# 	* l10n_dz_account_fix
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 18.0\n"
+"Language: ar\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#. module: l10n_dz_account_fix
+#: model:ir.module.module,shortdesc:base.module_l10n_dz_account_fix
+msgid "Algeria - Accounting Fixes"
+msgstr "الجزائر - تصحيحات المحاسبة"
+
+#. module: l10n_dz_account_fix
+#: model:ir.module.module,summary:base.module_l10n_dz_account_fix
+msgid "Verified accounting fixes for the official Algerian localization"
+msgstr "تصحيحات محاسبية مدققة للتوطين الجزائري الرسمي"

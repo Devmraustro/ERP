@@ -104,6 +104,33 @@ The system path remains only as a fallback for environments that predate the
 vendored copy. `test_benchmark_font_is_bundled_and_resolves_without_the_system_
 font` and `test_benchmark_rendering_is_reproducible` prevent regression.
 
+### 2.3 Deterministic OCR inference
+
+`rapidocr-onnxruntime` builds its ONNX Runtime sessions with
+`intra_op_num_threads = -1`, i.e. one thread per core.  Parallel floating-point
+reductions then execute in a core-count-dependent order, so the *same image* can
+produce slightly different logits - and therefore a different recognised
+character - on a different machine.  OpenCV's internal parallel loops are the
+same class of problem inside RapidOCR's preprocessing.
+
+The measured effect was real: the benchmark scored
+`overall_field_exact_match_rate = 0.9097` on the authoring machine and `0.8958`
+on a GitHub Actions runner, with no code change between them, which is what made
+the `>= 0.90` assertion fail there.
+
+**Fix.** `dz_erp.intake_ocr.get_rapid_ocr()` constructs the engine with
+`intra_op_num_threads=1` and `inter_op_num_threads=1` and pins
+`cv2.setNumThreads(1)`.  Single-threaded reductions have a fixed order, so
+inference is bit-identical on every CPU.  The cost is throughput, which is
+irrelevant here: the engine serves single-document intake, not batch processing.
+
+**Residual noise.** ONNX Runtime, OpenCV and PDFium still dispatch SIMD kernels
+at runtime based on host CPU features, so a *borderline* glyph can still be
+recognised differently on a different machine.  The benchmark thresholds are
+therefore floors with a deliberate margin below the measured value (documented
+at the assertion site) rather than tight bounds on it.  A genuine regression
+moves the metric by tens of points, not by single fields.
+
 ---
 
 ## 3. Core Runtime, Web API, Cryptography & Test Dependencies (`Verified`)

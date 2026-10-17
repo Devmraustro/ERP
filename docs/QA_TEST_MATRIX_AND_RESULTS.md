@@ -38,12 +38,12 @@ python -m ruff check dz_erp tests tools      # static check
 
 ### 1.2 Current results
 
-- **Total Collected Tests:** `216`
-- **Passed:** `216` (`100%`)
+- **Total Collected Tests:** `218`
+- **Passed:** `218` (`100%`)
 - **Failed / Skipped / Errors:** `0`
-- **Total Execution Duration:** `29.27s`
+- **Total Execution Duration:** `30.81s`
 - **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
-- **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,075 / 2,231` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
+- **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,080 / 2,236` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 

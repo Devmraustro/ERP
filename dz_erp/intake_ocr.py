@@ -15,6 +15,7 @@ import numpy as np
 import pdfplumber
 import pypdf
 import pypdfium2 as pdfium
+import cv2
 from cryptography.fernet import Fernet
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
@@ -36,10 +37,40 @@ PROMPT_INJECTION_PATTERNS = [
 _RAPID_OCR_SINGLETON: Optional[RapidOCR] = None
 
 
+# Deterministic inference settings.  See get_rapid_ocr() for why these matter.
+DETERMINISTIC_INFERENCE_OPTIONS: Dict[str, int] = {
+    "intra_op_num_threads": 1,
+    "inter_op_num_threads": 1,
+}
+
+
 def get_rapid_ocr() -> RapidOCR:
+    """Return the process-wide RapidOCR engine.
+
+    ONNX Runtime defaults to ``intra_op_num_threads = -1``, i.e. one thread per
+    core.  Parallel floating-point reductions then run in a core-count-dependent
+    order, so the same image can yield slightly different logits - and therefore
+    a different recognised character - on a different machine.  That makes the
+    measured OCR accuracy a property of the host rather than of the code: the
+    benchmark scored ``0.9097`` on one machine and ``0.8958`` on a CI runner with
+    no code change between them.
+
+    Pinning both thread counts to ``1`` fixes the reduction order, so inference
+    is bit-identical everywhere.  The cost is throughput, which is irrelevant
+    here: the engine is used for single-document intake, not batch processing.
+    """
     global _RAPID_OCR_SINGLETON
     if _RAPID_OCR_SINGLETON is None:
-        _RAPID_OCR_SINGLETON = RapidOCR()
+        # OpenCV's own parallel loops are the same class of problem: with the
+        # default thread count, `resize` / `cvtColor` inside RapidOCR's
+        # preprocessing split work across cores and the per-pixel rounding can
+        # differ.  One thread makes them order-stable as well.
+        try:
+            cv2.setNumThreads(1)
+            cv2.setRNGSeed(0)
+        except Exception:  # pragma: no cover - defensive: never block startup on this
+            pass
+        _RAPID_OCR_SINGLETON = RapidOCR(**DETERMINISTIC_INFERENCE_OPTIONS)
     return _RAPID_OCR_SINGLETON
 
 

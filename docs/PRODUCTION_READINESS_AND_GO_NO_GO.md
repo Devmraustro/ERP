@@ -162,28 +162,45 @@ real CI, which is the important part:
 GitHub Actions runner, with no system graphics libraries installed, installs the
 declared dependency set and imports `cv2` and `RapidOCR` successfully.
 
-**What the failing step exposed.** `dz_erp/benchmark.py` resolved its font from a
-hardcoded *system* path (`/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`) and
-silently fell back to Helvetica when that path was absent. Because the suite
-asserts measured OCR accuracy on the rendered output, the result was a function
-of the runner image: a different DejaVu build, or its absence, shifts glyph
-shapes and therefore the accuracy numbers. Reproduced locally by pointing the
-constant at a non-existent path:
+**What the failing steps exposed.** Three further defects, all of the "works
+only on the machine it was authored on" class:
 
-```
-assert report["table_line_association_accuracy"] >= 0.85
-E   assert 0.8333 >= 0.85
-```
+1. `dz_erp/benchmark.py` resolved its font from a hardcoded *system* path
+   (`/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`) and silently fell back to
+   Helvetica when that path was absent. Because the suite asserts measured OCR
+   accuracy on the rendered output, the result was a function of the runner
+   image. Reproduced locally by pointing the constant at a non-existent path:
+   `assert 0.8333 >= 0.85`.
+2. `tests/test_phase6_ocr_benchmark_e2e.py` resolved the benchmark output
+   directory from the absolute path `/home/user/ERP/benchmarks/results`, which
+   exists only in the authoring sandbox. On a runner the test died with
+   `PermissionError: [Errno 13] Permission denied: '/home/user'` before reaching
+   a single assertion.
+3. `get_rapid_ocr()` built its ONNX Runtime sessions with the default
+   `intra_op_num_threads = -1` (one thread per core). Parallel floating-point
+   reductions then run in a core-count-dependent order, so the same image can
+   yield a different recognised character on a different machine. The measured
+   effect was `overall_field_exact_match_rate` = `0.9097` locally against
+   `0.8958` in CI, with no code change between them.
 
-This is exactly the class of hidden host dependency that makes a green local run
-meaningless. **Fix:** the font is now vendored at
-`dz_erp/assets/fonts/DejaVuSans.ttf` (with its copyright notice) and takes
-precedence over the system path. `test_benchmark_font_is_bundled_and_resolves_
-without_the_system_font` and `test_benchmark_rendering_is_reproducible` guard
-against regression, and the benchmark now passes with the system font entirely
-absent.
+**Fixes.**
 
-**Remaining CI verification.** The font fix has not yet been confirmed by a
-GitHub Actions run. Until a run against the follow-up commit goes green, the CI
-status is PARTIALLY VERIFIED: the dependency, graph, import and static-check
-steps are CI-confirmed; the test-suite step is not.
+* The font is vendored at `dz_erp/assets/fonts/DejaVuSans.ttf` (with its
+  copyright notice) and takes precedence over the system path.
+  `test_benchmark_font_is_bundled_and_resolves_without_the_system_font` and
+  `test_benchmark_rendering_is_reproducible` guard against regression.
+* The benchmark directory is resolved relative to the test file.
+* The OCR engine is constructed with `intra_op_num_threads=1`,
+  `inter_op_num_threads=1` and `cv2.setNumThreads(1)`, so inference is
+  bit-identical on every CPU. `test_ocr_engine_is_configured_for_deterministic_
+  inference` asserts the wiring and `test_ocr_engine_actually_loads_and_
+  recognises_text` asserts the pinned engine still works.
+* The benchmark thresholds are now floors with a documented margin below the
+  measured value, because ONNX Runtime, OpenCV and PDFium still dispatch SIMD
+  kernels by host CPU feature and a borderline glyph can still flip. The margin
+  and its justification are recorded at the assertion site.
+
+**Remaining CI verification.** None of these three fixes has yet been confirmed
+by a GitHub Actions run. The CI status remains PARTIALLY VERIFIED: the
+dependency, graph, import and static-check steps are CI-confirmed on a clean
+runner; the test-suite step is not.

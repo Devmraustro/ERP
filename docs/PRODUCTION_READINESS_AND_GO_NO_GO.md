@@ -134,7 +134,56 @@ financial service, and it performs no deployment and modifies no production
 resource. It installs **no** system graphics libraries, which deliberately proves
 the minimal, system-library-free configuration works.
 
-**CI status: UNVERIFIED at the time of writing.** The workflow file has been
-created and every step in it has been executed successfully in a clean local
-virtual environment, but no GitHub Actions run has yet confirmed it. Run IDs and
-statuses will be reported only once an actual workflow run exists.
+**CI status: PARTIALLY VERIFIED — see §5.5.**
+
+### 5.5 CI results and the defect they exposed
+
+Two workflow runs have completed against commit `29b5a1f`:
+
+| Run ID | Trigger | Result |
+| :--- | :--- | :--- |
+| `39074294395` | `push` to `arena/5c240e1d-erp` | `failure` |
+| `39074295484` | `pull_request` | `failure` |
+
+Both failed at the **same** step — `Run the complete test suite with coverage` —
+on both the Python `3.11` and Python `3.12` jobs. Every earlier step succeeded in
+real CI, which is the important part:
+
+| Step | Result in CI |
+| :--- | :--- |
+| Install the declared dependency set (`pip install --no-deps -r requirements.lock.txt`) | **Passed** |
+| Validate the dependency graph explicitly (`tools/verify_dependency_graph.py`) | **Passed** |
+| Assert `cv2` and `RapidOCR` import | **Passed** |
+| Static check (`ruff`) | **Passed** |
+| Byte-compile all sources | **Passed** |
+| Run the complete test suite with coverage | **Failed** |
+
+**The OpenCV / `libGL` defect is therefore CI-verified as fixed**: a clean
+GitHub Actions runner, with no system graphics libraries installed, installs the
+declared dependency set and imports `cv2` and `RapidOCR` successfully.
+
+**What the failing step exposed.** `dz_erp/benchmark.py` resolved its font from a
+hardcoded *system* path (`/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`) and
+silently fell back to Helvetica when that path was absent. Because the suite
+asserts measured OCR accuracy on the rendered output, the result was a function
+of the runner image: a different DejaVu build, or its absence, shifts glyph
+shapes and therefore the accuracy numbers. Reproduced locally by pointing the
+constant at a non-existent path:
+
+```
+assert report["table_line_association_accuracy"] >= 0.85
+E   assert 0.8333 >= 0.85
+```
+
+This is exactly the class of hidden host dependency that makes a green local run
+meaningless. **Fix:** the font is now vendored at
+`dz_erp/assets/fonts/DejaVuSans.ttf` (with its copyright notice) and takes
+precedence over the system path. `test_benchmark_font_is_bundled_and_resolves_
+without_the_system_font` and `test_benchmark_rendering_is_reproducible` guard
+against regression, and the benchmark now passes with the system font entirely
+absent.
+
+**Remaining CI verification.** The font fix has not yet been confirmed by a
+GitHub Actions run. Until a run against the follow-up commit goes green, the CI
+status is PARTIALLY VERIFIED: the dependency, graph, import and static-check
+steps are CI-confirmed; the test-suite step is not.

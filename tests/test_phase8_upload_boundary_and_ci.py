@@ -697,6 +697,63 @@ def test_upload_quarantine_is_preserved_for_malware(env: SimpleNamespace) -> Non
 
 
 # ===========================================================================
+# Reproducible environment — no hidden host dependencies
+# ===========================================================================
+
+
+def test_benchmark_font_is_bundled_and_resolves_without_the_system_font() -> None:
+    """The OCR benchmark must not depend on a font installed on the host.
+
+    The benchmark renders synthetic invoices and the suite asserts measured OCR
+    accuracy on that output.  Resolving the font from a hardcoded system path
+    made the result a function of the runner image: a different DejaVu build,
+    or its absence (silently falling back to Helvetica), shifted glyph shapes
+    and therefore the accuracy numbers, so the same commit passed on one
+    machine and failed on another.  The font is now vendored and takes
+    precedence.
+    """
+    import dz_erp.benchmark as benchmark
+
+    assert benchmark.BUNDLED_DEJAVU_TTF.is_file(), (
+        f"the vendored benchmark font is missing: {benchmark.BUNDLED_DEJAVU_TTF}"
+    )
+    # The bundled font must win even when the system path does not exist.
+    original = benchmark.DEJAVU_TTF
+    try:
+        benchmark.DEJAVU_TTF = "/nonexistent/DejaVuSans.ttf"
+        assert benchmark._resolve_font_path() == benchmark.BUNDLED_DEJAVU_TTF
+    finally:
+        benchmark.DEJAVU_TTF = original
+
+
+def test_benchmark_rendering_is_reproducible() -> None:
+    """Rendering the same spec twice must yield the same extracted content.
+
+    This is what makes the measured OCR accuracy a property of the code rather
+    than of the machine that generated it.  The raw PDF bytes are *not*
+    compared, because reportlab embeds a creation timestamp; the rasterised
+    image carries no such metadata and is compared byte for byte.
+    """
+    import pdfplumber
+
+    from dz_erp.benchmark import render_synthetic_invoice_image, render_synthetic_invoice_pdf
+
+    spec = dict(SUPPLIER_SPEC, arabic_header="شركة أطلس للتجهيز الصناعي - فاتورة")
+
+    first_pdf = render_synthetic_invoice_pdf(spec)
+    second_pdf = render_synthetic_invoice_pdf(spec)
+    with pdfplumber.open(io.BytesIO(first_pdf)) as opened:
+        first_text = opened.pages[0].extract_text() or ""
+    with pdfplumber.open(io.BytesIO(second_pdf)) as opened:
+        second_text = opened.pages[0].extract_text() or ""
+    assert first_text == second_text
+    assert "FAC-P8-001" in first_text
+
+    # The raster path (what RapidOCR actually sees) must be byte-identical.
+    assert render_synthetic_invoice_image(spec) == render_synthetic_invoice_image(spec)
+
+
+# ===========================================================================
 # Priority 2 — Forwarded-header trust
 # ===========================================================================
 

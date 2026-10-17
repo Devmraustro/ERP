@@ -6,7 +6,7 @@ import json
 import statistics
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from reportlab.pdfbase import pdfmetrics
@@ -18,14 +18,41 @@ from .intake_ocr import extract_document_ocr, levenshtein_distance
 from .localization import calculate_droit_de_timbre
 
 DEJAVU_TTF = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+# The benchmark must render **identically** on every machine, because the OCR
+# accuracy assertions below are measured on the rendered output.  Depending on
+# a system font at a hardcoded path makes the result a function of the host
+# image: a different DejaVu build (or its absence, silently falling back to
+# Helvetica) shifts glyph shapes and therefore OCR scores, so the same commit
+# passes on one runner and fails on another.
+#
+# The font is therefore vendored under dz_erp/assets/fonts/ and takes
+# precedence.  The system path is kept only as a fallback for environments that
+# predate the vendored copy.
+BUNDLED_FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+BUNDLED_DEJAVU_TTF = BUNDLED_FONT_DIR / "DejaVuSans.ttf"
+
+
+def _resolve_font_path() -> Optional[Path]:
+    """Resolve the font used to render benchmark documents, deterministically."""
+    if BUNDLED_DEJAVU_TTF.is_file():
+        return BUNDLED_DEJAVU_TTF
+    system = Path(DEJAVU_TTF)
+    if system.is_file():
+        return system
+    return None
+
+
 _FONT_REGISTERED = False
 
 
 def _ensure_font() -> None:
     global _FONT_REGISTERED
-    if not _FONT_REGISTERED and Path(DEJAVU_TTF).exists():
-        pdfmetrics.registerFont(TTFont("DejaVu", DEJAVU_TTF))
-        _FONT_REGISTERED = True
+    if not _FONT_REGISTERED:
+        resolved = _resolve_font_path()
+        if resolved is not None:
+            pdfmetrics.registerFont(TTFont("DejaVu", str(resolved)))
+            _FONT_REGISTERED = True
 
 
 def render_synthetic_invoice_pdf(spec: Dict[str, Any]) -> bytes:
@@ -88,7 +115,12 @@ def render_synthetic_invoice_image(
     bg_color = (248, 246, 240) if thermal_style else (255, 255, 255)
     img = Image.new("RGB", (width, height), color=bg_color)
     draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype(DEJAVU_TTF, 17 if not thermal_style else 14) if Path(DEJAVU_TTF).exists() else ImageFont.load_default()
+    resolved_font = _resolve_font_path()
+    font = (
+        ImageFont.truetype(str(resolved_font), 17 if not thermal_style else 14)
+        if resolved_font is not None
+        else ImageFont.load_default()
+    )
 
     y = 25
     lines_text = [

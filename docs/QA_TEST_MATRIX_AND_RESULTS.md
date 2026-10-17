@@ -38,12 +38,12 @@ python -m ruff check dz_erp tests tools      # static check
 
 ### 1.2 Current results
 
-- **Total Collected Tests:** `214`
-- **Passed:** `214` (`100%`)
+- **Total Collected Tests:** `216`
+- **Passed:** `216` (`100%`)
 - **Failed / Skipped / Errors:** `0`
-- **Total Execution Duration:** `30.36s`
+- **Total Execution Duration:** `29.27s`
 - **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
-- **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,067 / 2,219` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
+- **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,075 / 2,231` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 
@@ -182,7 +182,7 @@ described in `docs/AUTHENTICATION_HARDENING_SPEC.md`.
 
 ## 2A. Phase 8 — Upload Boundary Hardening, Forwarded-Header Trust & CI (`tests/test_phase8_upload_boundary_and_ci.py`)
 
-All `127` tests in this module passed (the module is new in Phase 8). The rows below enumerate the `69` distinct test **functions**; the remaining `58` collected cases are the parametrised variants of rows 99, 127, 129 and the `test_read_bounded_upload_*` boundary series.
+All `129` tests in this module passed (the module is new in Phase 8). The rows below enumerate the `71` distinct test **functions**; the remaining `58` collected cases are the parametrised variants of rows 99, 127, 129 and the `test_read_bounded_upload_*` boundary series.
 
 ### 2A.1 Upload size boundary (`dz_erp/upload.py`)
 
@@ -234,7 +234,14 @@ All `127` tests in this module passed (the module is new in Phase 8). The rows b
 | 110 | `test_upload_endpoint_accepts_valid_png` | A genuine PNG uploads successfully | `Passed` |
 | 111 | `test_upload_quarantine_is_preserved_for_malware` | The pre-existing EICAR quarantine behaviour is unchanged: `security_status == QUARANTINED` | `Passed` |
 
-### 2A.3 Forwarded-header / proxy trust (`dz_erp/net.py`)
+### 2A.3 Reproducible environment — no hidden host dependencies
+
+| # | Test Identifier | Requirement Verified | Status |
+| :---: | :--- | :--- | :---: |
+| 141 | `test_benchmark_font_is_bundled_and_resolves_without_the_system_font` | The OCR benchmark font is vendored in-repo and wins even when the system font path does not exist | `Passed` |
+| 142 | `test_benchmark_rendering_is_reproducible` | The same spec renders to the same extracted text and byte-identical raster image, so measured OCR accuracy is a property of the code, not of the host | `Passed` |
+
+### 2A.4 Forwarded-header / proxy trust (`dz_erp/net.py`)
 
 | # | Test Identifier | Requirement Verified | Status |
 | :---: | :--- | :--- | :---: |
@@ -254,7 +261,7 @@ All `127` tests in this module passed (the module is new in Phase 8). The rows b
 | 125 | `test_forwarded_header_is_never_used_for_authorisation` | Forged `X-Forwarded-For` / `X-Real-IP` never change the resolved `user_id`, `company_id` or `role` | `Passed` |
 | 126 | `test_proxy_policy_env_configuration_is_fail_closed` | With no `ERP_TRUSTED_PROXIES` set, the policy trusts nothing | `Passed` |
 
-### 2A.4 Authentication regression re-verified against the current commit
+### 2A.5 Authentication regression re-verified against the current commit
 
 | # | Test Identifier | Requirement Verified | Status |
 | :---: | :--- | :--- | :---: |
@@ -273,7 +280,7 @@ All `127` tests in this module passed (the module is new in Phase 8). The rows b
 | 139 | `test_audit_chain_remains_valid_after_phase8_activity` | The HMAC audit chain still verifies after uploads and revocation | `Passed` |
 | 140 | `test_all_protected_routes_use_the_authenticated_path` | **Every** non-public route in the OpenAPI contract rejects an unauthenticated request | `Passed` |
 
-### 2A.5 Static check
+### 2A.6 Static check
 
 `ruff check dz_erp tests tools` with the ruleset declared in `pyproject.toml`
 (`F`, `E741`, `RUF100`) reports **All checks passed!**. Introducing this check

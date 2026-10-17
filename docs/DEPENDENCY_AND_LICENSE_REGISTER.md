@@ -82,6 +82,28 @@ directory `opencv_python.libs/` must be absent), and asserts that both `cv2` and
 | Optional (GUI OpenCV build only) | `libgl1`, `libglib2.0-0` — only needed if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging. |
 | Source for `libGL` | No PyPI package provides it (`https://pypi.org/pypi/libgl1/json` returns `404`); a system package manager is the only source. |
 
+### 2.2 Vendored benchmark font (deterministic rendering)
+
+`dz_erp/benchmark.py` renders the synthetic Algerian invoices that the OCR
+accuracy assertions are measured against. It previously resolved its font from a
+hardcoded **system** path (`/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`)
+with a silent fallback to Helvetica. That made the measured accuracy a function
+of the host image: on a runner with a different DejaVu build, or none at all,
+glyph shapes shift and the numbers move — reproduced locally as
+`table_line_association_accuracy` dropping from `1.0` to `0.8333`, below the
+`0.85` threshold, with no code change.
+
+The font is therefore vendored in-repository and takes precedence:
+
+| File | License | Notes |
+| :--- | :--- | :--- |
+| `dz_erp/assets/fonts/DejaVuSans.ttf` | Bitstream Vera / DejaVu (permissive; DejaVu changes are public domain) | Full copyright notice retained alongside as `DejaVuSans.COPYRIGHT` |
+| `dz_erp/assets/fonts/DejaVuSans.COPYRIGHT` | — | Upstream attribution, retained verbatim |
+
+The system path remains only as a fallback for environments that predate the
+vendored copy. `test_benchmark_font_is_bundled_and_resolves_without_the_system_
+font` and `test_benchmark_rendering_is_reproducible` prevent regression.
+
 ---
 
 ## 3. Core Runtime, Web API, Cryptography & Test Dependencies (`Verified`)

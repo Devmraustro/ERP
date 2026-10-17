@@ -1,0 +1,16 @@
+# مصادر أودو المستخرجة للقراءة فقط
+/reference/
+/pdf/
+/addons/
+/docker-compose.yml
+/odoo.conf
+/CLAUDE.md
+/implementation_plan.md
+
+# ملفات بيئة محلية
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+*.log
+.DS_Store

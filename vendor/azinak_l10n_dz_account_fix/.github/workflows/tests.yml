@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Install and test on Odoo 18
+    runs-on: ubuntu-latest
+    container:
+      image: odoo:18.0
+      options: --user root
+    services:
+      db:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U odoo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate sources
+        run: |
+          python3 -m compileall -q l10n_dz_account_fix
+          apt-get update && apt-get install -y --no-install-recommends gettext
+          for po in l10n_dz_account_fix/i18n/*.po; do msgfmt --check -o /dev/null "$po"; done
+      - name: Run Odoo tests
+        run: |
+          odoo --database=ci --init=l10n_dz_account_fix \
+            --test-enable --test-tags=/l10n_dz_account_fix \
+            --stop-after-init --without-demo=True --log-level=test --no-http \
+            --data-dir=/tmp/odoo-data \
+            --addons-path=/usr/lib/python3/dist-packages/odoo/addons,"$GITHUB_WORKSPACE" \
+            --db_host=db --db_port=5432 --db_user=odoo --db_password=odoo \
+            2>&1 | tee odoo.log
+          ! grep -qE "[1-9][0-9]* (failed|error\(s\))" odoo.log
+          grep -E "0 failed, 0 error" odoo.log

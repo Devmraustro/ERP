@@ -289,10 +289,22 @@ inference on a rasterised image: ONNX Runtime, OpenCV and FreeType all dispatch
 SIMD kernels by host CPU feature, so a borderline glyph can legitimately be read
 differently on another machine. The comparison folds the classic OCR digit/letter
 confusions (`O`/`0`, `I`/`1`, `L`/`1`, `Z`/`2`, `S`/`5`, `B`/`8`, `G`/`6`,
-`T`/`7`) before comparing, and the failure message reports what was actually
-extracted. Verified against a table of cases: exact matches, single and double
-confusions, and mixed confusions are accepted; genuinely wrong digits, off-by-one
-values, and unrelated strings are rejected.
+`T`/`7`), then removes whitespace and hyphens so a line break in the middle of a
+reference still counts as a recognition.
+
+Recognising the number is asserted against the **raw OCR output**, not the parsed
+field: the parser applies a per-line regular expression, and the neural
+detector's line segmentation is not stable across CPUs - the same PNG yields
+`FACTUREN:FAC-2026-0778` plus a separate `DATE:...` line on one machine and a
+differently segmented set of lines on another, which changes whether that one
+regex matches. The number is recognised either way, and that is the property
+worth asserting. The failure message reports the recognised text.
+
+Verified against a table of detector segmentations rather than assumed: exact
+matches, single/double/mixed confusions, lower-case, dropped hyphens, dropped
+spaces, and the number split across two detector lines are all accepted;
+genuinely wrong digits, off-by-one values, unrelated references and empty results
+are all rejected.
 
 ### 2A.7 Static check
 

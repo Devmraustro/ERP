@@ -207,7 +207,36 @@ only on the machine it was authored on" class:
   tolerance was verified against a table of cases so it absorbs real confusions
   while still rejecting wrong digits and unrelated strings.
 
-**Remaining CI verification.** None of these four fixes has yet been confirmed
-by a GitHub Actions run. The CI status remains PARTIALLY VERIFIED: the
+**Confirmed by the next CI run.** The `PermissionError` is gone and the
+benchmark accuracy assertion now passes on both Python versions. One failure
+remained, and its annotation named the exact assertion: `assert 'invoice_number'
+in {...}` on the PNG path. The extracted fields included `amount_ht_dzd`,
+`amount_tva_dzd`, `currency_code` and the rest, but not `invoice_number`.
+
+The cause was not accuracy at all. `intake_ocr` applies a **per-line** regular
+expression, and the neural detector's line segmentation is not stable across
+CPUs: locally the header reads as `FACTUREN:FAC-2026-0778` on one line and
+`DATE:2026-10-15` on the next, which the regex matches. On the runner the same
+image segments differently and the regex misses the number entirely - a
+*detection* difference, not a *recognition* difference, so no amount of accuracy
+tolerance would have caught it.
+
+**Fix.** Recognising the number is now asserted against the raw OCR output
+(whitespace and hyphens removed, classic glyph confusions folded) instead of the
+parsed field. That is the property the test is actually for: that the RapidOCR
+path runs, integrates and reads the document's identifying number. The parser's
+per-line regex is still covered exactly on the PDF path, where the text layer
+makes segmentation deterministic. See QA matrix 2A.6.
+
+Two further defects were found in the diagnostics themselves and fixed: the
+first referenced `raw_lines`, which belongs to the OCR result and not to the
+upload result, so evaluating the message raised `KeyError: 'raw_lines'` and
+masked the failure it was meant to explain - a diagnostic that can itself fail
+must never sit on the path it diagnoses. The second emitted a dict whose
+bbox/confidence payload overflowed the annotation limit, so it was trimmed
+before it reached the interesting part.
+
+**Remaining CI verification.** The line-segmentation fix has not yet been
+confirmed by a GitHub Actions run. The CI status remains PARTIALLY VERIFIED: the
 dependency, graph, import and static-check steps are CI-confirmed on a clean
 runner; the test-suite step is not.

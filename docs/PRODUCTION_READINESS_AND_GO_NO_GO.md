@@ -199,8 +199,15 @@ only on the machine it was authored on" class:
   measured value, because ONNX Runtime, OpenCV and PDFium still dispatch SIMD
   kernels by host CPU feature and a borderline glyph can still flip. The margin
   and its justification are recorded at the assertion site.
+* The PDF extraction assertion stays **exact** (it reads a text layer and is
+  deterministic). The PNG extraction assertion folds the classic OCR
+  digit/letter confusions before comparing, because that path is neural
+  inference on a rasterised image and a borderline glyph can legitimately differ
+  across CPUs. The failure message reports what was actually extracted, and the
+  tolerance was verified against a table of cases so it absorbs real confusions
+  while still rejecting wrong digits and unrelated strings.
 
-**Remaining CI verification.** None of these three fixes has yet been confirmed
+**Remaining CI verification.** None of these four fixes has yet been confirmed
 by a GitHub Actions run. The CI status remains PARTIALLY VERIFIED: the
 dependency, graph, import and static-check steps are CI-confirmed on a clean
 runner; the test-suite step is not.

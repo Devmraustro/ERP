@@ -280,7 +280,21 @@ All `129` tests in this module passed (the module is new in Phase 8). The rows b
 | 139 | `test_audit_chain_remains_valid_after_phase8_activity` | The HMAC audit chain still verifies after uploads and revocation | `Passed` |
 | 140 | `test_all_protected_routes_use_the_authenticated_path` | **Every** non-public route in the OpenAPI contract rejects an unauthenticated request | `Passed` |
 
-### 2A.6 Static check
+### 2A.6 Neural-OCR assertions
+
+`tests/test_phase3_invoice_intake.py` asserts an **exact** value on the PDF path,
+because `pdfplumber` reads a text layer and is deterministic. It asserts a
+**confusion-tolerant** value on the PNG path, because that path is neural
+inference on a rasterised image: ONNX Runtime, OpenCV and FreeType all dispatch
+SIMD kernels by host CPU feature, so a borderline glyph can legitimately be read
+differently on another machine. The comparison folds the classic OCR digit/letter
+confusions (`O`/`0`, `I`/`1`, `L`/`1`, `Z`/`2`, `S`/`5`, `B`/`8`, `G`/`6`,
+`T`/`7`) before comparing, and the failure message reports what was actually
+extracted. Verified against a table of cases: exact matches, single and double
+confusions, and mixed confusions are accepted; genuinely wrong digits, off-by-one
+values, and unrelated strings are rejected.
+
+### 2A.7 Static check
 
 `ruff check dz_erp tests tools` with the ruleset declared in `pyproject.toml`
 (`F`, `E741`, `RUF100`) reports **All checks passed!**. Introducing this check

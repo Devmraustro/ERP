@@ -84,8 +84,12 @@ jobs:
       - name: Byte-compile all sources
         run: python -m compileall -q dz_erp tests tools
 
+      # The exit status is preserved so the step fails, but the JUnit report is
+      # first converted into per-test annotations and a Markdown summary: a red
+      # build that does not name the broken tests is not actionable output.
       - name: Run the complete test suite with coverage
         run: |
+          set +e
           python -m pytest \
             --cov=dz_erp \
             --cov-report=term-missing \
@@ -93,6 +97,12 @@ jobs:
             --cov-report=html:htmlcov \
             --junitxml=junit.xml \
             -ra
+          status=$?
+          set -e
+          echo "pytest exit status: $status"
+          tail -n 30 junit.xml >/dev/null 2>&1 || true
+          python tools/ci_report_failures.py junit.xml || true
+          exit $status
 
       - name: Summarise the results
         if: always()

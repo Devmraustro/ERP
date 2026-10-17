@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from dz_erp.api import create_erp_fastapi_app
+from dz_erp.auth import AuthManager, hash_password
 from dz_erp.benchmark import render_synthetic_invoice_pdf
 from dz_erp.database import (
     AuditTamperError,
@@ -32,6 +33,16 @@ from dz_erp.security_audit import (
 )
 
 
+_TENANT_USERS = [
+    (1, 1, "clerk_a", "clerk", 1, "Clerk#2026x"),
+    (2, 1, "wh_a", "warehouse", 1, "Wh#2026x"),
+    (3, 1, "approver_a", "approver", 1, "Appr#2026x"),
+    (4, 1, "acct_a", "accountant", 1, "Acct#2026x"),
+    (5, 1, "revoked_a", "admin", 0, "Revoked#2026x"),
+    (20, 2, "admin_b", "admin", 1, "AdminB#2026x"),
+]
+
+
 def _setup_two_tenants(db: ERPDatabase) -> None:
     with db.transaction() as conn:
         conn.execute(
@@ -40,17 +51,23 @@ def _setup_two_tenants(db: ERPDatabase) -> None:
         conn.execute(
             "INSERT INTO companies (id, code, name, country_code, chart_template, created_at) VALUES (2, 'DZ2', 'Tenant Beta', 'DZ', 'dz', '2026-01-01')"
         )
-        conn.execute("INSERT INTO users (id, company_id, username, role, is_active) VALUES (1, 1, 'clerk_a', 'clerk', 1)")
-        conn.execute("INSERT INTO users (id, company_id, username, role, is_active) VALUES (2, 1, 'wh_a', 'warehouse', 1)")
-        conn.execute("INSERT INTO users (id, company_id, username, role, is_active) VALUES (3, 1, 'approver_a', 'approver', 1)")
-        conn.execute("INSERT INTO users (id, company_id, username, role, is_active) VALUES (4, 1, 'acct_a', 'accountant', 1)")
-        conn.execute("INSERT INTO users (id, company_id, username, role, is_active) VALUES (5, 1, 'revoked_a', 'admin', 0)")
-        conn.execute("INSERT INTO users (id, company_id, username, role, is_active) VALUES (20, 2, 'admin_b', 'admin', 1)")
+        for uid, cid, username, role, active, password in _TENANT_USERS:
+            conn.execute(
+                "INSERT INTO users (id, company_id, username, role, is_active, password_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                (uid, cid, username, role, active, hash_password(password, iterations=1000)),
+            )
         conn.execute(
             "INSERT INTO partners (id, company_id, name, partner_type, nif, nis, ai, rc) VALUES (10, 1, 'Supplier Alpha', 'supplier', '001216099123456', '099116010123456', '16019912345', '16/00-0991234B12')"
         )
     load_official_odoo_chart(db, company_id=1, apply_fixes_immediately=True, actor_user_id=4)
     load_official_odoo_chart(db, company_id=2, apply_fixes_immediately=True, actor_user_id=20)
+
+
+def _login(client: TestClient, username: str, password: str) -> str:
+    """Obtain a real server-issued bearer token (replaces the old forged headers)."""
+    resp = client.post("/api/v1/auth/token", json={"username": username, "password": password})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["access_token"]
 
 
 def test_rbac_sod_approval_invalidation_and_api_bypass_protection(tmp_path: Path) -> None:
@@ -109,19 +126,37 @@ def test_rbac_sod_approval_invalidation_and_api_bypass_protection(tmp_path: Path
     with pytest.raises(TenantIsolationError):
         read_source_document_file_secure(db, vault, requesting_user_id=20, document_id=doc["document_id"])
 
-    # 4. Test FastAPI HTTP API bypass attempts
+    # 4. Test FastAPI HTTP API bypass attempts (now with real server-issued tokens)
     # Unauthenticated request -> 401
     assert client.get(f"/api/v1/invoices/{inv_id}").status_code == 401
-    # Revoked user (user 5) -> 401
-    assert client.get(f"/api/v1/invoices/{inv_id}", headers={"X-User-Id": "5", "X-Company-Id": "1"}).status_code == 401
-    # Cross-company header spoofing (user 20 claiming company 1) -> 403
-    assert client.get(f"/api/v1/invoices/{inv_id}", headers={"X-User-Id": "20", "X-Company-Id": "1"}).status_code == 403
+    # Forged identity headers with no credential -> 401 (headers are no longer trusted)
+    assert client.get(
+        f"/api/v1/invoices/{inv_id}", headers={"X-User-Id": "1", "X-Company-Id": "1"}
+    ).status_code == 401
+    assert client.get(
+        f"/api/v1/invoices/{inv_id}", headers={"X-User-Id": "20", "X-Company-Id": "1"}
+    ).status_code == 401
+    # Deactivated user (user 5) cannot obtain a token -> 401
+    assert client.post(
+        "/api/v1/auth/token", json={"username": "revoked_a", "password": "Revoked#2026x"}
+    ).status_code == 401
+    # Authenticated cross-tenant admin (user 20, company 2) reading Company 1's invoice -> 403
+    token_b = _login(client, "admin_b", "AdminB#2026x")
+    r_cross = client.get(
+        f"/api/v1/invoices/{inv_id}", headers={"Authorization": f"Bearer {token_b}"}
+    )
+    assert r_cross.status_code == 403
     # Cross-company file access -> 403
-    assert client.get(f"/api/v1/documents/{doc['document_id']}/file", headers={"X-User-Id": "20", "X-Company-Id": "2"}).status_code == 403
+    r_cross_file = client.get(
+        f"/api/v1/documents/{doc['document_id']}/file",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert r_cross_file.status_code == 403
     # Clerk attempting to post invoice via API bypass -> 403
+    token_clerk = _login(client, "clerk_a", "Clerk#2026x")
     r_post_clerk = client.post(
         f"/api/v1/invoices/{inv_id}/post",
-        headers={"X-User-Id": "1", "X-Company-Id": "1", "Idempotency-Key": "bypass-key"},
+        headers={"Authorization": f"Bearer {token_clerk}", "Idempotency-Key": "bypass-key"},
     )
     assert r_post_clerk.status_code == 403
 

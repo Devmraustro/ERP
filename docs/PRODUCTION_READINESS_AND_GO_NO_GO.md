@@ -38,7 +38,7 @@ The architecture preserves complete deployment flexibility:
    - Each customer can be deployed as an isolated instance with its own database file/cluster, dedicated `PrivateDocumentVault` directory, and customer-owned `Fernet` encryption key and `HMAC` audit key.
    - Zero outbound internet calls are required at runtime (`RapidOCR` ONNX models and `pdfplumber` run 100% locally on CPU).
 2. **Multi-Company Shared Instance (Holding Groups / Multi-Subsidiary Algerian Enterprises):**
-   - Enforced via mandatory `company_id` scoping on every table, API header verification (`X-Company-Id` matched against `users.company_id`), and company-partitioned `PrivateDocumentVault` subdirectories.
+   - Enforced via mandatory `company_id` scoping on every table, server-verified bearer-token authentication (company is resolved from the credential's owning user record, never from a request header), and company-partitioned `PrivateDocumentVault` subdirectories.
 
 ---
 

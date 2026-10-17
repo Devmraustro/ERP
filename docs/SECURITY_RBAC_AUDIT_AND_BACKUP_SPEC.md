@@ -19,7 +19,7 @@ All permissions are enforced server-side in `dz_erp/procurement_stock.py`, `dz_e
 ## 2. Multi-Company Tenant Isolation (`Verified`)
 
 1. **Relational Queries:** Every table containing tenant data (`accounts`, `account_groups`, `partners`, `products`, `source_documents`, `purchase_orders`, `goods_receipts`, `stock_moves`, `stock_quants`, `supplier_invoices`, `approval_requests`, `journal_entries`, `journal_entry_lines`, `idempotency_keys`, `audit_events`) carries a `NOT NULL` `company_id` foreign key.
-2. **API Header & Session Verification (`dz_erp/api.py`):** Every HTTP request authenticates `X-User-Id` and `X-Company-Id`, verifying that the user exists, has `is_active == 1`, and belongs to `X-Company-Id` (`401 Unauthorized` for missing/revoked credentials; `403 Forbidden` for cross-company attempts).
+2. **Server-Verified Authentication (`dz_erp/auth.py`, `dz_erp/api.py`):** Every HTTP request to a protected endpoint presents an opaque bearer session token (`Authorization: Bearer <token>`) issued by `POST /api/v1/auth/token`. The server resolves the token to its owning `users` row and derives `company_id` and `role` from that row. Self-asserted identity headers (`X-User-Id`, `X-Company-Id`) are **not read** — see `docs/AUTHENTICATION_HARDENING_SPEC.md`. `401 Unauthorized` for missing/invalid/revoked/expired credentials or inactive users; `403 Forbidden` for cross-company attempts.
 3. **Private Document Vault Isolation (`read_source_document_file_secure`):** Vault reads verify `source_documents.company_id == user.company_id` before decrypting the underlying `.enc` blob.
 
 ---

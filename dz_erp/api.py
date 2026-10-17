@@ -1,13 +1,35 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-"""FastAPI REST API for Algerian AI ERP Platform with server-side RBAC, Tenant Isolation & Idempotency."""
+"""FastAPI REST API for Algerian AI ERP Platform with server-verified authentication.
+
+Authentication
+--------------
+Every protected endpoint authenticates a **server-issued opaque bearer token**
+presented in the standard ``Authorization: Bearer <token>`` header
+(see :mod:`dz_erp.auth`).
+
+The previous implementation accepted ``X-User-Id`` / ``X-Company-Id`` request
+headers as proof of identity. Because those values were supplied by the client
+and never checked against any credential, any caller could impersonate any user
+of any company by editing two headers. Those headers are **no longer read at
+all**: identity, company, and role are derived exclusively from the server-side
+record bound to the presented credential.
+"""
 
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
+from .auth import (
+    AuthError,
+    AuthManager,
+    AuthenticatedUser,
+    DEFAULT_TOKEN_TTL_SECONDS,
+    parse_bearer_token,
+)
 from .database import AuthorizationError, AuditTamperError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
 from .intake_ocr import PrivateDocumentVault, update_extracted_field_by_human, upload_and_process_supplier_document
 from .procurement_stock import (
@@ -60,36 +82,172 @@ class FieldEditInput(BaseModel):
     new_value: str
 
 
-def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> FastAPI:
-    app = FastAPI(title="Algerian AI ERP API", version="0.1.0")
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class RevokeRequest(BaseModel):
+    reason: str = "USER_LOGOUT"
+
+
+def create_erp_fastapi_app(
+    db: ERPDatabase,
+    vault: PrivateDocumentVault,
+    *,
+    auth_manager: Optional[AuthManager] = None,
+    token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+) -> FastAPI:
+    app = FastAPI(
+        title="Algerian AI ERP API",
+        version="0.2.0",
+        description=(
+            "Authenticated with a server-issued opaque bearer token sent as "
+            "`Authorization: Bearer <token>`. Obtain one from `POST /api/v1/auth/token`. "
+            "Identity headers (`X-User-Id`, `X-Company-Id`) are not trusted and are ignored."
+        ),
+    )
     logger = StructuredRedactingLogger()
     app.state.db = db
     app.state.vault = vault
     app.state.logger = logger
+    app.state.auth_manager = auth_manager or AuthManager(db, token_ttl_seconds=token_ttl_seconds)
 
     def _authenticate(
-        x_user_id: Optional[int] = Header(default=None, alias="X-User-Id"),
-        x_company_id: Optional[int] = Header(default=None, alias="X-Company-Id"),
-    ) -> Dict[str, int]:
-        if x_user_id is None or x_company_id is None:
-            raise HTTPException(status_code=401, detail="Missing X-User-Id or X-Company-Id authentication headers.")
-        with db.transaction() as conn:
-            user = conn.execute("SELECT * FROM users WHERE id = ?", (x_user_id,)).fetchone()
-            if not user or not user["is_active"]:
-                raise HTTPException(status_code=401, detail="User is inactive, expired, or revoked.")
-            if user["company_id"] != x_company_id:
-                raise HTTPException(status_code=403, detail="Cross-company header mismatch.")
-        return {"user_id": x_user_id, "company_id": x_company_id}
+        authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    ) -> AuthenticatedUser:
+        """Resolve the caller's identity from a verified server-side credential.
+
+        Company and role are read from the ``users`` row that owns the token.
+        No client-supplied identity header participates in this decision.
+        """
+        try:
+            return app.state.auth_manager.authenticate(authorization)
+        except AuthError as exc:
+            logger.log(
+                "WARNING",
+                "AUTH_REQUEST_REJECTED",
+                str(uuid.uuid4()),
+                code=exc.code,
+                detail=exc.detail,
+            )
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers={"WWW-Authenticate": 'Bearer realm="algerian-ai-erp"'},
+            ) from exc
 
     @app.get("/healthz")
     def healthz() -> Dict[str, Any]:
         return {"status": "ok", "service": "algerian-ai-erp"}
 
+    # Publish the bearer security scheme in the OpenAPI contract so the
+    # authentication boundary is machine-discoverable. Health stays public.
+    def _custom_openapi() -> Dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+            openapi_version="3.1.0",
+        )
+        schema.setdefault("components", {})["securitySchemes"] = {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "opaque session token",
+                "description": (
+                    "Opaque bearer session token issued by POST /api/v1/auth/token; "
+                    "send it as 'Authorization: Bearer <token>'. Self-asserted identity "
+                    "headers (X-User-Id, X-Company-Id) are not accepted."
+                ),
+            }
+        }
+        for path_item in schema.get("paths", {}).values():
+            for operation in path_item.values():
+                if isinstance(operation, dict) and operation.get("operationId") != "healthz_healthz_get":
+                    operation["security"] = [{"BearerAuth": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = _custom_openapi  # type: ignore[method-assign]
+
+    # ------------------------------------------------------------------
+    # Authentication boundary
+    # ------------------------------------------------------------------
+
+    @app.post("/api/v1/auth/token")
+    def api_issue_token(
+        body: LoginRequest,
+        x_forwarded_for: Optional[str] = Header(default=None, alias="X-Forwarded-For"),
+        user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
+    ) -> Dict[str, Any]:
+        """Exchange a username/password for an opaque bearer session token."""
+        corr_id = str(uuid.uuid4())
+        try:
+            result = app.state.auth_manager.issue_token(
+                body.username,
+                body.password,
+                issued_to_ip=x_forwarded_for,
+                user_agent=user_agent,
+            )
+        except AuthError as exc:
+            logger.log("WARNING", "AUTH_LOGIN_REJECTED", corr_id, code=exc.code, username=body.username)
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers={"WWW-Authenticate": 'Bearer realm="algerian-ai-erp"'},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.log("INFO", "AUTH_TOKEN_ISSUED", corr_id, username=result["user"]["username"])
+        return result
+
+    @app.get("/api/v1/auth/session")
+    def api_current_session(auth: AuthenticatedUser = Depends(_authenticate)) -> Dict[str, Any]:
+        """Return the server-resolved principal for the presented credential."""
+        return {
+            "user_id": auth.user_id,
+            "company_id": auth.company_id,
+            "branch_id": auth.branch_id,
+            "username": auth.username,
+            "role": auth.role,
+            "token_id": auth.token_id,
+            "token_prefix": auth.token_prefix,
+            "expires_at": auth.expires_at,
+        }
+
+    @app.post("/api/v1/auth/revoke")
+    def api_revoke_token(
+        body: RevokeRequest,
+        authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    ) -> Dict[str, Any]:
+        """Revoke the presented token (sign-out). Revocation is immediate."""
+        try:
+            token = parse_bearer_token(authorization)
+        except AuthError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers={"WWW-Authenticate": 'Bearer realm="algerian-ai-erp"'},
+            ) from exc
+        revoked = app.state.auth_manager.revoke_token(token, reason=body.reason)
+        if not revoked:
+            raise HTTPException(status_code=401, detail="Authentication credential is invalid or already revoked.")
+        logger.log("INFO", "AUTH_TOKEN_REVOKED", str(uuid.uuid4()), reason=body.reason)
+        return {"revoked": True, "reason": body.reason}
+
+    # ------------------------------------------------------------------
+    # Protected resources
+    # ------------------------------------------------------------------
+
     @app.post("/api/v1/documents/upload")
     async def api_upload_document(
         file: UploadFile = File(...),
         force_image_ocr: bool = Form(default=False),
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         corr_id = str(uuid.uuid4())
         content = await file.read()
@@ -97,8 +255,8 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
             res = upload_and_process_supplier_document(
                 db=db,
                 vault=vault,
-                company_id=auth["company_id"],
-                user_id=auth["user_id"],
+                company_id=auth.company_id,
+                user_id=auth.user_id,
                 filename=file.filename or "upload.bin",
                 mime_type=file.content_type or "application/octet-stream",
                 content=content,
@@ -114,13 +272,13 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     @app.get("/api/v1/documents/{document_id}/file")
     def api_get_document_file(
         document_id: str,
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
             raw = read_source_document_file_secure(
                 db=db,
                 vault=vault,
-                requesting_user_id=auth["user_id"],
+                requesting_user_id=auth.user_id,
                 document_id=document_id,
             )
             return {"document_id": document_id, "byte_size": len(raw)}
@@ -135,13 +293,13 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     def api_edit_extracted_field(
         document_id: str,
         body: FieldEditInput,
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
             return update_extracted_field_by_human(
                 db=db,
-                company_id=auth["company_id"],
-                user_id=auth["user_id"],
+                company_id=auth.company_id,
+                user_id=auth.user_id,
                 document_id=document_id,
                 field_name=body.field_name,
                 new_value=body.new_value,
@@ -152,13 +310,13 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     @app.post("/api/v1/invoices")
     def api_create_invoice(
         body: CreateInvoiceRequest,
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
             return create_and_validate_supplier_invoice(
                 db=db,
-                company_id=auth["company_id"],
-                user_id=auth["user_id"],
+                company_id=auth.company_id,
+                user_id=auth.user_id,
                 supplier_id=body.supplier_id,
                 supplier_invoice_no=body.supplier_invoice_no,
                 invoice_date=body.invoice_date,
@@ -180,12 +338,12 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     @app.get("/api/v1/invoices/{invoice_id}")
     def api_get_invoice(
         invoice_id: int,
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
             return read_supplier_invoice_secure(
                 db=db,
-                requesting_user_id=auth["user_id"],
+                requesting_user_id=auth.user_id,
                 invoice_id=invoice_id,
             )
         except (AuthorizationError, TenantIsolationError) as exc:
@@ -196,13 +354,13 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     @app.post("/api/v1/invoices/{invoice_id}/submit-approval")
     def api_submit_approval(
         invoice_id: int,
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
             return submit_invoice_for_approval(
                 db=db,
-                company_id=auth["company_id"],
-                user_id=auth["user_id"],
+                company_id=auth.company_id,
+                user_id=auth.user_id,
                 invoice_id=invoice_id,
             )
         except (AuthorizationError, TenantIsolationError) as exc:
@@ -214,13 +372,13 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     def api_decide_approval(
         invoice_id: int,
         body: ApprovalDecisionInput,
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
             return decide_invoice_approval(
                 db=db,
-                company_id=auth["company_id"],
-                approver_user_id=auth["user_id"],
+                company_id=auth.company_id,
+                approver_user_id=auth.user_id,
                 invoice_id=invoice_id,
                 approve=body.approve,
                 reason=body.reason,
@@ -234,15 +392,15 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
     def api_post_invoice(
         invoice_id: int,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         if not idempotency_key:
             raise HTTPException(status_code=400, detail="Missing mandatory Idempotency-Key header.")
         try:
             return post_supplier_invoice(
                 db=db,
-                company_id=auth["company_id"],
-                accountant_user_id=auth["user_id"],
+                company_id=auth.company_id,
+                accountant_user_id=auth.user_id,
                 invoice_id=invoice_id,
                 idempotency_key=idempotency_key,
             )
@@ -256,15 +414,15 @@ def create_erp_fastapi_app(db: ERPDatabase, vault: PrivateDocumentVault) -> Fast
         invoice_id: int,
         body: ReversalInput,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-        auth: Dict[str, int] = Depends(_authenticate),
+        auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         if not idempotency_key:
             raise HTTPException(status_code=400, detail="Missing mandatory Idempotency-Key header.")
         try:
             return reverse_posted_invoice(
                 db=db,
-                company_id=auth["company_id"],
-                accountant_user_id=auth["user_id"],
+                company_id=auth.company_id,
+                accountant_user_id=auth.user_id,
                 original_invoice_id=invoice_id,
                 reason=body.reason,
                 idempotency_key=idempotency_key,

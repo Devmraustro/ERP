@@ -59,8 +59,33 @@ CREATE TABLE IF NOT EXISTS users (
                         'treasury', 'auditor', 'admin', 'ocr_worker'
                     )),
     is_active       INTEGER NOT NULL DEFAULT 1,
-    api_token_hash  TEXT
+    api_token_hash  TEXT,
+    password_hash   TEXT,
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until    TEXT,
+    password_updated_at TEXT
 );
+
+-- Server-issued, revocable, expiring bearer session tokens (see dz_erp/auth.py).
+-- Only the SHA-256 digest of a token is persisted; the plaintext is shown once
+-- at issuance time and is never recoverable from the database.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash      TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    token_prefix    TEXT NOT NULL,
+    issued_at       TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    revoked_at      TEXT,
+    revocation_reason TEXT,
+    last_used_at    TEXT,
+    issued_to_ip    TEXT,
+    user_agent      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_hash ON auth_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_expiry ON auth_tokens(expires_at);
 
 CREATE TABLE IF NOT EXISTS accounts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -513,6 +538,27 @@ class ERPDatabase:
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(SCHEMA_SQL)
+        self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Idempotently upgrade pre-existing databases to the authenticated schema.
+
+        `CREATE TABLE IF NOT EXISTS` cannot add columns to a table that already
+        exists, so databases created before authentication was introduced are
+        brought forward here. Safe to run on every startup.
+        """
+        user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if user_cols and "password_hash" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if user_cols and "failed_login_count" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0")
+        if user_cols and "locked_until" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN locked_until TEXT")
+        if user_cols and "password_updated_at" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN password_updated_at TEXT")
+        # Legacy column retained for schema compatibility; superseded by auth_tokens.
+        if user_cols and "api_token_hash" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN api_token_hash TEXT")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

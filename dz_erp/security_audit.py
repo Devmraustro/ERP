@@ -78,47 +78,60 @@ def read_supplier_invoice_secure(
     requesting_user_id: int,
     invoice_id: int,
 ) -> Dict[str, Any]:
-    """Read a supplier invoice enforcing authentication, RBAC, and strict company isolation."""
+    """Read a supplier invoice enforcing authentication, RBAC, and strict company isolation.
+
+    Denials are recorded in the append-only audit log *before* the error is
+    raised. Raising from inside the transaction would roll the audit event back
+    with it, leaving a blocked cross-tenant or unauthorized-role read with no
+    forensic trace, so the denial is raised only after the transaction commits.
+    """
+    denial: Optional[Exception] = None
+    result: Optional[Dict[str, Any]] = None
+
     with db.transaction() as conn:
         user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
         if not user or not user["is_active"]:
-            raise AuthorizationError("Authentication failed: user is inactive or revoked.")
+            denial = AuthorizationError("Authentication failed: user is inactive or revoked.")
+        else:
+            inv = conn.execute("SELECT * FROM supplier_invoices WHERE id = ?", (invoice_id,)).fetchone()
+            if not inv:
+                denial = ValueError(f"Invoice {invoice_id} does not exist.")
+            elif inv["company_id"] != user["company_id"]:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=inv["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="SECURITY_CROSS_COMPANY_READ_BLOCKED",
+                    target_model="supplier_invoices",
+                    target_id=str(invoice_id),
+                    after_state={"attacker_company_id": user["company_id"], "target_company_id": inv["company_id"]},
+                )
+                denial = TenantIsolationError("Cross-company read access denied.")
+            elif user["role"] == "warehouse":
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=inv["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="SECURITY_UNAUTHORIZED_ROLE_READ_BLOCKED",
+                    target_model="supplier_invoices",
+                    target_id=str(invoice_id),
+                    after_state={"role": user["role"]},
+                )
+                denial = AuthorizationError("Warehouse role is not permitted to read financial invoices.")
+            else:
+                lines = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)
+                    ).fetchall()
+                ]
+                result = dict(inv)
+                result["lines"] = lines
 
-        inv = conn.execute("SELECT * FROM supplier_invoices WHERE id = ?", (invoice_id,)).fetchone()
-        if not inv:
-            raise ValueError(f"Invoice {invoice_id} does not exist.")
-
-        if inv["company_id"] != user["company_id"]:
-            db.append_audit_event(
-                conn=conn,
-                company_id=inv["company_id"],
-                actor_user_id=requesting_user_id,
-                action_type="SECURITY_CROSS_COMPANY_READ_BLOCKED",
-                target_model="supplier_invoices",
-                target_id=str(invoice_id),
-                after_state={"attacker_company_id": user["company_id"], "target_company_id": inv["company_id"]},
-            )
-            raise TenantIsolationError("Cross-company read access denied.")
-
-        if user["role"] == "warehouse":
-            db.append_audit_event(
-                conn=conn,
-                company_id=inv["company_id"],
-                actor_user_id=requesting_user_id,
-                action_type="SECURITY_UNAUTHORIZED_ROLE_READ_BLOCKED",
-                target_model="supplier_invoices",
-                target_id=str(invoice_id),
-                after_state={"role": user["role"]},
-            )
-            raise AuthorizationError("Warehouse role is not permitted to read financial invoices.")
-
-        lines = [
-            dict(r)
-            for r in conn.execute("SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)).fetchall()
-        ]
-        res = dict(inv)
-        res["lines"] = lines
-        return res
+    if denial is not None:
+        raise denial
+    assert result is not None
+    return result
 
 
 def read_source_document_file_secure(
@@ -127,43 +140,53 @@ def read_source_document_file_secure(
     requesting_user_id: int,
     document_id: str,
 ) -> bytes:
-    """Read raw decrypted source document bytes with company-isolation and audit logging."""
+    """Read raw decrypted source document bytes with company-isolation and audit logging.
+
+    As with :func:`read_supplier_invoice_secure`, denials are audited and
+    committed before the error is raised so the blocked attempt survives.
+    """
+    denial: Optional[Exception] = None
+    raw_bytes: Optional[bytes] = None
+
     with db.transaction() as conn:
         user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
         if not user or not user["is_active"]:
-            raise AuthorizationError("User is inactive or revoked.")
+            denial = AuthorizationError("User is inactive or revoked.")
+        else:
+            doc = conn.execute("SELECT * FROM source_documents WHERE id = ?", (document_id,)).fetchone()
+            if not doc:
+                denial = ValueError("Source document not found.")
+            elif doc["company_id"] != user["company_id"]:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=doc["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="SECURITY_CROSS_COMPANY_FILE_ACCESS_BLOCKED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={"attacker_company_id": user["company_id"], "target_company_id": doc["company_id"]},
+                )
+                denial = TenantIsolationError("Cross-company file access denied.")
+            else:
+                raw_bytes = vault.read_bytes(
+                    company_id=doc["company_id"],
+                    requesting_company_id=user["company_id"],
+                    vault_path=doc["vault_path"],
+                )
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=doc["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="DOCUMENT_FILE_ACCESSED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={"byte_size": len(raw_bytes)},
+                )
 
-        doc = conn.execute("SELECT * FROM source_documents WHERE id = ?", (document_id,)).fetchone()
-        if not doc:
-            raise ValueError("Source document not found.")
-
-        if doc["company_id"] != user["company_id"]:
-            db.append_audit_event(
-                conn=conn,
-                company_id=doc["company_id"],
-                actor_user_id=requesting_user_id,
-                action_type="SECURITY_CROSS_COMPANY_FILE_ACCESS_BLOCKED",
-                target_model="source_documents",
-                target_id=document_id,
-                after_state={"attacker_company_id": user["company_id"], "target_company_id": doc["company_id"]},
-            )
-            raise TenantIsolationError("Cross-company file access denied.")
-
-        raw_bytes = vault.read_bytes(
-            company_id=doc["company_id"],
-            requesting_company_id=user["company_id"],
-            vault_path=doc["vault_path"],
-        )
-        db.append_audit_event(
-            conn=conn,
-            company_id=doc["company_id"],
-            actor_user_id=requesting_user_id,
-            action_type="DOCUMENT_FILE_ACCESSED",
-            target_model="source_documents",
-            target_id=document_id,
-            after_state={"byte_size": len(raw_bytes)},
-        )
-        return raw_bytes
+    if denial is not None:
+        raise denial
+    assert raw_bytes is not None
+    return raw_bytes
 
 
 def create_encrypted_backup(

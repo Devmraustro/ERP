@@ -35,14 +35,14 @@ def compute_invoice_payload_hash(
         "amount_ttc_dzd": format_dzd(amount_ttc_dzd),
         "lines": [
             {
-                "product_id": l.get("product_id"),
-                "po_line_id": l.get("po_line_id"),
-                "qty": f"{round_qty(l['qty']):.6f}",
-                "unit_price_dzd": f"{round_qty(l['unit_price_dzd']):.6f}",
-                "tax_rate": f"{to_decimal(l.get('tax_rate', '19.0')):.1f}",
-                "line_ht_dzd": format_dzd(l["line_ht_dzd"]),
+                "product_id": line.get("product_id"),
+                "po_line_id": line.get("po_line_id"),
+                "qty": f"{round_qty(line['qty']):.6f}",
+                "unit_price_dzd": f"{round_qty(line['unit_price_dzd']):.6f}",
+                "tax_rate": f"{to_decimal(line.get('tax_rate', '19.0')):.1f}",
+                "line_ht_dzd": format_dzd(line["line_ht_dzd"]),
             }
-            for l in lines
+            for line in lines
         ],
     }
     raw = json.dumps(canonical, sort_keys=True).encode("utf-8")
@@ -92,16 +92,16 @@ def create_purchase_order(
         )
         po_id = int(cur.lastrowid)
         po_line_ids: List[int] = []
-        for l in lines:
+        for line in lines:
             prod = conn.execute(
                 "SELECT * FROM products WHERE id = ? AND company_id = ?",
-                (l["product_id"], company_id),
+                (line["product_id"], company_id),
             ).fetchone()
             if not prod:
                 raise TenantIsolationError("Product does not belong to target company.")
-            qty = round_qty(l["qty_ordered"])
-            price = round_qty(l["unit_price_dzd"])
-            tax_rate = to_decimal(l.get("tax_rate", "19.0"))
+            qty = round_qty(line["qty_ordered"])
+            price = round_qty(line["unit_price_dzd"])
+            tax_rate = to_decimal(line.get("tax_rate", "19.0"))
             lcur = conn.execute(
                 """
                 INSERT INTO purchase_order_lines (
@@ -109,7 +109,7 @@ def create_purchase_order(
                     qty_ordered, qty_received, qty_invoiced, unit_price_dzd, tax_rate
                 ) VALUES (?, ?, ?, ?, ?, '0.000000', '0.000000', ?, ?)
                 """,
-                (company_id, po_id, prod["id"], l.get("description", prod["name"]), f"{qty:.6f}", f"{price:.6f}", f"{tax_rate:.1f}"),
+                (company_id, po_id, prod["id"], line.get("description", prod["name"]), f"{qty:.6f}", f"{price:.6f}", f"{tax_rate:.1f}"),
             )
             po_line_ids.append(int(lcur.lastrowid))
 
@@ -474,16 +474,16 @@ def create_and_validate_supplier_invoice(
         sum_line_tva = Decimal("0.00")
         prepared_lines: List[Dict[str, Any]] = []
 
-        for idx, l in enumerate(lines):
-            qty = round_qty(l["qty"])
-            pu = round_qty(l["unit_price_dzd"])
-            disc = to_decimal(l.get("discount_pct", "0.00"))
-            rate = to_decimal(l.get("tax_rate", "19.0"))
+        for idx, line in enumerate(lines):
+            qty = round_qty(line["qty"])
+            pu = round_qty(line["unit_price_dzd"])
+            disc = to_decimal(line.get("discount_pct", "0.00"))
+            rate = to_decimal(line.get("tax_rate", "19.0"))
             if rate not in (Decimal("0.0"), Decimal("9.0"), Decimal("19.0")):
                 validation_errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
 
             expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
-            declared_line_ht = round_dzd(l.get("line_ht_dzd", expected_line_ht))
+            declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
             if declared_line_ht != expected_line_ht:
                 validation_errors.append(
                     f"LINE_{idx + 1}_HT_MATH_MISMATCH:declared={declared_line_ht:.2f}!=expected={expected_line_ht:.2f}"
@@ -494,7 +494,7 @@ def create_and_validate_supplier_invoice(
             sum_line_ht = round_dzd(sum_line_ht + declared_line_ht)
             sum_line_tva = round_dzd(sum_line_tva + line_tva)
 
-            po_line_id = l.get("po_line_id")
+            po_line_id = line.get("po_line_id")
             if po_line_id is not None:
                 po_line = conn.execute(
                     "SELECT * FROM purchase_order_lines WHERE id = ? AND company_id = ?",
@@ -519,8 +519,8 @@ def create_and_validate_supplier_invoice(
             prepared_lines.append(
                 {
                     "po_line_id": po_line_id,
-                    "product_id": l.get("product_id"),
-                    "description": l.get("description", f"Line {idx + 1}"),
+                    "product_id": line.get("product_id"),
+                    "description": line.get("description", f"Line {idx + 1}"),
                     "qty": f"{qty:.6f}",
                     "unit_price_dzd": f"{pu:.6f}",
                     "discount_pct": format_dzd(disc),
@@ -935,21 +935,21 @@ def post_supplier_invoice(
         je_lines: List[Dict[str, Any]] = []
 
         # Re-verify 3-way match at posting time under transaction lock and update qty_invoiced
-        for l in lines:
-            qty = round_qty(l["qty"])
-            line_ht = round_dzd(l["line_ht_dzd"])
+        for line in lines:
+            qty = round_qty(line["qty"])
+            line_ht = round_dzd(line["line_ht_dzd"])
             debit_acct = "600"
-            if l["product_id"]:
-                prod = conn.execute("SELECT * FROM products WHERE id = ?", (l["product_id"],)).fetchone()
+            if line["product_id"]:
+                prod = conn.execute("SELECT * FROM products WHERE id = ?", (line["product_id"],)).fetchone()
                 if prod and prod["is_storable"]:
                     debit_acct = prod["clearing_account_code"]  # 380 Achats stockés clearing account
                 elif prod:
                     debit_acct = prod["expense_account_code"]
 
-            if l["po_line_id"]:
+            if line["po_line_id"]:
                 po_line = conn.execute(
                     "SELECT * FROM purchase_order_lines WHERE id = ? AND company_id = ?",
-                    (l["po_line_id"], company_id),
+                    (line["po_line_id"], company_id),
                 ).fetchone()
                 if not po_line:
                     raise FinancialIntegrityError("Linked PO line missing.")
@@ -966,7 +966,7 @@ def post_supplier_invoice(
             je_lines.append(
                 {
                     "account_code": debit_acct,
-                    "label": f"Bill {inv['supplier_invoice_no']} - {l['description']}",
+                    "label": f"Bill {inv['supplier_invoice_no']} - {line['description']}",
                     "debit_dzd": format_dzd(line_ht),
                     "credit_dzd": "0.00",
                     "g50_tag": "E3B91_base",
@@ -1248,11 +1248,11 @@ def reverse_posted_invoice(
             "SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?",
             (original_invoice_id,),
         ).fetchall()
-        for l in orig_lines:
-            if l["po_line_id"]:
-                pol = conn.execute("SELECT * FROM purchase_order_lines WHERE id = ?", (l["po_line_id"],)).fetchone()
+        for line in orig_lines:
+            if line["po_line_id"]:
+                pol = conn.execute("SELECT * FROM purchase_order_lines WHERE id = ?", (line["po_line_id"],)).fetchone()
                 if pol:
-                    updated_inv_qty = max(Decimal("0.000000"), round_qty(to_decimal(pol["qty_invoiced"]) - to_decimal(l["qty"])))
+                    updated_inv_qty = max(Decimal("0.000000"), round_qty(to_decimal(pol["qty_invoiced"]) - to_decimal(line["qty"])))
                     conn.execute(
                         "UPDATE purchase_order_lines SET qty_invoiced = ? WHERE id = ?",
                         (f"{updated_inv_qty:.6f}", pol["id"]),

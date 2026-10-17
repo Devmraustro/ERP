@@ -4,8 +4,8 @@
 from decimal import Decimal
 import pytest
 
-from dz_erp.database import ERPDatabase, FinancialIntegrityError, TenantIsolationError
-from dz_erp.decimal_utils import FloatMonetaryError, format_dzd, round_dzd, to_decimal
+from dz_erp.database import ERPDatabase, TenantIsolationError
+from dz_erp.decimal_utils import FloatMonetaryError, to_decimal
 from dz_erp.localization import (
     ACCOUNT_TYPE_FIXES,
     GROUP_TRANSLATION_FIXES,
@@ -22,7 +22,7 @@ from dz_erp.odoo_test_adapter import install_odoo_shim_and_load_modules
 
 # Install Odoo 18 shim so upstream azinak/l10n-dz-account-fix unittest classes run under pytest
 install_odoo_shim_and_load_modules()
-from l10n_dz_account_fix.tests.test_template_dz import (  # noqa: E402
+from l10n_dz_account_fix.tests.test_template_dz import (  # noqa: F401
     TestAlgerianChartTemplateFixes,
     TestAlgerianChartTemplateIntegration,
 )

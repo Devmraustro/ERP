@@ -18,16 +18,69 @@
 | Component / Package | Pinned Version / Commit SHA | Verified License | Commercial Compatibility | Role in Architecture |
 | :--- | :--- | :--- | :--- | :--- |
 | `rapidocr-onnxruntime` | `1.4.4` (bundles `PP-OCRv4` ONNX detection/classification/recognition models) | `Apache-2.0` | **Compatible** | Primary CPU-based raster image OCR engine in `dz_erp/intake_ocr.py` |
-| `onnxruntime` | `1.21.0` | `MIT` | **Compatible** | Deterministic CPU inference runtime for `PP-OCRv4` ONNX models |
-| `opencv-python-headless` | `4.11.0.86` | `Apache-2.0` | **Compatible** | Headless image preprocessing (replaces `opencv-python` to avoid `libGL.so.1` dependency) |
+| `onnxruntime` | `1.31.0` | `MIT` | **Compatible** | Deterministic CPU inference runtime for `PP-OCRv4` ONNX models |
+| `opencv-python-headless` | `4.11.0.86` | `Apache-2.0` | **Compatible** | Headless image preprocessing. **Deliberately substituted** for the GUI `opencv-python` wheel that `rapidocr-onnxruntime` declares — see §2.1 |
 | `pdfplumber` / `pdfminer.six` | `0.11.6` / `20250327` | `MIT` | **Compatible** | Primary digital-born PDF text & bounding-box extractor (French + Arabic) |
-| `pypdfium2` | `4.30.1` | `Apache-2.0` / `BSD-3-Clause` | **Compatible** | High-speed PDF-to-raster renderer (`200 DPI`) for scanned PDFs |
+| `pypdfium2` | `5.14.0` | `Apache-2.0` / `BSD-3-Clause` | **Compatible** | High-speed PDF-to-raster renderer (`200 DPI`) for scanned PDFs |
 | `pypdf` | `5.4.0` | `BSD-3-Clause` | **Compatible** | PDF structure validation |
 | `reportlab` & `pillow` | `4.3.1` & `11.1.0` | `BSD-3-Clause` & `MIT-CMU` | **Compatible** | Synthetic Algerian invoice benchmark rendering |
 | `PaddlePaddle/PaddleOCR` | `v3.7.0` (`b03f46425e8ff4442b268ce449e3eef758146cd4`) | `Apache-2.0` | **Compatible** | Upstream source of `PP-OCRv4` models; recommended `arabic_PP-OCRv4_rec` head for scanned Arabic |
 | `docling-project/docling` | `v2.140.0` (`27a278042c72ac27dcbe83750ee1ad4d908dc18e`) | `MIT` | **Compatible** | Optional layout/table parser for complex multi-page invoices |
 | `QwenLM/Qwen3-VL` | `99f0fb6fd3ec6abbaa3fd8ccbfdddcbe0d3a55f5` | `Apache-2.0` | **Compatible** | Optional VLM fallback for unstructured documents (strictly untrusted staging output) |
 | `datalab-to/surya` | `f6eb7ffd4d96fb81e062fb7fc0983b1c36f30627` | Code: `GPL-3.0`; Weights: **AI Pubs Open Rail-M** (free only under `$2M` revenue) | **Incompatible** | **Rejected (`Verified`)** |
+
+### 2.1 OpenCV build substitution — `opencv-python-headless` for `opencv-python`
+
+`rapidocr-onnxruntime==1.4.4` declares `opencv-python>=4.5.1.48`, which resolves
+to the **GUI** wheel. That wheel bundles the Qt5/xcb GUI stack and links
+`libGL.so.1`, which is not present in a minimal Linux container, so `import cv2`
+fails with `ImportError: libGL.so.1: cannot open shared object file`.
+
+Evidence that the GUI stack is unnecessary for this project:
+
+- `nm -D --undefined-only cv2.abi3.so` shows the extension module references
+  **zero** `gl*` symbols. The `libGL.so.1` requirement comes entirely from the
+  bundled Qt5 GUI libraries, not from `cv2` itself.
+- `dz_erp/intake_ocr.py` uses only the core `cv2` API (`imread`, `resize`,
+  `cvtColor`, `threshold`, …) and never any GUI / `highgui` function.
+
+**Resolution.** `opencv-python-headless==4.11.0.86` provides the identical
+`cv2` module and identical `numpy` ABI requirements with no OpenGL or Qt
+dependency. It is the declared dependency in `pyproject.toml`, and the GUI
+`opencv-python` wheel is **excluded** from `requirements.lock.txt`. Because that
+lockfile enumerates the complete transitive closure, it is installed with
+`--no-deps` — which is both standard lockfile practice and the mechanism that
+makes the substitution order-independent.
+
+> Install-order was explicitly tested and **rejected** as a solution: two
+> independent clean installs, one with `opencv-python-headless` first and one
+> with it last in the requirements file, both ended with the GUI build owning
+> `site-packages/cv2/`. pip does not preserve requirements-file order for these
+> two packages.
+
+**Known, documented deviation.** With this lockfile, `pip check` reports exactly
+one line:
+
+```
+rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.
+```
+
+This is an intentional substitution of an upstream-only declaration. It is
+neither concealed nor worked around with a blanket `--no-deps` on
+`rapidocr-onnxruntime`. Instead the graph is validated explicitly and more
+strictly than `pip check` by `tools/verify_dependency_graph.py`, which fails on
+*any* unsatisfied requirement other than this single allow-listed substitution,
+asserts that the installed `cv2` really is the headless build (the GUI payload
+directory `opencv_python.libs/` must be absent), and asserts that both `cv2` and
+`RapidOCR` import successfully.
+
+**System library requirements.**
+
+| Class | Requirement |
+| :--- | :--- |
+| Mandatory runtime | **None.** Every pinned runtime dependency is a pure-Python or wheel package. |
+| Optional (GUI OpenCV build only) | `libgl1`, `libglib2.0-0` — only needed if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging. |
+| Source for `libGL` | No PyPI package provides it (`https://pypi.org/pypi/libgl1/json` returns `404`); a system package manager is the only source. |
 
 ---
 
@@ -42,3 +95,5 @@ All Python packages installed in `/tmp/erp-venv` are pinned to exact versions in
 - `python-multipart==0.0.20` (`Apache-2.0`)
 - `cryptography==44.0.2` (`Apache-2.0` / `BSD-3-Clause`) — used for `Fernet` (`AES-128-CBC` + `HMAC-SHA256`) encryption at rest in `PrivateDocumentVault` and encrypted database backups
 - `pytest==8.3.5` & `pytest-cov==6.0.0` (`MIT`)
+- `pytest-asyncio==1.3.0` (`Apache-2.0`) — coroutine test support for the bounded-upload reader
+- `ruff==0.14.0` (`MIT`) — static check used by CI

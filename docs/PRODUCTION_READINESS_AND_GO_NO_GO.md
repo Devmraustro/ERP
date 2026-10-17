@@ -1,4 +1,4 @@
-# Production-Readiness Assessment and Go/No-Go Decision (Phase 6)
+# Production-Readiness Assessment and Go/No-Go Decision (Phase 8)
 
 ## 1. Executive Go / No-Go Verdict
 
@@ -28,6 +28,8 @@ We strictly distinguish between `Verified`, `Passed`, `Implemented, not verified
 | **Phase 5** | Trigger-protected append-only `audit_events` + `HMAC-SHA256` hash-chain verification + PII/secret log redaction + encrypted backup & isolated restore | `Passed` | `dz_erp/database.py`, `dz_erp/security_audit.py`, `test_audit_immutability_log_redaction_and_encrypted_backup_restore` |
 | **Phase 5** | Formal legal sign-off / ANPDP filing under Algerian Law `18-07` | `Blocked` (External Legal Sign-Off Required) | Documented in `docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md` |
 | **Phase 6** | Empirical 18-document Algerian invoice OCR benchmark across 6 strata + 14-step E2E acceptance test | `Passed` | `benchmarks/results/ground_truth_and_results.json`, `tests/test_phase6_ocr_benchmark_e2e.py` |
+| **Phase 7** | Server-verified bearer-token authentication (opaque `dzsess_` tokens, SHA-256 digest only, per-token revocation, PBKDF2-SHA256 600k iterations, lockout); identity and tenant resolved from the credential, never from a request header | `Passed` | `dz_erp/auth.py`, `dz_erp/api.py`, `tests/test_phase7_authentication_remediation.py` (`57 / 57` passed) |
+| **Phase 8** | Bounded upload boundary (10 MiB default, enforced while streaming; type allowlist cross-checked against actual magic bytes); fail-closed forwarded-header trust; reproducible headless-OpenCV dependency resolution; GitHub Actions CI | `Passed` | `dz_erp/upload.py`, `dz_erp/net.py`, `tests/test_phase8_upload_boundary_and_ci.py` (`127 / 127` passed), `tools/verify_dependency_graph.py`, `.github/workflows/ci.yml` |
 
 ---
 
@@ -47,3 +49,92 @@ The architecture preserves complete deployment flexibility:
 1. **Scanned Pure-Arabic Invoices (`arabic_PP-OCRv4_rec`):** Digital-born Arabic PDFs extract at `100%` accuracy via `pdfplumber`, while scanned images use `RapidOCR`'s bundled `PP-OCRv4` model (`90.97%` overall field accuracy, `100%` on monetary totals and NIF). Before onboarding suppliers whose invoices are scanned pure-Arabic images without French/Latin headers, provision the `arabic_PP-OCRv4_rec` ONNX recognition model alongside the detector.
 2. **Professional Accounting Sign-Off (`ONEC`):** Before using the G50 preparation workbook (`generate_g50_preparation_workbook`) for official DGI *Série G n°50* tax filings, obtain formal written sign-off from the customer's licensed Algerian *Expert-Comptable* or *Commissaire aux Comptes*.
 3. **Legal Data-Protection Sign-Off (Law `18-07`):** Before processing production employee NINs or personal data, complete the required ANPDP (*Autorité Nationale de Protection des Données à Caractère Personnel*) declaration with Algerian legal counsel.
+
+---
+
+## 5. Phase 8 — Upload Boundary, Proxy-Header Trust, Dependency Resolution & CI (`Verified`)
+
+### 5.1 Upload boundary (`dz_erp/upload.py`)
+
+The intake endpoint previously performed an unbounded `await file.read()`, so a
+single request could pull an arbitrarily large body into memory before any size
+rule was applied. It now enforces, in order:
+
+1. **Type allowlist** — filename extension *and* declared MIME must both be
+   allowed *and* agree with each other. Path separators, traversal, NUL bytes
+   and over-long names are rejected. Neither the filename nor the Content-Type
+   is trusted on its own.
+2. **Bounded incremental read** — the body is read in 64 KiB chunks and the
+   limit (10 MiB by default, overridable with `ERP_MAX_UPLOAD_BYTES`) is checked
+   on every chunk. An oversized body is abandoned after at most one chunk beyond
+   the limit and is never fully materialised. A malformed, zero or negative
+   `ERP_MAX_UPLOAD_BYTES` is ignored so a typo cannot disable the limit.
+3. **Content signature check** — the actual magic bytes must match the declared
+   type, independent of the label.
+4. **Guaranteed release** — a `finally` block always closes the upload, which is
+   what removes Starlette's `SpooledTemporaryFile` spill file.
+
+Rejections map to `413` (too large), `415` (disallowed type) and `400`
+(inconsistent metadata), and are written to the structured redacting log. The
+existing quarantine (`EICAR`, active PDF content), encrypted vault storage, and
+human-review controls are unchanged and separately tested.
+
+Proxy-level limits (`client_max_body_size` in nginx, and similar) remain a useful
+*complement* but are never a replacement: they are configuration that can be
+absent, misconfigured, or bypassed by an internal caller.
+
+### 5.2 Forwarded-header trust (`dz_erp/net.py`)
+
+`X-Forwarded-For` was previously recorded verbatim in `auth_tokens.issued_to_ip`,
+letting any caller choose the IP address that would later appear in audit and
+forensic records. The policy is now **fail-closed**:
+
+- with no trusted proxies configured (the default), the header is **ignored** and
+  the direct peer address is used;
+- it is honoured only when the peer address falls inside an explicitly
+  configured trusted-proxy CIDR (`ERP_TRUSTED_PROXIES`, comma/space separated);
+- even then, the **right-most untrusted** entry wins, so a caller cannot win by
+  prepending a forged entry;
+- absent, empty, whitespace-only, duplicated-comma, port-bearing, IPv6-bracketed
+  and non-IP values are all handled without raising, and a missing peer address
+  resolves to `unknown` rather than an invented value.
+
+This introduces no rate-limit, audit, or access-control bypass: the forwarded
+header is used **only** to record `issued_to_ip`. It is never consulted for
+authorisation — `user_id`, `company_id` and `role` are always derived
+server-side from the bearer credential.
+
+**Future configuration.** If this deployment is placed behind a known reverse
+proxy or load balancer, set `ERP_TRUSTED_PROXIES` to that infrastructure's CIDR
+range. Until then the secure default is to trust nothing.
+
+### 5.3 Reproducible dependency resolution
+
+See `docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §2.1 for the full root-cause
+analysis and evidence. In short: the GUI `opencv-python` wheel that
+`rapidocr-onnxruntime` declares bundles Qt5 and links `libGL.so.1`, which is
+absent from minimal Linux containers. `cv2.abi3.so` itself references zero `gl*`
+symbols, so the GUI stack is dead weight here. The project therefore declares
+and installs `opencv-python-headless==4.11.0.86`, excludes the GUI wheel from the
+lockfile, and installs the complete transitive closure with `--no-deps`, which is
+order-independent. `tools/verify_dependency_graph.py` validates the resulting
+graph explicitly and more strictly than `pip check`.
+
+### 5.4 Continuous integration (`.github/workflows/ci.yml`)
+
+The workflow runs on pull requests and on pushes to the working branch, on
+Python `3.11` and `3.12` (the range supported by `requires-python = ">=3.11"`
+together with `rapidocr-onnxruntime`'s `<3.13`). It installs the declared
+dependency set from `requirements.lock.txt`, validates the dependency graph
+explicitly, asserts `cv2` and `RapidOCR` import, runs the static check, runs the
+complete test suite with coverage, and publishes JUnit and coverage artifacts.
+
+It requires no production credentials, no customer data, and no external
+financial service, and it performs no deployment and modifies no production
+resource. It installs **no** system graphics libraries, which deliberately proves
+the minimal, system-library-free configuration works.
+
+**CI status: UNVERIFIED at the time of writing.** The workflow file has been
+created and every step in it has been executed successfully in a clean local
+virtual environment, but no GitHub Actions run has yet confirmed it. Run IDs and
+statuses will be reported only once an actual workflow run exists.

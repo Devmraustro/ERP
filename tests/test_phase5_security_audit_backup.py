@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from dz_erp.api import create_erp_fastapi_app
-from dz_erp.auth import AuthManager, hash_password
+from dz_erp.auth import hash_password
 from dz_erp.benchmark import render_synthetic_invoice_pdf
 from dz_erp.database import (
     AuditTamperError,

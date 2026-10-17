@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from dz_erp.benchmark import render_synthetic_invoice_image, render_synthetic_invoice_pdf
-from dz_erp.database import ERPDatabase, FinancialIntegrityError, TenantIsolationError
+from dz_erp.database import ERPDatabase, FinancialIntegrityError
 from dz_erp.intake_ocr import (
     EICAR_SIGNATURE,
     PrivateDocumentVault,

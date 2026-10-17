@@ -14,8 +14,6 @@ Covers:
 """
 
 import base64
-import hashlib
-import os
 import re
 import sqlite3
 from datetime import timedelta
@@ -31,11 +29,8 @@ from dz_erp.api import create_erp_fastapi_app
 from dz_erp.auth import (
     AuthManager,
     AuthenticatedUser,
-    ExpiredCredentialError,
-    InvalidCredentialError,
     MalformedCredentialError,
     MissingCredentialError,
-    RevokedCredentialError,
     TOKEN_PREFIX,
     generate_session_token,
     hash_password,
@@ -49,8 +44,6 @@ from dz_erp.intake_ocr import PrivateDocumentVault, upload_and_process_supplier_
 from dz_erp.localization import load_official_odoo_chart
 from dz_erp.procurement_stock import (
     create_and_validate_supplier_invoice,
-    decide_invoice_approval,
-    submit_invoice_for_approval,
 )
 
 FAST_ITERATIONS = 1000  # keeps the suite quick; the production default is asserted separately
@@ -473,13 +466,14 @@ def test_tenant_isolation_enforced_across_all_protected_endpoints(env: SimpleNam
     assets = _seed_tenant_one_assets(env)
     client = env.client
 
+    doc_id = assets.document_id
     token_b = _token(client, "admin_b", "AdminB#2026x")
     # admin_b is a full administrator of company 2 and holds a valid credential.
     session = client.get("/api/v1/auth/session", headers=_bearer(token_b))
     assert session.status_code == 200
     assert session.json()["company_id"] == 2
 
-    doc_id, inv_id = assets.document_id, assets.invoice_id
+    inv_id = assets.invoice_id
 
     # Read paths
     assert client.get(f"/api/v1/invoices/{inv_id}", headers=_bearer(token_b)).status_code == 403
@@ -572,7 +566,7 @@ def test_tenant_isolation_rejects_foreign_supplier_reference(env: SimpleNamespac
 def test_rbac_enforced_across_all_protected_endpoints(env: SimpleNamespace) -> None:
     assets = _seed_tenant_one_assets(env)
     client = env.client
-    doc_id, inv_id = assets.document_id, assets.invoice_id
+    inv_id = assets.invoice_id
 
     # --- warehouse: may not read financial invoices ---
     wh = _token(client, "wh_a", "Wh#2026x")

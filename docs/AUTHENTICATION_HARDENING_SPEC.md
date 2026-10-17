@@ -1,4 +1,4 @@
-# Authentication Hardening & Impersonation Remediation Specification (Phase 7)
+# Authentication Hardening & Impersonation Remediation Specification (Phase 8)
 
 ## 1. Root Cause (`CWE-287: Improper Authentication`, `CWE-639: Insecure Direct Object Reference`)
 
@@ -193,3 +193,56 @@ durable rather than rolled back.
    rejections are logged through `StructuredRedactingLogger` rather than the
    per-tenant audit chain. Rate limiting at the reverse proxy is recommended to
    absorb credential-stuffing volume.
+
+---
+
+## 7. Phase 8 Additions — Upload Boundary and Forwarded-Header Trust
+
+Phase 7 removed the *identity* trust boundary. Phase 8 closes two adjacent
+boundaries that the same threat model covers.
+
+### 7.1 Upload boundary (`dz_erp/upload.py`)
+
+| Control | Behaviour |
+| :--- | :--- |
+| Size limit | 10 MiB default (`DEFAULT_MAX_UPLOAD_BYTES`), overridable with `ERP_MAX_UPLOAD_BYTES`. A malformed, zero or negative override is ignored so a typo can never disable the limit. |
+| Enforcement point | Enforced **while reading**, in 64 KiB chunks. The full body is never materialised for an oversized request, and reading stops at the limit. |
+| Declared `Content-Length` | Treated as an optimisation only. It is checked before reading, but the chunked loop is authoritative because the value is client-controlled. |
+| Type allowlist | Extension **and** declared MIME must both be allowed **and** agree. `application/pdf`, `image/png`, `image/jpeg` / `.pdf`, `.png`, `.jpg`, `.jpeg`. |
+| Content verification | Magic-byte sniffing must agree with the declared type. A renamed `MZ` executable, PNG bytes labelled `application/pdf`, and PDF bytes labelled `image/png` are all rejected. |
+| Filename hygiene | Path separators (POSIX **and** Windows), traversal, NUL bytes and names over 255 bytes are rejected — `../etc/passwd.pdf` has a legal `.pdf` extension but is still refused. |
+| Resource release | A `finally` block always closes the upload, removing Starlette's `SpooledTemporaryFile` spill file. Cleanup failures never mask the original error. |
+| Preserved controls | EICAR / active-PDF quarantine, `PrivateDocumentVault` Fernet encryption at rest, and human review are unchanged. |
+| HTTP mapping | `413` too large, `415` disallowed type, `400` inconsistent metadata, all logged through `StructuredRedactingLogger`. |
+| Ordering | Authentication runs **before** the size check, so an oversized body from an unauthenticated caller yields `401`, never `413`. The size check cannot be used to probe the authentication boundary. |
+| Discoverability | `GET /api/v1/upload-policy` publishes the enforced limit and allowlist publicly, so clients can size requests correctly. |
+
+Proxy-level limits (`client_max_body_size` in nginx, and similar) are a useful
+*complement* but never a replacement: they are configuration that can be absent,
+misconfigured, or bypassed by an internal caller.
+
+### 7.2 Forwarded-header trust (`dz_erp/net.py`)
+
+`X-Forwarded-For` was previously stored verbatim in `auth_tokens.issued_to_ip`,
+so any caller could choose the IP address that would later appear in audit and
+forensic records. The policy is fail-closed:
+
+| Scenario | Behaviour |
+| :--- | :--- |
+| No trusted proxies configured (**default**) | `X-Forwarded-For` is ignored; the direct peer address is used. |
+| Peer inside a configured trusted-proxy CIDR | The chain is honoured, and the **right-most untrusted** entry wins. |
+| Peer outside every trusted-proxy CIDR | The chain is discarded entirely; the direct peer address is used. |
+| Caller prepends a forged entry | Does not win: the right-most untrusted address (what the trusted proxy actually observed) is used. |
+| Absent / empty / whitespace / duplicate commas / ports / IPv6 brackets / non-IP | Parsed without raising; unparseable entries are skipped. |
+| No peer address at all | Resolves to `unknown`; no value is invented. |
+| Malformed CIDR in configuration | Dropped, so a configuration typo cannot fail open. |
+
+**Scope of the header.** The forwarded header is used **only** to populate
+`issued_to_ip`. It is never consulted for authorisation: `user_id`, `company_id`
+and `role` are always derived server-side from the bearer credential. It is
+therefore not a rate-limit, audit, or access-control bypass.
+
+**Future configuration.** If this deployment is placed behind a known reverse
+proxy or load balancer, set `ERP_TRUSTED_PROXIES` to that infrastructure's CIDR
+range (comma or space separated). Until then the secure default is to trust
+nothing, which is what the tests assert.

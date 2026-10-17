@@ -16,10 +16,9 @@ record bound to the presented credential.
 """
 
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
@@ -30,8 +29,9 @@ from .auth import (
     DEFAULT_TOKEN_TTL_SECONDS,
     parse_bearer_token,
 )
-from .database import AuthorizationError, AuditTamperError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
+from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
 from .intake_ocr import PrivateDocumentVault, update_extracted_field_by_human, upload_and_process_supplier_document
+from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
 from .procurement_stock import (
     create_and_validate_supplier_invoice,
     decide_invoice_approval,
@@ -40,6 +40,17 @@ from .procurement_stock import (
     submit_invoice_for_approval,
 )
 from .security_audit import StructuredRedactingLogger, read_source_document_file_secure, read_supplier_invoice_secure
+from .upload import (
+    UnsupportedMediaTypeError,
+    UploadTooLargeError,
+    UploadValidationError,
+    close_upload,
+    configured_max_upload_bytes,
+    describe_upload_policy,
+    read_bounded_upload,
+    validate_content_signature,
+    validate_upload_metadata,
+)
 
 
 class InvoiceLineInput(BaseModel):
@@ -97,6 +108,7 @@ def create_erp_fastapi_app(
     *,
     auth_manager: Optional[AuthManager] = None,
     token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+    trusted_proxies: Optional[TrustedProxyPolicy] = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Algerian AI ERP API",
@@ -112,6 +124,10 @@ def create_erp_fastapi_app(
     app.state.vault = vault
     app.state.logger = logger
     app.state.auth_manager = auth_manager or AuthManager(db, token_ttl_seconds=token_ttl_seconds)
+    # Forwarded-header trust is fail-closed: unless trusted proxies are
+    # explicitly configured, X-Forwarded-For is ignored and the direct peer
+    # address is used.  See dz_erp/net.py.
+    app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
 
     def _authenticate(
         authorization: Optional[str] = Header(default=None, alias="Authorization"),
@@ -140,6 +156,18 @@ def create_erp_fastapi_app(
     @app.get("/healthz")
     def healthz() -> Dict[str, Any]:
         return {"status": "ok", "service": "algerian-ai-erp"}
+
+    @app.get("/api/v1/upload-policy")
+    def api_upload_policy() -> Dict[str, Any]:
+        """Public, non-sensitive description of the enforced upload boundary.
+
+        Lets clients size their requests correctly and lets operators confirm
+        the active limit without reading the deployment configuration.
+        """
+        return {
+            "upload": describe_upload_policy(configured_max_upload_bytes()),
+            "forwarded_headers": describe_trusted_proxy_policy(app.state.proxy_policy),
+        }
 
     # Publish the bearer security scheme in the OpenAPI contract so the
     # authentication boundary is machine-discoverable. Health stays public.
@@ -179,18 +207,24 @@ def create_erp_fastapi_app(
     # ------------------------------------------------------------------
 
     @app.post("/api/v1/auth/token")
-    def api_issue_token(
+    async def api_issue_token(
         body: LoginRequest,
+        request: Request,
         x_forwarded_for: Optional[str] = Header(default=None, alias="X-Forwarded-For"),
         user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
     ) -> Dict[str, Any]:
         """Exchange a username/password for an opaque bearer session token."""
         corr_id = str(uuid.uuid4())
+        # The client IP recorded for a session must be evidence-based, not
+        # caller-supplied: X-Forwarded-For is honoured only when the request
+        # actually arrived through a configured trusted proxy.
+        peer_ip = request.client.host if request.client else None
+        client_ip = app.state.proxy_policy.resolve_client_ip(peer_ip, x_forwarded_for)
         try:
             result = app.state.auth_manager.issue_token(
                 body.username,
                 body.password,
-                issued_to_ip=x_forwarded_for,
+                issued_to_ip=client_ip,
                 user_agent=user_agent,
             )
         except AuthError as exc:
@@ -250,24 +284,61 @@ def create_erp_fastapi_app(
         auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         corr_id = str(uuid.uuid4())
-        content = await file.read()
+        content: Optional[bytes] = None
         try:
+            # 1. Type allowlist: filename extension and declared MIME must both be
+            #    allowed and must agree.  Neither is trusted on its own.
+            declared_mime = validate_upload_metadata(file.filename, file.content_type)
+
+            # 2. Bounded, incremental read.  The limit is enforced *while*
+            #    reading, so an oversized body is never fully materialised and
+            #    no OCR, vault write, or business record can be created for it.
+            #    The declared Content-Length is an optimisation only - the
+            #    chunked loop is authoritative because it is client-controlled.
+            try:
+                content = await read_bounded_upload(file, declared_size=file.size)
+            except UploadTooLargeError as exc:
+                logger.log(
+                    "WARNING",
+                    "DOCUMENT_UPLOAD_REJECTED_TOO_LARGE",
+                    corr_id,
+                    limit_bytes=exc.limit,
+                    declared_size=exc.declared_size,
+                    user_id=auth.user_id,
+                    company_id=auth.company_id,
+                )
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+            # 3. Content-based signature check, independent of the declared label.
+            validate_content_signature(content, declared_mime)
+
             res = upload_and_process_supplier_document(
                 db=db,
                 vault=vault,
                 company_id=auth.company_id,
                 user_id=auth.user_id,
                 filename=file.filename or "upload.bin",
-                mime_type=file.content_type or "application/octet-stream",
+                mime_type=declared_mime,
                 content=content,
                 force_image_ocr=force_image_ocr,
             )
             logger.log("INFO", "DOCUMENT_UPLOAD_PROCESSED", corr_id, document_id=res["document_id"], state=res["workflow_state"])
             return res
+        except (UnsupportedMediaTypeError, UploadValidationError) as exc:
+            # 415 for a disallowed type, 400 for internally inconsistent metadata.
+            status = 415 if isinstance(exc, UnsupportedMediaTypeError) else 400
+            logger.log("WARNING", "DOCUMENT_UPLOAD_REJECTED_TYPE", corr_id, reason=str(exc))
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except TenantIsolationError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        finally:
+            # Always release the upload.  Starlette backs uploads with a
+            # SpooledTemporaryFile that spills to disk past 1 MiB, so closing it
+            # is what removes any partial temporary artifact.
+            await close_upload(file)
+            content = None
 
     @app.get("/api/v1/documents/{document_id}/file")
     def api_get_document_file(
@@ -328,7 +399,7 @@ def create_erp_fastapi_app(
                 po_id=body.po_id,
                 grn_id=body.grn_id,
                 document_id=body.document_id,
-                lines=[l.model_dump() for l in body.lines],
+                lines=[line.model_dump() for line in body.lines],
             )
         except (AuthorizationError, TenantIsolationError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc

@@ -5,7 +5,6 @@ import csv
 import json
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple

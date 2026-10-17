@@ -1,10 +1,51 @@
-# QA Test Matrix and Execution Results (Phase 7)
+# QA Test Matrix and Execution Results (Phase 8)
 
 ## 1. Execution Command & Summary (`Passed`)
 
+The suite is run from the **declared reproducible dependency set** — no stub
+library, no preconfigured virtualenv, and no manual installation step:
+
 ```bash
-LD_LIBRARY_PATH=/tmp/glstub /tmp/erp-venv/bin/pytest --cov=dz_erp --cov-report=term-missing
+python -m venv .venv && . .venv/bin/activate
+python -m pip install --no-deps -r requirements.lock.txt
+python tools/verify_dependency_graph.py      # explicit graph validation
+python -m pytest --cov=dz_erp --cov-report=term-missing
+python -m ruff check dz_erp tests tools      # static check
 ```
+
+> **Note on `libGL`:** an earlier revision of this document recorded a
+> `LD_LIBRARY_PATH=/tmp/glstub` workaround for a locally compiled `libGL.so.1`
+> stub.  That is **retired**: a stub is not a supported configuration, it is not
+> reproducible in CI, and it masked the real defect.  The defect
+> (`rapidocr-onnxruntime` pulling in the GUI `opencv-python` wheel) is fixed at
+> the dependency level — see §1.1 below.
+
+### 1.1 OpenCV / RapidOCR dependency defect — root cause and resolution
+
+| Item | Finding |
+| :--- | :--- |
+| Declared upstream requirement | `rapidocr-onnxruntime==1.4.4` → `opencv-python>=4.5.1.48` (the **GUI** wheel) |
+| Why it broke | The GUI wheel bundles the Qt5/xcb GUI stack and links `libGL.so.1`, absent from a minimal Linux container |
+| Proof the GUI stack is unnecessary here | `nm -D --undefined-only cv2.abi3.so` → **zero `gl*` symbols**; the `libGL` need comes entirely from the bundled Qt5 libraries, not from the `cv2` extension module |
+| No PyPI source for `libGL` | `https://pypi.org/pypi/libgl1/json` → `404`; a system package manager is the only source |
+| Why "install Headless last" was rejected | Two independent clean installs (headless first, then headless last in the requirements file) both ended with the GUI build owning `site-packages/cv2/`. **pip does not preserve requirements-file order for these two packages.** |
+| Resolution | `opencv-python-headless==4.11.0.86` is declared and pinned; the GUI wheel is excluded from `requirements.lock.txt`, which enumerates the complete transitive closure and is installed with `--no-deps` |
+| Result | Order-independent, reproducible, and needs **no** system graphics library |
+| Known deviation (not concealed) | `pip check` reports exactly one line: `rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.` |
+| How the graph is validated instead | `tools/verify_dependency_graph.py` — fails on *any* unsatisfied requirement other than this single allow-listed substitution, asserts the installed `cv2` really is the headless build (the GUI payload directory `opencv_python.libs/` must be absent), and asserts `cv2` and `RapidOCR` both import |
+| Mandatory runtime libraries | **None.** Every pinned runtime dependency is a pure-Python or wheel package |
+| Optional (GUI build only) | `libgl1`, `libglib2.0-0` — needed only if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging |
+
+### 1.2 Current results
+
+- **Total Collected Tests:** `214`
+- **Passed:** `214` (`100%`)
+- **Failed / Skipped / Errors:** `0`
+- **Total Execution Duration:** `30.36s`
+- **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
+- **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,067 / 2,219` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
+
+### 1.3 Prior (Phase 7) results — retained for traceability
 
 - **Total Collected Tests:** `87`
 - **Passed:** `87` (`100%`)
@@ -12,10 +53,18 @@ LD_LIBRARY_PATH=/tmp/glstub /tmp/erp-venv/bin/pytest --cov=dz_erp --cov-report=t
 - **Total Execution Duration:** `25.71s`
 - **Environment:** Python `3.11.2`, `pytest 8.3.5`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
 - **Overall Code Coverage (`dz_erp`):** **`92%`** (`1,848 / 2,001` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `security_audit.py`, `84%` on `api.py`).
-
-> `LD_LIBRARY_PATH=/tmp/glstub` supplies a stub `libGL.so.1` for the headless
-> OpenCV build in this sandbox; it is an environment detail, not a code dependency.
 - **Overall Code Coverage (`dz_erp`):** **`89%`** (`1,489 / 1,666` statements covered; `100%` on `benchmark.py`, `97%` on `database.py`, `96%` on `odoo_test_adapter.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py`, `89%` on `procurement_stock.py`, `86%` on `security_audit.py`).
+
+### 1.4 Explicitly re-run regression groups
+
+| Group | Keyword selection | Result |
+| :--- | :--- | :--- |
+| Forged / spoofed identity headers | `forged or impersonat or spoof` | `24 passed` |
+| Tenant isolation & cross-company access | `tenant or cross_company or cross-company` | `5 passed` |
+| Credential lifecycle (missing, malformed, invalid, tampered, revoked, expired, inactive) | `expired or revoked or inactive or invalid or tampered or malformed or missing` | `47 passed` |
+| Upload boundary | `oversized or too_large or bounded or upload` | `127 passed` |
+| Forwarded-header / proxy trust | `forwarded or proxy or trusted` | `24 passed` |
+| OCR end-to-end | `ocr` | `4 passed` |
 
 ---
 
@@ -128,3 +177,107 @@ described in `docs/AUTHENTICATION_HARDENING_SPEC.md`.
 | 69 | `test_reopening_a_migrated_database_is_idempotent` | Re-opening a migrated database does not raise or duplicate rows | `Passed` |
 | 70 | `test_purge_expired_tokens` / `test_list_active_tokens_exposes_no_secrets` | Expired rows are purged; token metadata listings contain no secret material | `Passed` |
 | 71 | `test_unknown_role_is_refused` / `test_empty_password_is_refused` / `test_negative_ttl_is_refused` / `test_auth_manager_rejects_non_positive_ttl` / `test_revoking_tokens_for_unknown_user_is_a_no_op` | Input validation and no-op safety on unknown users | `Passed` |
+
+---
+
+## 2A. Phase 8 — Upload Boundary Hardening, Forwarded-Header Trust & CI (`tests/test_phase8_upload_boundary_and_ci.py`)
+
+All `127` tests in this module passed (the module is new in Phase 8). The rows below enumerate the `69` distinct test **functions**; the remaining `58` collected cases are the parametrised variants of rows 99, 127, 129 and the `test_read_bounded_upload_*` boundary series.
+
+### 2A.1 Upload size boundary (`dz_erp/upload.py`)
+
+| # | Test Identifier | Requirement Verified | Status |
+| :---: | :--- | :--- | :---: |
+| 72 | `test_upload_policy_is_documented_and_configurable` | Policy is machine-readable: limit, chunk size, allowlists, enforcing layer, env override; default is a conservative `<= 32 MiB` | `Passed` |
+| 73 | `test_upload_policy_endpoint_is_public_and_reports_limits` | `GET /api/v1/upload-policy` publishes the enforced limit and the fail-closed proxy default without authentication | `Passed` |
+| 74 | `test_upload_limit_is_configurable_via_environment` | `ERP_MAX_UPLOAD_BYTES` overrides the default; malformed / zero / negative overrides are ignored so a typo can never disable the limit | `Passed` |
+| 75 | `test_read_bounded_upload_valid_file_below_limit` | A body below the limit is returned intact, in 512-byte chunks | `Passed` |
+| 76 | `test_read_bounded_upload_exactly_at_limit` | A body of **exactly** the limit is accepted (boundary is inclusive) | `Passed` |
+| 77 | `test_read_bounded_upload_one_byte_over_limit` | A body of `limit + 1` bytes raises `UploadTooLargeError` and is **not** returned | `Passed` |
+| 78 | `test_read_bounded_upload_stops_reading_early_on_overflow` | Reading stops at the limit — far fewer reads than would be needed to consume a 5 MiB body; nothing is fully materialised | `Passed` |
+| 79 | `test_read_bounded_upload_rejects_lying_declared_size` | A declared `Content-Length` of 10 bytes cannot smuggle a `limit + 1` body | `Passed` |
+| 80 | `test_read_bounded_upload_declared_size_over_limit_is_rejected_before_reading` | An over-limit declared size is rejected before **any** byte is read | `Passed` |
+| 81 | `test_read_bounded_upload_empty_body_is_accepted_as_empty` | An empty body is accepted as empty (no false rejection) | `Passed` |
+| 82 | `test_read_bounded_upload_rejects_non_positive_limit` | `max_bytes` of `0` or `-1` raises `ValueError` | `Passed` |
+| 83 | `test_upload_valid_file_below_limit_is_accepted` | A valid invoice uploads and the stored `byte_size` equals the sent size | `Passed` |
+| 84 | `test_upload_exactly_at_limit_is_accepted` | An HTTP upload of exactly the configured limit succeeds | `Passed` |
+| 85 | `test_upload_one_byte_over_limit_returns_413` | An HTTP upload of `limit + 1` bytes returns `413` with the limit named in the message | `Passed` |
+| 86 | `test_oversized_upload_creates_no_document_record` | After a `413`: `source_documents`, `ocr_extracted_fields`, `supplier_invoices` unchanged and **no** orphaned vault file | `Passed` |
+| 87 | `test_oversized_upload_does_not_trigger_ocr` | No OCR work is performed for a rejected body | `Passed` |
+| 88 | `test_oversized_upload_is_rejected_before_authentication_is_bypassed` | An oversized body with **no** credential still yields `401`, never `413` — the size check cannot bypass authentication | `Passed` |
+| 89 | `test_oversized_upload_streamed_body_exceeds_declared_size` | A generator-backed multipart body (no `Content-Length`) over the limit → `413`, no records | `Passed` |
+| 90 | `test_repeated_oversized_uploads_leave_no_state` | 5 consecutive oversized uploads all `413`; state stays clean; a legitimate upload then still succeeds | `Passed` |
+| 91 | `test_concurrent_oversized_uploads_are_all_rejected` | 12 concurrent oversized uploads (6 workers) **all** return `413`; no partial state | `Passed` |
+| 92 | `test_upload_rejection_closes_the_uploaded_file` | The `finally` block closes the upload even though the read raised | `Passed` |
+| 93 | `test_close_upload_is_finally_safe` | `close_upload` is idempotent and tolerates `None` / objects without `close()` | `Passed` |
+| 94 | `test_close_upload_never_propagates_a_close_failure` | A failure while releasing the upload never surfaces, so it cannot mask the original error | `Passed` |
+| 95 | `test_close_upload_propagates_the_callers_original_error` | The error that triggered the cleanup still reaches the caller | `Passed` |
+| 96 | `test_cleanup_partial_upload_removes_files` | A partial artifact is removed; the call is idempotent and safe for a missing path / `None` | `Passed` |
+| 97 | `test_upload_file_is_closed_helper` | `upload_file_is_closed` reflects the backing stream state | `Passed` |
+
+### 2A.2 File-type validation (never trust the filename or the declared MIME alone)
+
+| # | Test Identifier | Requirement Verified | Status |
+| :---: | :--- | :--- | :---: |
+| 98 | `test_upload_metadata_accepts_allowed_types` | Allowed extension/MIME pairs, including case variants and `; charset=` parameters, are normalised correctly | `Passed` |
+| 99 | `test_upload_metadata_rejects_disallowed_types` | Disallowed extensions/MIME types, missing filename, missing Content-Type, empty strings, and **path-traversal / NUL / Windows-separator filenames** are rejected | `Passed` |
+| 100 | `test_upload_metadata_rejects_extension_mime_mismatch` | A `.png` filename claiming `application/pdf` is rejected | `Passed` |
+| 101 | `test_extension_of_is_case_insensitive` | Extension extraction is case-insensitive and safe for `None` / empty | `Passed` |
+| 102 | `test_sniff_mime_type_detects_from_content` | Magic-byte sniffing identifies PDF / PNG / JPEG and returns `None` for `MZ`, shell scripts and empty content | `Passed` |
+| 103 | `test_validate_content_signature_rejects_label_content_mismatch` | PDF bytes labelled `image/png` are rejected | `Passed` |
+| 104 | `test_validate_content_signature_rejects_unknown_content` | Content matching no supported signature is rejected | `Passed` |
+| 105 | `test_upload_endpoint_rejects_exe_with_pdf_name` | A renamed `MZ` executable with a `.pdf` name → `400`/`415`, no record | `Passed` |
+| 106 | `test_upload_endpoint_rejects_unsupported_extension` | `payload.exe` → `415` | `Passed` |
+| 107 | `test_upload_endpoint_rejects_unsupported_declared_mime` | A `.pdf` claiming `application/zip` → `415` | `Passed` |
+| 108 | `test_upload_endpoint_rejects_png_bytes_labelled_pdf` | PNG bytes labelled `application/pdf` → `415` (content beats the label) | `Passed` |
+| 109 | `test_upload_endpoint_rejects_pdf_bytes_labelled_png` | PDF bytes labelled `image/png` → `415` | `Passed` |
+| 110 | `test_upload_endpoint_accepts_valid_png` | A genuine PNG uploads successfully | `Passed` |
+| 111 | `test_upload_quarantine_is_preserved_for_malware` | The pre-existing EICAR quarantine behaviour is unchanged: `security_status == QUARANTINED` | `Passed` |
+
+### 2A.3 Forwarded-header / proxy trust (`dz_erp/net.py`)
+
+| # | Test Identifier | Requirement Verified | Status |
+| :---: | :--- | :--- | :---: |
+| 112 | `test_forwarded_headers_are_ignored_by_default` | With no trusted proxies, a well-formed `X-Forwarded-For` chain is **discarded** and the direct peer is used | `Passed` |
+| 113 | `test_forwarded_headers_honoured_only_from_trusted_proxy` | The chain is honoured only when the peer is inside a configured CIDR | `Passed` |
+| 114 | `test_forwarded_chain_uses_rightmost_untrusted_address` | The right-most **untrusted** entry wins — what the trusted proxy actually observed | `Passed` |
+| 115 | `test_forwarded_header_cannot_be_forged_by_prepending` | Prepending a fake entry does not win; the right-most untrusted address is used | `Passed` |
+| 116 | `test_parse_forwarded_for_handles_malformed_input` | Absent, empty, whitespace, duplicate commas, ports, IPv6 brackets, and non-IP garbage are handled without raising | `Passed` |
+| 117 | `test_trusted_proxy_policy_ignores_malformed_configuration` | Malformed CIDR entries in configuration are dropped rather than failing open | `Passed` |
+| 118 | `test_trusted_proxy_policy_supports_bare_addresses` | A bare address is accepted as a single-host range | `Passed` |
+| 119 | `test_resolve_client_ip_handles_missing_peer` | A missing peer address yields `unknown` and never invents a value | `Passed` |
+| 120 | `test_trusted_proxy_policy_from_env` | `ERP_TRUSTED_PROXIES` (comma/space separated) configures the policy | `Passed` |
+| 121 | `test_describe_trusted_proxy_policy_reports_default` | The policy self-describes as fail-closed by default | `Passed` |
+| 122 | `test_spoofed_forwarded_header_does_not_change_recorded_session_ip` | A spoofed header does not reach the stored `issued_to_ip` | `Passed` |
+| 123 | `test_spoofed_forwarded_header_with_trusted_proxy_is_rejected_from_untrusted_peer` | Even with a trusted-proxy policy, a caller whose peer is **not** that proxy cannot inject a client IP | `Passed` |
+| 124 | `test_trusted_proxy_peer_does_not_invent_a_client_address` | A chain containing only the trusted peer itself resolves to that peer — no invented address | `Passed` |
+| 125 | `test_forwarded_header_is_never_used_for_authorisation` | Forged `X-Forwarded-For` / `X-Real-IP` never change the resolved `user_id`, `company_id` or `role` | `Passed` |
+| 126 | `test_proxy_policy_env_configuration_is_fail_closed` | With no `ERP_TRUSTED_PROXIES` set, the policy trusts nothing | `Passed` |
+
+### 2A.4 Authentication regression re-verified against the current commit
+
+| # | Test Identifier | Requirement Verified | Status |
+| :---: | :--- | :--- | :---: |
+| 127 | `test_forged_identity_headers_cannot_authenticate` (parametrised × 6 header sets × 3 paths = 18 cases) | Forged `X-User-Id` / `X-Company-Id` combinations (own user, other user, cross-tenant, non-existent, negative) never authenticate — always `401` with a `WWW-Authenticate: Bearer` challenge | `Passed` |
+| 128 | `test_forged_headers_cannot_switch_company_for_authenticated_user` | A valid company-1 clerk presenting company-2 headers is still resolved as company-1 | `Passed` |
+| 129 | `test_missing_and_malformed_credentials_rejected` (parametrised × 9) | Absent, empty, whitespace, scheme-only, `Basic`, `Token`, bare and bogus `dzsess_` values all → `401` | `Passed` |
+| 130 | `test_invalid_token_is_rejected` | Freshly generated, never-issued tokens → `401` | `Passed` |
+| 131 | `test_tampered_token_is_rejected` | A token with a single flipped character → `401` | `Passed` |
+| 132 | `test_revoked_token_is_rejected` | Revocation takes effect immediately and survives replay | `Passed` |
+| 133 | `test_expired_token_is_rejected` | A token whose stored expiry is moved into the past → `401` | `Passed` |
+| 134 | `test_inactive_user_token_is_rejected` | Deactivating the user out-of-band invalidates a live token | `Passed` |
+| 135 | `test_inactive_user_cannot_obtain_a_token` | A deactivated account cannot mint a token | `Passed` |
+| 136 | `test_cross_company_access_is_denied_on_invoice_read` | Company-2 admin is refused on a company-1 invoice **and** its source document | `Passed` |
+| 137 | `test_cross_company_write_operations_are_denied` | Company-2 admin cannot submit or decide approval on a company-1 invoice | `Passed` |
+| 138 | `test_unauthorized_financial_operation_is_denied` | A `clerk` cannot post a supplier invoice → `403` | `Passed` |
+| 139 | `test_audit_chain_remains_valid_after_phase8_activity` | The HMAC audit chain still verifies after uploads and revocation | `Passed` |
+| 140 | `test_all_protected_routes_use_the_authenticated_path` | **Every** non-public route in the OpenAPI contract rejects an unauthenticated request | `Passed` |
+
+### 2A.5 Static check
+
+`ruff check dz_erp tests tools` with the ruleset declared in `pyproject.toml`
+(`F`, `E741`, `RUF100`) reports **All checks passed!**. Introducing this check
+surfaced and fixed one genuine latent defect that the passing test suite had
+been hiding: `test_tenant_isolation_enforced_across_all_protected_endpoints`
+referenced a `doc_id` that was never bound in its own scope and only resolved
+through test-order pollution.

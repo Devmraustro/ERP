@@ -4,7 +4,6 @@
 import io
 import json
 import statistics
-import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Tuple

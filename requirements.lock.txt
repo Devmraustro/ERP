@@ -1,3 +1,64 @@
+# Fully pinned dependency set for the Algerian AI ERP Platform.
+#
+# Install with:  pip install --no-deps -r requirements.lock.txt
+#
+# ---------------------------------------------------------------------------
+# OpenCV / RapidOCR dependency defect (root cause + reproducible resolution)
+# ---------------------------------------------------------------------------
+# `rapidocr-onnxruntime==1.4.4` declares a hard dependency on `opencv-python`
+# (the *GUI* wheel).  That wheel bundles the whole Qt5/xcb GUI stack and links
+# `libGL.so.1`, which is not available in a minimal Linux container.
+#
+# Evidence that the GUI stack is unnecessary here:
+#   * `nm -D --undefined-only cv2.abi3.so` shows the module references **zero**
+#     `gl*` symbols - the libGL requirement comes entirely from the bundled
+#     Qt5 GUI libraries, not from the `cv2` extension module itself.
+#   * This project only uses the core `cv2` API (imread, resize, cvtColor,
+#     threshold, ...), never any GUI/highgui function.
+#
+# Resolution
+# ----------
+# `opencv-python-headless==4.11.0.86` provides the identical `cv2` module and
+# the identical numpy ABI requirements with no OpenGL/Qt dependency, so it is
+# the build this project declares and installs.  The GUI `opencv-python` wheel
+# is deliberately **not** part of this lockfile.
+#
+# Because the lockfile enumerates the complete transitive closure, it is
+# installed with `--no-deps`.  That is both the standard practice for a pinned
+# lockfile and the mechanism that makes this resolution reproducible: pip can
+# never pull the GUI wheel back in, and the result does not depend on install
+# order.  (Installing order is explicitly NOT relied upon - it has been shown
+# to be ineffective, because pip does not preserve requirements-file order for
+# these two packages.)
+#
+# Known, documented deviation from upstream metadata
+# --------------------------------------------------
+# With this lockfile, `pip check` reports exactly one line:
+#     rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.
+# This is an intentional, upstream-only declaration that is substituted by
+# `opencv-python-headless`.  It is NOT concealed and NOT worked around with
+# `--no-deps` on `rapidocr-onnxruntime` alone.  Instead the graph is validated
+# explicitly and more strictly than `pip check` by:
+#
+#     python tools/verify_dependency_graph.py
+#
+# which fails on *any* unsatisfied requirement other than this single,
+# allow-listed substitution, and additionally asserts that the installed `cv2`
+# really is the headless build and that both `cv2` and `RapidOCR` import.
+#
+# Alternative (GUI build active)
+# ------------------------------
+# If you need the GUI build for interactive debugging, install the OpenGL
+# runtime libraries and add `opencv-python==4.11.0.86` to this file:
+#     Debian/Ubuntu: apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+# `libgl1` and `libglib2.0-0` are OPTIONAL for this project - they are only
+# needed by the optional GUI OpenCV build.  The mandatory runtime requirements
+# are the pure-Python and wheel packages pinned below, none of which need any
+# system library beyond a standard Python 3.11+ installation.
+#
+# No PyPI package provides `libGL.so.1` (https://pypi.org/pypi/libgl1/json
+# returns 404), so a system package manager is the only source for it.
+# ---------------------------------------------------------------------------
 annotated-types==0.8.0
 anyio==4.15.1
 arabic-reshaper==3.0.0
@@ -32,7 +93,9 @@ pydantic_core==2.33.0
 pypdf==5.4.0
 pypdfium2==5.14.0
 pytest==8.3.5
+pytest-asyncio==1.3.0
 pytest-cov==6.0.0
+ruff==0.14.0
 python-bidi==0.6.6
 python-multipart==0.0.20
 PyYAML==6.0.3

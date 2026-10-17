@@ -213,15 +213,20 @@ def test_ocr_extraction_raw_immutability_prompt_injection_and_zero_stock_movemen
     # that every character is bit-exact on every CPU.  The comparison therefore
     # folds the classic OCR digit/letter confusions before comparing, and the
     # failure message reports what was actually extracted.
+    # The diagnostic below reads only keys the upload result actually carries -
+    # an earlier version of this message referenced `raw_lines`, which belongs
+    # to the OCR result and not to the upload result, so the message itself
+    # raised a KeyError and hid the real failure.
+    extracted_raw = {name: field["raw_text"] for name, field in res_img["fields"].items()}
+
     assert "invoice_number" in res_img["fields"], (
-        f"RapidOCR did not extract an invoice number (fields={sorted(res_img['fields'])}, "
-        f"first_lines={[line['text'] for line in res_img['raw_lines'][:8]]})"
+        f"RapidOCR did not extract an invoice number "
+        f"(engine={res_img['ocr_engine']}, fields={sorted(res_img['fields'])}, raw={extracted_raw})"
     )
     extracted_inv = res_img["fields"]["invoice_number"]["normalized_value"]
     assert _ocr_equivalent(extracted_inv) == _ocr_equivalent("FAC-2026-0778"), (
         f"RapidOCR invoice number {extracted_inv!r} is not recognisably 'FAC-2026-0778' "
-        f"(raw={res_img['fields']['invoice_number']['raw_text']!r}, "
-        f"first_lines={[line['text'] for line in res_img['raw_lines'][:8]]})"
+        f"(raw={res_img['fields']['invoice_number']['raw_text']!r}, all_raw={extracted_raw})"
     )
 
     # Verify ZERO stock moves were created by uploading documents or running OCR

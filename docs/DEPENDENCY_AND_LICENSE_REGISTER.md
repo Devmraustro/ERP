@@ -133,6 +133,13 @@ moves the metric by tens of points, not by single fields.
 
 ---
 
+**CI verification.** This resolution is confirmed on a clean GitHub Actions runner
+(Ubuntu, Python 3.11 and 3.12, no system graphics libraries installed): run
+`39077748167` (`push`) and `39077751326` (`pull_request`) both succeeded with the
+install, graph-validation and cv2/RapidOCR import steps green on both versions.
+
+---
+
 ## 3. Core Runtime, Web API, Cryptography & Test Dependencies (`Verified`)
 
 All Python packages installed in `/tmp/erp-venv` are pinned to exact versions in `/home/user/ERP/requirements.lock.txt`:

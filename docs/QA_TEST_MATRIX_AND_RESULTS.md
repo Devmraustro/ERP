@@ -41,7 +41,7 @@ python -m ruff check dz_erp tests tools      # static check
 - **Total Collected Tests:** `218`
 - **Passed:** `218` (`100%`)
 - **Failed / Skipped / Errors:** `0`
-- **Total Execution Duration:** `30.81s`
+- **Total Execution Duration:** `36.76s`
 - **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
 - **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,080 / 2,236` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
 
@@ -65,6 +65,37 @@ python -m ruff check dz_erp tests tools      # static check
 | Upload boundary | `oversized or too_large or bounded or upload` | `127 passed` |
 | Forwarded-header / proxy trust | `forwarded or proxy or trusted` | `24 passed` |
 | OCR end-to-end | `ocr` | `4 passed` |
+
+### 1.5 Continuous Integration — `Verified`
+
+The same suite, dependency set and static check were executed on a clean GitHub
+Actions runner (Ubuntu, Python 3.11 and 3.12, **no** system graphics libraries
+installed) by `.github/workflows/ci.yml`.
+
+| Item | Result |
+| :--- | :--- |
+| Run (push) | `39077748167` — `success` |
+| Run (pull_request) | `39077751326` — `success` |
+| Commit | `44d45112e81cf8e1e9b876628660e0421d6725f1` |
+| Python 3.11 job (ID `117528316809`) | `success` — all 12 steps green |
+| Python 3.12 job (ID `117528316675`) | `success` — all 12 steps green |
+| Failure annotations | **none** |
+
+Every step of the workflow is therefore CI-verified: install the declared set,
+validate the dependency graph, assert `cv2` and `RapidOCR` import, static check
+(ruff), byte-compile, full test suite with coverage, summarise, and upload
+artifacts. The only annotations emitted were informational (Node 20 deprecation
+and the `ubuntu-latest` label migration).
+
+The full run history, and the four host-dependency defects the successive
+failures exposed, are recorded in §5.5 of
+`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`.
+
+**What CI does not prove.** The OCR *accuracy* figures remain host-dependent at
+the margin, because ONNX Runtime, OpenCV and PDFium dispatch SIMD kernels by host
+CPU feature. That is why the neural-OCR assertions test recognition rather than
+bit-exactness (2A.6) and the benchmark thresholds are floors with a documented
+margin.
 
 ---
 

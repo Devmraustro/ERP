@@ -22,6 +22,14 @@ class AuditTamperError(RuntimeError):
     """Raised when an attempt is made to mutate or delete audit records."""
 
 
+class AuditKeyUnavailableError(RuntimeError):
+    """Raised when the audit key is missing while audit events already exist.
+
+    Distinct from ``AuditTamperError`` so an operator can tell "the key was
+    lost" from "someone edited the chain" - the two need opposite responses.
+    """
+
+
 class TenantIsolationError(PermissionError):
     """Raised when a cross-company data or file access is attempted."""
 
@@ -520,6 +528,31 @@ DEFAULT_AUDIT_HMAC_SECRET = b"dz-erp-default-test-hmac-key-change-in-prod"
 AUDIT_KEY_SUFFIX = ".audit.key"
 
 
+def _file_backed_db_has_audit_events(db_path: str) -> bool:
+    """True when ``db_path`` is an existing database that already holds audit rows.
+
+    Read-only and failure-tolerant: any error means "cannot tell", which is
+    treated as "no events" so a genuinely fresh database still initialises.
+    """
+    if not Path(db_path).exists():
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return False
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_events'"
+        ).fetchone()
+        if not has_table:
+            return False
+        return conn.execute("SELECT 1 FROM audit_events LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
     """Resolve the HMAC key that chains ``audit_events``.
 
@@ -550,6 +583,21 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
         key_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEY_SUFFIX)
         if key_path.exists():
             return key_path.read_bytes().strip()
+
+        # The key file is gone but the database may already hold audit events.
+        # Minting a replacement here is the silent-data-integrity case: every
+        # existing chain would then read as EVENT_HASH_TAMPERED, which blames
+        # an attacker for what is really a lost key and sends the operator
+        # looking for an intrusion that never happened.  Fail loudly, and only
+        # generate when the database is genuinely fresh.
+        if _file_backed_db_has_audit_events(db_path):
+            raise AuditKeyUnavailableError(
+                f"The audit key file {key_path} is missing but {db_path} already "
+                "contains audit events. Refusing to generate a replacement key: "
+                "doing so would make every existing chain fail verification and "
+                "report tampering. Restore the key file, or set "
+                "ERP_AUDIT_HMAC_SECRET."
+            )
         secret = base64.urlsafe_b64encode(os.urandom(32))
         key_path.parent.mkdir(parents=True, exist_ok=True)
         try:

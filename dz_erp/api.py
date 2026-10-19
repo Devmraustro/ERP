@@ -15,7 +15,9 @@ all**: identity, company, and role are derived exclusively from the server-side
 record bound to the presented credential.
 """
 
+import os
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -39,7 +41,12 @@ from .procurement_stock import (
     reverse_posted_invoice,
     submit_invoice_for_approval,
 )
-from .security_audit import StructuredRedactingLogger, read_source_document_file_secure, read_supplier_invoice_secure
+from .security_audit import (
+    JsonlSecurityLog,
+    StructuredRedactingLogger,
+    read_source_document_file_secure,
+    read_supplier_invoice_secure,
+)
 from .upload import (
     UnsupportedMediaTypeError,
     UploadTooLargeError,
@@ -119,7 +126,13 @@ def create_erp_fastapi_app(
             "Identity headers (`X-User-Id`, `X-Company-Id`) are not trusted and are ignored."
         ),
     )
-    logger = StructuredRedactingLogger()
+    # Durable sink for security-relevant events that cannot be attributed to a
+    # tenant (see JsonlSecurityLog).  Configured by ERP_SECURITY_LOG_PATH; when
+    # unset the logger is in-memory only, which is the test configuration and
+    # must never be the production one.
+    security_log_path = os.environ.get("ERP_SECURITY_LOG_PATH")
+    security_sink = JsonlSecurityLog(Path(security_log_path)) if security_log_path else None
+    logger = StructuredRedactingLogger(sink=security_sink)
     app.state.db = db
     app.state.vault = vault
     app.state.logger = logger
@@ -130,6 +143,7 @@ def create_erp_fastapi_app(
     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
 
     def _authenticate(
+        request: Request,
         authorization: Optional[str] = Header(default=None, alias="Authorization"),
     ) -> AuthenticatedUser:
         """Resolve the caller's identity from a verified server-side credential.
@@ -140,10 +154,17 @@ def create_erp_fastapi_app(
         try:
             return app.state.auth_manager.authenticate(authorization)
         except AuthError as exc:
+            # Peer address, never a client-supplied identity: an unauthenticated
+            # request has no trustworthy tenant, so the only attributable facts
+            # are where it came from and why it was refused.
+            peer_ip = request.client.host if request.client else None
             logger.log(
                 "WARNING",
                 "AUTH_REQUEST_REJECTED",
                 str(uuid.uuid4()),
+                peer_ip=peer_ip,
+                path=request.url.path,
+                method=request.method,
                 code=exc.code,
                 detail=exc.detail,
             )

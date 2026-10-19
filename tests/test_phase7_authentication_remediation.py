@@ -14,6 +14,7 @@ Covers:
 """
 
 import base64
+import json
 import re
 import sqlite3
 from datetime import timedelta
@@ -1059,7 +1060,7 @@ def test_attributed_auth_denials_are_durable_audit_events(env: SimpleNamespace) 
 
 
 def test_unattributable_auth_failures_are_deliberately_not_tenant_audited(env: SimpleNamespace) -> None:
-    """Document the limit of the audit trail for credential failures with no owner.
+    """Pin the tenant-isolation rule for credential failures with no owner.
 
     A missing, malformed or unknown token resolves to no ``users`` row, so there
     is no ``company_id`` to attribute the event to - and ``audit_events.company_id``
@@ -1069,10 +1070,14 @@ def test_unattributable_auth_failures_are_deliberately_not_tenant_audited(env: S
     isolation guarantee.
 
     Consequence, stated plainly: an unknown token leaves no row in
-    ``audit_events``.  The exposure is bounded - session tokens carry 256 bits of
-    CSPRNG entropy, so guessing one is not a practical attack, and the realistic
-    brute-force vector (password guessing) *is* durably counted through
-    ``users.failed_login_count`` and drives the account lockout.
+    ``audit_events``, and that remains correct.  It does *not* mean the rejection
+    is unrecorded.  The earlier finding was that ``AUTH_REQUEST_REJECTED`` reached
+    only an in-memory list, so every record died with the process.  That gap is
+    closed by ``JsonlSecurityLog``, a durable append-only sink that deliberately
+    records no company identifier at all - see
+    ``tests/test_phase9_durable_security_log.py``.  This test now asserts both
+    halves: nothing invented is written to the tenant audit trail, *and* the
+    rejection is captured by the security logger.
 
     This test pins the design so a future change to it is deliberate: either the
     attribution rule or the tenant-isolation rule must be re-decided explicitly.
@@ -1100,6 +1105,19 @@ def test_unattributable_auth_failures_are_deliberately_not_tenant_audited(env: S
     # enforces the current one.
     assert row["locked_until"] is not None, "the account was not locked after 5 failures"
     assert row["failed_login_count"] == 0, "the counter should reset on lockout"
+
+    # ...and the unattributed rejections ARE captured by the security logger.
+    # Without this, "not in audit_events" would quietly mean "recorded nowhere".
+    attempted = [None, "", "Bearer", "Basic abc", "Bearer dzsess_unknown", "Bearer dzsess_" + "x" * 43]
+    security_records = [
+        r for r in env.app.state.logger.records if r["event"] == "AUTH_REQUEST_REJECTED"
+    ]
+    assert len(security_records) >= len(attempted), (
+        "unattributed rejections were not captured by the security logger"
+    )
+    assert all("company_id" not in json.dumps(r) for r in security_records), (
+        "the security logger invented a tenant attribution"
+    )
 
 
 def _audit_actions(env: SimpleNamespace) -> List[str]:

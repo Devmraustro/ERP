@@ -139,6 +139,16 @@ def main(argv: Optional[list] = None) -> int:
 
     db_path = _required_path("ERP_DB_PATH")
 
+    # Open the database through ERPDatabase before touching it directly.  A
+    # brand-new deployment points at a file that does not exist yet, and
+    # querying it with a bare sqlite3 connection raises "no such table: users"
+    # as an unhandled traceback - which is the opposite of the clean,
+    # actionable failure this entry point is supposed to produce.  ERPDatabase
+    # also applies the schema migrations, so the file is usable afterwards.
+    from .database import ERPDatabase
+
+    ERPDatabase(str(db_path))
+
     if args.bootstrap_admin:
         user_id = _bootstrap_admin(db_path, args.bootstrap_admin, args.company_name)
         print(f"Created admin '{args.bootstrap_admin}' (id={user_id}) in {db_path}")

@@ -48,11 +48,69 @@ SENSITIVE_VALUE_PATTERNS = [
 ]
 
 
-class StructuredRedactingLogger:
-    """Structured JSON logger that redacts credentials, tokens, bank RIBs, and invoice text."""
+class JsonlSecurityLog:
+    """Durable, append-only sink for security-relevant events.
 
-    def __init__(self) -> None:
+    Why a separate sink instead of ``audit_events``
+    -----------------------------------------------
+    ``audit_events.company_id`` is ``NOT NULL`` and every read path is
+    tenant-scoped.  A request that failed *authentication* has no trustworthy
+    tenant to attribute it to - the caller has not proven who they are, which is
+    exactly why it was rejected.  Writing a guessed or defaulted ``company_id``
+    would either attribute a foreign tenant's failure to the wrong company or
+    fabricate attribution the request never established.
+
+    So this sink deliberately records **no company identifier**.  It is a
+    security log, not a financial audit log, and the two must not be conflated:
+    an unauthenticated flood is operationally critical and financially
+    unattributable at the same time.
+
+    Failure mode
+    ------------
+    A write failure propagates rather than being swallowed.  Silently dropping
+    security-relevant rejection records is the specific gap this class closes:
+    without it, a credential-stuffing run leaves no durable trace and the
+    operator learns about it only when something else breaks.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            # Create with owner-only permissions from the outset, never a
+            # world-readable default that is tightened afterwards.
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
+
+    def __call__(self, entry: Dict[str, Any]) -> None:
+        line = json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n"
+        payload = line.encode("utf-8")
+        # O_APPEND: the kernel positions each write at the end of the file, so
+        # concurrent workers cannot overwrite one another's records.  Lines are
+        # kept well under PIPE_BUF, which makes each write effectively atomic.
+        fd = os.open(str(self.path), os.O_WRONLY | os.O_APPEND, 0o600)
+        try:
+            written = os.write(fd, payload)
+        finally:
+            os.close(fd)
+        if written != len(payload):
+            raise OSError(
+                f"Security log write to {self.path} was short "
+                f"({written} of {len(payload)} bytes); the record may be truncated."
+            )
+
+
+class StructuredRedactingLogger:
+    """Structured JSON logger that redacts credentials, tokens, bank RIBs, and invoice text.
+
+    ``sink`` receives every record so security-relevant events can outlive the
+    process.  Without one, ``records`` is an in-memory list and everything
+    logged is lost on restart.
+    """
+
+    def __init__(self, sink: Optional[Any] = None) -> None:
         self.records: List[Dict[str, Any]] = []
+        self._sink = sink
 
     def _redact_value(self, key: str, val: Any) -> Any:
         if key.lower() in {k.lower() for k in SENSITIVE_KEYS}:
@@ -77,6 +135,11 @@ class StructuredRedactingLogger:
             "context": {k: self._redact_value(k, v) for k, v in context.items()},
         }
         self.records.append(entry)
+        if self._sink is not None:
+            # Deliberately not wrapped in a try/except: a sink failure must not
+            # be swallowed, or the durable log silently stops being durable -
+            # which is the exact gap this closes.
+            self._sink(entry)
         return entry
 
 

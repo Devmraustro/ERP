@@ -104,6 +104,14 @@ VAULT_KEY_SUFFIX = ".vault.key"
 VAULT_KEY_ENV = "ERP_VAULT_KEY"
 
 
+class VaultKeyUnavailableError(RuntimeError):
+    """Raised when the vault key is missing while encrypted documents still exist.
+
+    Distinct from a decryption failure so an operator can tell "the key was
+    lost" from "this blob is corrupt" - the two need opposite responses.
+    """
+
+
 def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
     """Resolve the Fernet key that encrypts documents at rest.
 
@@ -128,6 +136,20 @@ def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
     key_path = root.parent / (root.name + VAULT_KEY_SUFFIX)
     if key_path.exists():
         return key_path.read_bytes().strip()
+
+    # The key file is gone but the vault may still hold blobs.  Generating a
+    # replacement here is the silent-data-loss case: reads of the existing
+    # blobs would raise InvalidToken with nothing pointing at the real cause,
+    # and - worse - *writes* would succeed under the new key, so nothing
+    # downstream would ever notice the loss either.  Fail loudly instead, and
+    # only mint a key when the vault is genuinely empty (first use).
+    if any(root.rglob("*.enc")):
+        raise VaultKeyUnavailableError(
+            f"The document vault key file {key_path} is missing but "
+            f"{root} still contains encrypted documents. Refusing to generate a "
+            "replacement key: doing so would silently orphan every existing "
+            "document. Restore the key file, or set ERP_VAULT_KEY."
+        )
 
     secret = Fernet.generate_key()
     key_path.parent.mkdir(parents=True, exist_ok=True)

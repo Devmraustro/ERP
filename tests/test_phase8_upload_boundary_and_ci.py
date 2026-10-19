@@ -15,6 +15,8 @@ All fixtures are local and synthetic; no production data is used.
 """
 
 import io
+import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -26,8 +28,17 @@ from PIL import Image
 from dz_erp.api import create_erp_fastapi_app
 from dz_erp.auth import AuthManager, hash_password
 from dz_erp.benchmark import render_synthetic_invoice_pdf
-from dz_erp.database import ERPDatabase
-from dz_erp.intake_ocr import PrivateDocumentVault
+from dz_erp.database import (
+    AUDIT_KEY_SUFFIX,
+    DEFAULT_AUDIT_HMAC_SECRET,
+    ERPDatabase,
+)
+from dz_erp.intake_ocr import (
+    VAULT_KEY_ENV,
+    VAULT_KEY_SUFFIX,
+    PrivateDocumentVault,
+)
+from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_backup
 from dz_erp.localization import load_official_odoo_chart
 from dz_erp.net import (
     TrustedProxyPolicy,
@@ -54,6 +65,7 @@ from dz_erp.upload import (
     validate_content_signature,
     validate_upload_metadata,
 )
+from dz_erp.upload import WINDOWS_RESERVED_NAMES, _validate_filename_shape  # exercised directly below
 
 FAST_ITERATIONS = 1000
 
@@ -1092,3 +1104,512 @@ def test_all_protected_routes_use_the_authenticated_path(env: SimpleNamespace) -
                 continue
             resp = env.client.request(method, path, json={})
             assert resp.status_code == 401, f"{full} accepted an unauthenticated request -> {resp.status_code}"
+
+
+# ----------------------------------------------------------------------
+# Malformed documents (structurally invalid, header-valid)
+# ----------------------------------------------------------------------
+# These payloads carry a correct magic-byte header but are not parseable
+# documents.  Before the fix they escaped the security boundary as an
+# unhandled pypdf/PIL exception, i.e. HTTP 500, which both denied service to
+# the caller and told an attacker the payload had reached the parser.
+MALFORMED_DOCUMENTS = [
+    ("truncated.pdf", b"%PDF-1.7", "application/pdf", "PDF magic bytes only"),
+    ("header_only.pdf", b"%PDF-1.4\n%%EOF\n", "application/pdf", "header plus a bare EOF marker"),
+    (
+        "broken_xref.pdf",
+        b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer<</Root 1 0 R>>\n",
+        "application/pdf",
+        "object and trailer with no cross-reference table",
+    ),
+    (
+        "unterminated_stream.pdf",
+        b"%PDF-1.4\n1 0 obj\n<</Length 99>>\nstream\nshort\nendobj\n",
+        "application/pdf",
+        "stream shorter than its declared length",
+    ),
+    ("truncated.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 40, "image/png", "PNG signature with no IHDR"),
+    ("truncated.jpg", b"\xff\xd8\xff\xe0" + b"\x00" * 40, "image/jpeg", "JPEG SOI with no frame data"),
+]
+
+
+@pytest.mark.parametrize(
+    "filename,content,mime,label",
+    MALFORMED_DOCUMENTS,
+    ids=[case[3] for case in MALFORMED_DOCUMENTS],
+)
+def test_structurally_invalid_document_is_rejected_not_raised(
+    env: SimpleNamespace, filename: str, content: bytes, mime: str, label: str
+) -> None:
+    """A header-valid but unparseable document must yield a clean 4xx, never a 500."""
+    token = _token(env.client, "clerk_a", "Clerk#2026x")
+    resp = _upload(env.client, token, filename, content, mime)
+    assert resp.status_code == 400, f"{label}: expected 400, got {resp.status_code}: {resp.text[:200]}"
+    # The rejection must be actionable rather than an opaque internal error.
+    assert "structurally valid" in resp.text, f"{label}: {resp.text[:200]}"
+    # And nothing may be persisted for a document that was never parsed.
+    assert _count(env, "source_documents") == 0
+    assert _count(env, "ocr_extracted_fields") == 0
+
+
+def test_malformed_documents_leave_no_vault_artifact(env: SimpleNamespace) -> None:
+    """Rejection must happen before anything is written to the encrypted vault."""
+    token = _token(env.client, "clerk_a", "Clerk#2026x")
+    for filename, content, mime, _label in MALFORMED_DOCUMENTS:
+        _upload(env.client, token, filename, content, mime)
+    stored = list((env.tmp_path / "vault").rglob("*.enc"))
+    assert stored == [], f"vault retained encrypted files: {stored[:5]}"
+
+
+def test_malformed_pdf_does_not_corrupt_the_audit_chain(env: SimpleNamespace) -> None:
+    """A rejected document must not break hash-chain continuity for the tenant."""
+    token = _token(env.client, "clerk_a", "Clerk#2026x")
+    for filename, content, mime, _label in MALFORMED_DOCUMENTS:
+        _upload(env.client, token, filename, content, mime)
+    _upload(env.client, token, "good.pdf", _pdf(), "application/pdf")
+    assert env.db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+# ----------------------------------------------------------------------
+# Filename hardening: control characters and Windows device names
+# ----------------------------------------------------------------------
+HOSTILE_FILENAMES = [
+    ("a\nb.pdf", "embedded newline"),
+    ("a\rb.pdf", "embedded carriage return"),
+    ("a\tb.pdf", "embedded tab"),
+    ("a\x01b.pdf", "C0 control character"),
+    ("a\x1bb.pdf", "terminal escape sequence"),
+    ("a\x7fb.pdf", "DEL character"),
+    ("con.pdf", "Windows reserved device name CON"),
+    ("CON.PDF", "reserved device name, upper case"),
+    ("prn.pdf", "reserved device name PRN"),
+    ("aux.pdf", "reserved device name AUX"),
+    ("nul.pdf", "reserved device name NUL"),
+    ("com1.pdf", "reserved device name COM1"),
+    ("lpt1.pdf", "reserved device name LPT1"),
+]
+
+BENIGN_FILENAMES = [
+    "ok.pdf",
+    "invoice-2026-0001.pdf",
+    "conveyor.pdf",
+    "auxiliary.pdf",
+    "com1x.pdf",
+    "nullement.pdf",
+    "PRN-2026.pdf",
+    "a b.pdf",
+    "scan.png",
+]
+
+
+@pytest.mark.parametrize("filename,label", HOSTILE_FILENAMES, ids=[c[1] for c in HOSTILE_FILENAMES])
+def test_upload_rejects_control_characters_and_reserved_device_names(filename: str, label: str) -> None:
+    """Neither can traverse a path, but both corrupt logs, terminals and Windows hosts."""
+    with pytest.raises(UploadValidationError):
+        _validate_filename_shape(filename)
+
+
+@pytest.mark.parametrize("filename", BENIGN_FILENAMES, ids=BENIGN_FILENAMES)
+def test_upload_accepts_ordinary_filenames(filename: str) -> None:
+    """The hardening must be exact-match, not a prefix match on the stem."""
+    assert _validate_filename_shape(filename) == filename
+
+
+def test_upload_endpoint_rejects_hostile_filename_over_http(env: SimpleNamespace) -> None:
+    """The reserved-device-name rejection must hold end to end, not only at the validator."""
+    token = _token(env.client, "clerk_a", "Clerk#2026x")
+    for filename, _label in HOSTILE_FILENAMES:
+        if filename.split(".")[0].upper() in WINDOWS_RESERVED_NAMES:
+            resp = _upload(env.client, token, filename, _pdf(), "application/pdf")
+            assert resp.status_code == 400, f"{filename!r} -> {resp.status_code}: {resp.text[:160]}"
+            assert _count(env, "source_documents") == 0
+
+
+def test_upload_never_stores_a_filename_with_control_characters(env: SimpleNamespace) -> None:
+    """Whatever the multipart layer does with control characters, none may reach storage.
+
+    The multipart parser percent-encodes them, so a raw newline arrives as the
+    literal text ``%0A``.  That neutralisation belongs to a third-party parser,
+    not to this code, so the assertion is on the *invariant* - no stored
+    filename contains a control character - rather than on the parser's chosen
+    encoding.
+    """
+    token = _token(env.client, "clerk_a", "Clerk#2026x")
+    for filename, _label in HOSTILE_FILENAMES[:6]:
+        _upload(env.client, token, filename, _pdf(), "application/pdf")
+    with env.db.transaction() as conn:
+        stored = [row["filename"] for row in conn.execute("SELECT filename FROM source_documents").fetchall()]
+    assert stored, "no documents were stored, so the invariant is untested"
+    offenders = [name for name in stored if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name)]
+    assert offenders == [], f"stored filenames contain control characters: {offenders!r}"
+
+
+# ----------------------------------------------------------------------
+# OpenAPI contract accuracy
+# ----------------------------------------------------------------------
+def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleNamespace) -> None:
+    """The published security requirement must match what the code actually serves.
+
+    Declaring a protected route public is the dangerous direction.  The reverse -
+    which this guards against - overstates the boundary: a generated client
+    sends credentials it does not need, and an auditor reading the schema alone
+    concludes a route is protected when it is not.
+    """
+    schema = env.app.openapi()
+    public, protected = [], []
+    for path, item in schema["paths"].items():
+        for method, operation in item.items():
+            if not isinstance(operation, dict):
+                continue
+            (public if not operation.get("security") else protected).append(f"{method.upper()} {path}")
+
+    assert sorted(public) == [
+        "GET /api/v1/upload-policy",
+        "GET /healthz",
+        "POST /api/v1/auth/token",
+    ], f"unexpected public set: {sorted(public)}"
+    assert len(protected) == 11, f"expected 11 protected operations, got {len(protected)}: {sorted(protected)}"
+
+
+def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:
+    """No operation may accept X-User-Id / X-Company-Id / X-Role as a parameter.
+
+    The strings legitimately appear in the BearerAuth *description*, which states
+    that they are not accepted; what must never appear is a parameter that would
+    let FastAPI bind them.
+    """
+    schema = env.app.openapi()
+    for path, item in schema["paths"].items():
+        for method, operation in item.items():
+            if not isinstance(operation, dict):
+                continue
+            names = {p.get("name", "").lower() for p in operation.get("parameters", []) or []}
+            forbidden = names & {"x-user-id", "x-company-id", "x-role"}
+            assert not forbidden, f"{method.upper()} {path} declares identity parameters {forbidden}"
+    assert "BearerAuth" in schema["components"]["securitySchemes"]
+
+
+# ----------------------------------------------------------------------
+# Audit-chain key management (Workstream D)
+# ----------------------------------------------------------------------
+def test_file_backed_database_never_uses_the_published_default_key(tmp_path: Path) -> None:
+    """The default HMAC key is public, so a persistent database must not use it.
+
+    Before this, ``ERPDatabase`` fell back to a key hardcoded in the source tree
+    whenever ``ERP_AUDIT_HMAC_SECRET`` was unset.  Anyone who has read the
+    repository could then forge an arbitrary audit chain, silently - no error, no
+    warning, and the chain still "verified" because it verified against the
+    attacker's own key.
+    """
+    db_path = tmp_path / "erp.sqlite3"
+    db = ERPDatabase(str(db_path))
+    assert db._hmac_secret != DEFAULT_AUDIT_HMAC_SECRET
+
+
+def test_audit_key_is_generated_beside_the_database_with_owner_only_permissions(tmp_path: Path) -> None:
+    """The generated key must be stable across restarts and unreadable by others."""
+    import stat
+
+    db_path = tmp_path / "erp.sqlite3"
+    first = ERPDatabase(str(db_path))._hmac_secret
+    key_file = tmp_path / (db_path.name + AUDIT_KEY_SUFFIX)
+
+    assert key_file.exists(), "no key file was generated beside the database"
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600, "the key file is readable by other users"
+    # Stable across a reopen: otherwise verify_audit_chain would fail on restart.
+    assert ERPDatabase(str(db_path))._hmac_secret == first
+
+
+def test_audit_key_precedence_is_explicit_then_environment_then_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most-trusted source wins, and the in-memory default is still reachable."""
+    db_path = tmp_path / "erp.sqlite3"
+    ERPDatabase(str(db_path))  # creates the key file
+
+    explicit = ERPDatabase(str(db_path), hmac_secret=b"explicit")
+    assert explicit._hmac_secret == b"explicit"
+
+    monkeypatch.setenv("ERP_AUDIT_HMAC_SECRET", "from-environment")
+    assert ERPDatabase(str(db_path))._hmac_secret == b"from-environment"
+
+    monkeypatch.delenv("ERP_AUDIT_HMAC_SECRET")
+    from_file = ERPDatabase(str(db_path))._hmac_secret
+    assert from_file != b"from-environment" and from_file != DEFAULT_AUDIT_HMAC_SECRET
+
+    # An ephemeral in-memory database keeps the documented default, which the
+    # test suite relies on.
+    assert ERPDatabase(":memory:")._hmac_secret == DEFAULT_AUDIT_HMAC_SECRET
+
+
+def test_audit_chain_still_verifies_after_restart_with_a_generated_key(tmp_path: Path) -> None:
+    """The generated key must not break the property it exists to protect."""
+    db_path = tmp_path / "erp.sqlite3"
+    db = ERPDatabase(str(db_path))
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO companies (id, code, name, country_code, chart_template, created_at)"
+            " VALUES (1, 'DZ1', 'SARL Atlas', 'DZ', 'dz', '2026-01-01')"
+        )
+        db.append_audit_event(
+            conn, company_id=1, actor_user_id=None, action_type="TEST_EVENT",
+            target_model="companies", target_id="1", after_state={"ok": True},
+        )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+    # Reopen: a different key would make the chain unverifiable.
+    reopened = ERPDatabase(str(db_path))
+    assert reopened.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_backup_and_restore_preserve_the_audit_key(env: SimpleNamespace) -> None:
+    """A restored database must be able to verify the chain it was backed up with.
+
+    The audit key travels inside the Fernet-encrypted archive, under the same
+    protection as the vault key.  Without it, the restored database would resolve
+    a *different* key and every chain would fail verification.
+    """
+    token = _token(env.client, "clerk_a", "Clerk#2026x")
+    _upload(env.client, token, "backup.pdf", _pdf(), "application/pdf")
+
+    meta = create_encrypted_backup(
+        db=env.db,
+        vault=env.vault,
+        output_backup_path=env.tmp_path / "backups" / "b.enc",
+        backup_encryption_key=env.vault.encryption_key,
+    )
+    report = restore_and_verify_backup(
+        backup_path=Path(meta["backup_path"]),
+        backup_encryption_key=env.vault.encryption_key,
+        restore_target_dir=env.tmp_path / "isolated",
+    )
+    assert report["db_sha256_verified"] is True
+    assert report["audit_chains_valid"] is True
+
+
+# ----------------------------------------------------------------------
+# Vault key persistence (Workstream D)
+# ----------------------------------------------------------------------
+def test_vault_key_is_persisted_so_documents_survive_a_restart(tmp_path: Path) -> None:
+    """A fresh key per process silently destroys every stored document.
+
+    ``PrivateDocumentVault`` used to call ``Fernet.generate_key()`` whenever no
+    key was supplied.  The key then lived only in memory, so the next process
+    started with a different one and every document already in the vault raised
+    ``InvalidToken`` - permanently, with no error at the time of storage.  Tests
+    never caught it because each test builds its vault in the same process that
+    wrote to it.
+    """
+    import stat
+
+    vault_root = tmp_path / "vault"
+    first = PrivateDocumentVault(vault_root)
+    stored_path = first.store_bytes(company_id=1, file_sha256="a" * 64, content=b"SECRET INVOICE BYTES")
+
+    key_file = tmp_path / (vault_root.name + VAULT_KEY_SUFFIX)
+    assert key_file.exists(), "no key file was generated beside the vault"
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600, "the vault key file is readable by other users"
+
+    # A new instance over the same directory must decrypt what the first wrote.
+    restarted = PrivateDocumentVault(vault_root)
+    assert restarted.read_bytes(1, 1, stored_path) == b"SECRET INVOICE BYTES"
+    assert restarted.encryption_key == first.encryption_key
+
+
+def test_vault_key_is_not_stored_inside_the_encrypted_directory(tmp_path: Path) -> None:
+    """The key must not sit among the blobs it protects."""
+    vault_root = tmp_path / "vault"
+    PrivateDocumentVault(vault_root).store_bytes(1, "b" * 64, b"x")
+    assert list(vault_root.rglob("*" + VAULT_KEY_SUFFIX)) == []
+
+
+def test_vault_key_precedence_and_failure_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit, then environment, then the generated file - and bad input fails loudly."""
+    from cryptography.fernet import Fernet
+
+    vault_root = tmp_path / "vault"
+    PrivateDocumentVault(vault_root)
+
+    explicit = Fernet.generate_key()
+    assert PrivateDocumentVault(vault_root, encryption_key=explicit).encryption_key == explicit
+
+    monkeypatch.setenv(VAULT_KEY_ENV, Fernet.generate_key().decode())
+    from_env = os.environ[VAULT_KEY_ENV]
+    assert PrivateDocumentVault(vault_root).encryption_key.decode() == from_env
+
+    # A malformed key must raise rather than silently mint a new one, because a
+    # silent new key is exactly the failure mode this guards against.
+    monkeypatch.setenv(VAULT_KEY_ENV, "not-a-fernet-key")
+    with pytest.raises(ValueError):
+        PrivateDocumentVault(vault_root)
+
+
+# ----------------------------------------------------------------------
+# Restore must leave a usable deployment (Workstream F)
+# ----------------------------------------------------------------------
+def test_restored_database_and_vault_are_reopenable_without_the_original_secrets(tmp_path: Path) -> None:
+    """A restore that only works through the returned objects is not a restore.
+
+    The keys were passed in memory, so ``restore_and_verify_backup`` verified
+    its own work and reported success - while leaving no key on disk.  Any
+    later process opening the restored artefacts resolved a brand-new key, so
+    the audit chain read as ``EVENT_HASH_TAMPERED`` and every document raised
+    ``InvalidToken``.  Disaster recovery is precisely "open it later", so the
+    keys have to survive the restore.
+    """
+    import stat
+
+    from dz_erp.database import ERPDatabase as _ERPDB
+    from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_backup
+
+    root = tmp_path
+    db = _ERPDB(str(root / "src.sqlite3"))
+    vault = PrivateDocumentVault(root / "vault")
+    stored_path = vault.store_bytes(1, "c" * 64, b"SECRET INVOICE BYTES")
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO companies (id, code, name, country_code, created_at) VALUES (1,'C','N','DZ','2026-01-01')"
+        )
+    with db.transaction() as conn:
+        db.append_audit_event(
+            conn=conn, company_id=1, actor_user_id=None, action_type="RESTORE_PROBE",
+            target_model="probe", target_id="1", after_state={"k": "v"},
+        )
+
+    meta = create_encrypted_backup(
+        db=db, vault=vault, output_backup_path=root / "b.enc", backup_encryption_key=vault.encryption_key
+    )
+    report = restore_and_verify_backup(
+        backup_path=Path(meta["backup_path"]),
+        backup_encryption_key=vault.encryption_key,
+        restore_target_dir=root / "out",
+    )
+    assert report["audit_chains_valid"] is True
+
+    out = root / "out"
+    audit_key = out / "erp_snapshot.sqlite3.audit.key"
+    vault_key = out / "vault.vault.key"
+    assert audit_key.exists() and oct(stat.S_IMODE(audit_key.stat().st_mode)) == "0o600"
+    assert vault_key.exists() and oct(stat.S_IMODE(vault_key.stat().st_mode)) == "0o600"
+
+    # Reopen exactly as a recovering deployment would: no secrets supplied.
+    reopened_db = _ERPDB(str(out / "erp_snapshot.sqlite3"))
+    assert reopened_db.verify_audit_chain(company_id=1)["valid"] is True
+    reopened_vault = PrivateDocumentVault(out / "vault")
+    assert reopened_vault.read_bytes(1, 1, stored_path) == b"SECRET INVOICE BYTES"
+
+
+def test_vault_read_reanchors_a_stale_absolute_path(tmp_path: Path) -> None:
+    """``source_documents.vault_path`` stores an absolute path.
+
+    After a restore into a different directory every one of those paths dangles
+    and the documents become unreadable.  The blob is named by its content
+    SHA-256, so re-anchoring by basename is safe and confined to the company
+    directory - and must not weaken the traversal guard.
+    """
+    from dz_erp.database import TenantIsolationError
+
+    source_root = tmp_path / "original"
+    vault = PrivateDocumentVault(source_root)
+    stored_path = vault.store_bytes(1, "d" * 64, b"DOC")
+
+    moved_root = tmp_path / "relocated"
+    # Same key, different root - only the stored path is stale.
+    moved = PrivateDocumentVault(moved_root, encryption_key=vault.encryption_key)
+    shutil.copytree(source_root / "company_1", moved_root / "company_1")
+    assert moved.read_bytes(1, 1, stored_path) == b"DOC", "a relocated vault orphaned its own documents"
+
+    for hostile in ("../../../etc/passwd", "/etc/passwd", str(tmp_path / "elsewhere" / "company_1" / "x.enc")):
+        with pytest.raises(TenantIsolationError):
+            moved.read_bytes(1, 1, hostile)
+
+
+# ----------------------------------------------------------------------
+# The deployment entry point (Workstream F)
+# ----------------------------------------------------------------------
+def test_serve_builds_a_working_app_and_persists_the_vault_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``dz_erp/serve.py`` is the only deployment surface, so it must be exercised.
+
+    Importing it builds the ASGI app at module level, which is exactly what
+    ``uvicorn dz_erp.serve:app`` does in production.  Run it in a subprocess so
+    the import happens with a clean environment and the real code path is used.
+    """
+    import subprocess
+    import sys
+
+    db_path = tmp_path / "erp.sqlite3"
+    vault_path = tmp_path / "vault"
+    env = dict(os.environ)
+    env.update({"ERP_DB_PATH": str(db_path), "ERP_VAULT_PATH": str(vault_path)})
+    env.pop("ERP_TRUSTED_PROXIES", None)
+    env.pop("ERP_AUDIT_HMAC_SECRET", None)
+
+    script = (
+        "import dz_erp.serve as s, sys\n"
+        "from fastapi.testclient import TestClient\n"
+        "c = TestClient(s.app)\n"
+        "r = c.get('/healthz')\n"
+        "print(r.status_code)\n"
+        "print(len(s.app.state.proxy_policy.trusted_proxies))\n"
+        # The vault key must be on disk, not minted per process.
+        "v = s.app.state.vault\n"
+        "p = v.store_bytes(1, 'a'*64, b'DOC')\n"
+        "from dz_erp.intake_ocr import PrivateDocumentVault\n"
+        "print(PrivateDocumentVault(v.vault_root).read_bytes(1, 1, p) == b'DOC')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.split()
+    assert lines[0] == "200", f"healthz did not return 200: {proc.stdout}"
+    assert lines[1] == "0", "the entry point did not run with a fail-closed proxy policy"
+    assert lines[2] == "True", "the vault key was not persisted by the entry point"
+
+
+def test_serve_refuses_to_start_without_durable_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh deployment must fail loudly, not run against a throwaway file."""
+
+    from dz_erp import serve
+
+    # Test the factory directly: reloading the module re-runs its import-time
+    # ``app = build_app()``, so an unconfigured environment would abort before
+    # the assertion is reached.
+    monkeypatch.delenv("ERP_DB_PATH", raising=False)
+    monkeypatch.delenv("ERP_VAULT_PATH", raising=False)
+    monkeypatch.setenv("ERP_VAULT_PATH", str(tmp_path / "vault"))
+    with pytest.raises(SystemExit):
+        serve.build_app()
+    monkeypatch.setenv("ERP_DB_PATH", str(tmp_path / "erp.sqlite3"))
+    monkeypatch.delenv("ERP_VAULT_PATH", raising=False)
+    with pytest.raises(SystemExit):
+        serve.build_app()
+
+    monkeypatch.setenv("ERP_VAULT_PATH", str(tmp_path / "vault"))
+    app = serve.build_app()
+    assert app.state.db is not None and app.state.vault is not None
+
+
+def test_serve_bootstraps_the_first_admin_and_then_serves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty database yields an API where everything 401s and nothing explains why."""
+    from dz_erp import serve
+
+    db_path = tmp_path / "erp.sqlite3"
+    monkeypatch.setenv("ERP_DB_PATH", str(db_path))
+    monkeypatch.setenv("ERP_VAULT_PATH", str(tmp_path / "vault"))
+    monkeypatch.setattr(serve.getpass, "getpass", lambda prompt="": "Bootstrap#2026")
+
+    rc = serve.main(["--bootstrap-admin", "admin1", "--company-name", "SARL Bootstrap"])
+    assert rc == 0
+    assert db_path.exists()
+
+    # With a user present the pre-flight check passes and the server would be
+    # started - stubbed out so the test does not bind a port.
+    import uvicorn
+
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: started.append((a, k)))
+    monkeypatch.setattr(serve, "_has_any_user", lambda p: True)
+    assert serve.main(["--host", "127.0.0.1", "--port", "0"]) == 0
+    assert len(started) == 1, "main() did not hand the built app to uvicorn"
+
+    # Without one it refuses to start, with instructions on stderr.
+    monkeypatch.setattr(serve, "_has_any_user", lambda p: False)
+    assert serve.main([]) == 2
+    assert len(started) == 1, "main() started a server despite having no users"

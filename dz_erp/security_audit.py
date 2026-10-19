@@ -2,6 +2,7 @@
 """Phase 5 — Security, RBAC, Tenant Isolation, Secret-Redacting Logger, and Encrypted Backup/Restore."""
 
 import base64
+import os
 import hashlib
 import io
 import json
@@ -16,9 +17,15 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet
 
-from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
+from .database import (
+    AUDIT_KEY_SUFFIX,
+    AuthorizationError,
+    ERPDatabase,
+    FinancialIntegrityError,
+    TenantIsolationError,
+)
 from .decimal_utils import format_dzd, to_decimal
-from .intake_ocr import PrivateDocumentVault
+from .intake_ocr import VAULT_KEY_SUFFIX, PrivateDocumentVault
 
 SENSITIVE_KEYS = {
     "password",
@@ -229,6 +236,11 @@ def create_encrypted_backup(
             "db_sha256": db_sha256,
             "vault_file_hashes": vault_hashes,
             "vault_encryption_key_b64": base64.b64encode(vault.encryption_key).decode("ascii"),
+            # The audit chain is only verifiable with the key that wrote it, so a
+            # backup that cannot restore that key cannot prove its own integrity.
+            # It travels inside the Fernet-encrypted archive, i.e. under exactly
+            # the same protection as the vault key above.
+            "audit_hmac_secret_b64": base64.b64encode(db._hmac_secret).decode("ascii"),
         }
         (tmp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -250,6 +262,14 @@ def create_encrypted_backup(
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _write_key_file(key_path: Path, secret: bytes) -> None:
+    """Write a secret to disk with owner-only permissions, replacing any stale value."""
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(secret)
 
 
 def restore_and_verify_backup(
@@ -283,11 +303,33 @@ def restore_and_verify_backup(
         if not fp.exists() or hashlib.sha256(fp.read_bytes()).hexdigest() != expected_sha:
             raise FinancialIntegrityError(f"Restored vault blob {rel_path} failed SHA-256 verification!")
 
-    restored_db = ERPDatabase(db_path=str(restored_db_path), hmac_secret=hmac_secret)
-    restored_vault = PrivateDocumentVault(
-        vault_root=restored_vault_dir,
-        encryption_key=base64.b64decode(manifest["vault_encryption_key_b64"]),
+    # An explicit secret wins; otherwise take the one the backup was written
+    # with.  Archives created before the key was carried have no such field, so
+    # fall back to whatever ERPDatabase would resolve on its own.
+    audit_secret = (
+        hmac_secret
+        or base64.b64decode(manifest["audit_hmac_secret_b64"])
+        if manifest.get("audit_hmac_secret_b64")
+        else hmac_secret
     )
+    vault_secret = base64.b64decode(manifest["vault_encryption_key_b64"])
+
+    # Persist both keys beside the restored artefacts.  Without this the
+    # restore only works through the objects returned here: reopening the
+    # restored database in a fresh process - which is the entire point of a
+    # restore - resolves a brand-new key, so every audit hash reads as
+    # EVENT_HASH_TAMPERED and every stored document raises InvalidToken.  The
+    # keys are already inside the Fernet-encrypted archive, so writing them to
+    # the freshly-restored 0600 directory adds no new exposure.
+    if audit_secret:
+        _write_key_file(Path(str(restored_db_path) + AUDIT_KEY_SUFFIX), audit_secret)
+    _write_key_file(
+        restored_vault_dir.parent / (restored_vault_dir.name + VAULT_KEY_SUFFIX),
+        vault_secret,
+    )
+
+    restored_db = ERPDatabase(db_path=str(restored_db_path), hmac_secret=audit_secret)
+    restored_vault = PrivateDocumentVault(vault_root=restored_vault_dir, encryption_key=vault_secret)
 
     with restored_db.transaction() as conn:
         companies = [r["id"] for r in conn.execute("SELECT id FROM companies").fetchall()]

@@ -4,6 +4,7 @@
 import hashlib
 import io
 import json
+import os
 import re
 import time
 import uuid
@@ -96,13 +97,58 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
+# Suffix of the per-vault key file, written beside the vault directory.
+VAULT_KEY_SUFFIX = ".vault.key"
+
+# Environment variable that supplies the vault key in a real deployment.
+VAULT_KEY_ENV = "ERP_VAULT_KEY"
+
+
+def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
+    """Resolve the Fernet key that encrypts documents at rest.
+
+    Precedence: explicit argument, then ``ERP_VAULT_KEY``, then a key file beside
+    the vault directory (generated on first use, mode ``0600``).
+
+    Generating a fresh key per instantiation - the previous behaviour - looks
+    harmless and is actively destructive: the key lives only in memory, so the
+    next process starts with a different one and every document already in the
+    vault becomes permanently undecryptable (``InvalidToken``).  Nothing fails
+    loudly; the data is simply gone.  Persisting the key beside the vault makes
+    restarts safe while keeping the key out of the encrypted blob directory
+    itself.
+    """
+    if explicit:
+        return explicit
+    from_env = os.environ.get(VAULT_KEY_ENV)
+    if from_env:
+        return from_env.encode("utf-8")
+
+    root = Path(vault_root)
+    key_path = root.parent / (root.name + VAULT_KEY_SUFFIX)
+    if key_path.exists():
+        return key_path.read_bytes().strip()
+
+    secret = Fernet.generate_key()
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # O_EXCL so a racing second process adopts the first one's key rather
+        # than replacing it and orphaning the vault.
+        fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return key_path.read_bytes().strip()
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(secret)
+    return secret
+
+
 class PrivateDocumentVault:
     """Encrypted-at-rest, company-isolated private document storage."""
 
     def __init__(self, vault_root: Path, encryption_key: Optional[bytes] = None) -> None:
         self.vault_root = Path(vault_root)
         self.vault_root.mkdir(parents=True, exist_ok=True)
-        self.encryption_key = encryption_key or Fernet.generate_key()
+        self.encryption_key = _resolve_vault_key(self.vault_root, encryption_key)
         self._fernet = Fernet(self.encryption_key)
 
     def store_bytes(self, company_id: int, file_sha256: str, content: bytes) -> str:
@@ -122,7 +168,17 @@ class PrivateDocumentVault:
         p = Path(vault_path).resolve()
         expected_dir = (self.vault_root / f"company_{company_id}").resolve()
         if expected_dir not in p.parents:
-            raise TenantIsolationError("Vault path traversal or cross-company path detected.")
+            # ``source_documents.vault_path`` holds the absolute path the blob
+            # was written at.  Restore into a different directory - or simply
+            # move the vault - and every one of those paths dangles, so the
+            # document becomes unreadable through no fault of the data.  The
+            # blob name is the content SHA-256 and is unique per company, so
+            # re-anchor it under the current root.  ``Path.name`` cannot contain
+            # a separator, so the result is still confined to ``expected_dir``.
+            anchored = expected_dir / p.name
+            if not anchored.exists():
+                raise TenantIsolationError("Vault path traversal or cross-company path detected.")
+            p = anchored
         encrypted = p.read_bytes()
         return self._fernet.decrypt(encrypted)
 
@@ -160,8 +216,20 @@ def inspect_and_validate_file_security(
                 "page_count": 1,
                 "findings": findings,
             }
-        reader = pypdf.PdfReader(io.BytesIO(content))
-        page_count = len(reader.pages)
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(content))
+            page_count = len(reader.pages)
+        except Exception as exc:
+            # pypdf raises PyPdfError subclasses (PdfReadError, PdfStreamError,
+            # PdfReadError, ...) on structurally invalid input, and none of them
+            # derive from ValueError.  Left unhandled they escape this security
+            # boundary as a 500, which both denies service to the caller and
+            # tells an attacker their payload reached the parser.  The breadth
+            # is deliberate: this is an untrusted-input boundary, so *any*
+            # parser failure must become a clean rejection.
+            raise ValueError(
+                f"Declared application/pdf but the file is not a structurally valid PDF ({type(exc).__name__})."
+            ) from exc
         if page_count < 1 or page_count > max_pages:
             raise ValueError(f"PDF page count {page_count} outside allowed range [1, {max_pages}].")
         return {"security_status": "CLEAN", "page_count": page_count, "findings": []}
@@ -171,8 +239,15 @@ def inspect_and_validate_file_security(
             raise ValueError("MIME type mismatch: declared image/png but invalid PNG magic bytes.")
         if declared_mime == "image/jpeg" and not content.startswith(b"\xff\xd8\xff"):
             raise ValueError("MIME type mismatch: declared image/jpeg but invalid JPEG magic bytes.")
-        img = Image.open(io.BytesIO(content))
-        w, h = img.size
+        try:
+            img = Image.open(io.BytesIO(content))
+            w, h = img.size
+        except Exception as exc:
+            # Same rationale as the PDF branch: a header-valid but structurally
+            # broken image must be rejected, not crash the request.
+            raise ValueError(
+                f"Declared image but the file is not a structurally valid image ({type(exc).__name__})."
+            ) from exc
         if w > max_dimension_px or h > max_dimension_px:
             raise ValueError(f"Image dimensions {w}x{h} exceed limit {max_dimension_px}px.")
         return {"security_status": "CLEAN", "page_count": 1, "findings": []}

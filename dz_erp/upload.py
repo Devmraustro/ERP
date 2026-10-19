@@ -36,6 +36,15 @@ UPLOAD_CHUNK_BYTES = 64 * 1024
 ALLOWED_MIME_TYPES: FrozenSet[str] = frozenset({"application/pdf", "image/png", "image/jpeg"})
 ALLOWED_EXTENSIONS: FrozenSet[str] = frozenset({".pdf", ".png", ".jpg", ".jpeg"})
 
+# Windows reserved device names.  A stem matching one of these addresses a
+# device rather than a file on Windows, so accepting it would break a
+# Windows-hosted deployment even though it is harmless on Linux.
+WINDOWS_RESERVED_NAMES: FrozenSet[str] = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+
 # Extension -> the single MIME type that extension is permitted to claim.
 EXTENSION_TO_MIME: Dict[str, str] = {
     ".pdf": "application/pdf",
@@ -129,6 +138,20 @@ def _validate_filename_shape(filename: Optional[str]) -> str:
         )
     if candidate in {".", ".."} or "\x00" in candidate:
         raise UploadValidationError("Uploaded filename is not a valid document name.")
+    # Reject the remaining C0 control characters and DEL.  A newline or a
+    # terminal escape sequence in a filename cannot traverse a path, but it can
+    # forge a log line or rewrite an operator's terminal when the name is
+    # echoed into the audit trail or a review queue.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in candidate):
+        raise UploadValidationError("Uploaded filename must not contain control characters.")
+    # Reject Windows reserved device names.  The code already refuses Windows
+    # path separators because a name like "..\\..\\invoice.pdf" is harmless on
+    # Linux but a traversal on Windows; the same forward-compatibility applies
+    # to CON/PRN/AUX/NUL/COM1-9/LPT1-9, which on Windows address a device
+    # rather than a file.
+    stem = candidate.split(".")[0].upper()
+    if stem in WINDOWS_RESERVED_NAMES:
+        raise UploadValidationError("Uploaded filename must not be a reserved device name.")
     if len(candidate) > 255:
         raise UploadValidationError("Uploaded filename is too long (limit 255 bytes).")
     return candidate

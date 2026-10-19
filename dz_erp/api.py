@@ -193,9 +193,25 @@ def create_erp_fastapi_app(
                 ),
             }
         }
+        # Declare the authentication boundary explicitly rather than letting it
+        # follow from the route decorators.  The public set is the set the
+        # implementation actually serves without a credential: the health probe,
+        # the login endpoint that *issues* credentials, and the upload-policy
+        # description that is deliberately non-sensitive (it publishes the
+        # enforced limit so a client can size its request correctly).
+        #
+        # Declaring a route public when it is in fact protected is the dangerous
+        # direction; the reverse - as this was for /api/v1/upload-policy and
+        # /api/v1/auth/token - makes the contract overstate the boundary, which
+        # misleads generated clients and anyone auditing from the schema alone.
+        public_operations = {
+            "healthz_healthz_get",
+            "api_issue_token_api_v1_auth_token_post",
+            "api_upload_policy_api_v1_upload_policy_get",
+        }
         for path_item in schema.get("paths", {}).values():
             for operation in path_item.values():
-                if isinstance(operation, dict) and operation.get("operationId") != "healthz_healthz_get":
+                if isinstance(operation, dict) and operation.get("operationId") not in public_operations:
                     operation["security"] = [{"BearerAuth": []}]
         app.openapi_schema = schema
         return schema

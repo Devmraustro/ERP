@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Database engine, schema DDL, immutability triggers, and hash-chained audit log."""
 
+import base64
 import hashlib
 import hmac
 import json
@@ -510,14 +511,66 @@ END;
 """
 
 
+# The only secret that ships in the source tree.  It is public by construction,
+# so it may only ever be used by an ephemeral database whose audit trail nobody
+# will ever try to trust.  See _resolve_audit_secret.
+DEFAULT_AUDIT_HMAC_SECRET = b"dz-erp-default-test-hmac-key-change-in-prod"
+
+# Suffix of the per-database key file created beside a file-backed database.
+AUDIT_KEY_SUFFIX = ".audit.key"
+
+
+def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
+    """Resolve the HMAC key that chains ``audit_events``.
+
+    Precedence, most to least trusted:
+
+    1. A secret passed explicitly by the caller.
+    2. ``ERP_AUDIT_HMAC_SECRET`` from the environment.
+    3. A key file beside a *file-backed* database, generated on first use and
+       created with mode ``0600`` so it stays readable only by the database
+       owner.  Reusing the file (rather than deriving the key from the database
+       contents, which would be circular) is what lets ``verify_audit_chain``
+       still succeed after a restart.
+    4. The documented test default, for an in-memory database only.
+
+    A file-backed database must never reach case 4.  The default is published in
+    the source tree, so falling back to it would let anyone who has read this
+    repository forge an arbitrary audit chain - silently, with no error and no
+    warning.  Generating a key on first use makes the secure path the default
+    path instead of a deployment step someone can forget.
+    """
+    if explicit:
+        return explicit
+    from_env = os.environ.get("ERP_AUDIT_HMAC_SECRET")
+    if from_env:
+        return from_env.encode("utf-8")
+
+    if db_path != ":memory:":
+        key_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEY_SUFFIX)
+        if key_path.exists():
+            return key_path.read_bytes().strip()
+        secret = base64.urlsafe_b64encode(os.urandom(32))
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # O_EXCL: if two processes race to initialise the same database, the
+            # loser adopts the winner's key rather than replacing it.
+            fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return key_path.read_bytes().strip()
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(secret)
+        return secret
+
+    return DEFAULT_AUDIT_HMAC_SECRET
+
+
 class ERPDatabase:
     """Thread-safe transactional database manager with audit hash-chaining."""
 
     def __init__(self, db_path: str = ":memory:", hmac_secret: Optional[bytes] = None) -> None:
         self.db_path = db_path
-        self._hmac_secret = hmac_secret or os.environ.get(
-            "ERP_AUDIT_HMAC_SECRET", "dz-erp-default-test-hmac-key-change-in-prod"
-        ).encode("utf-8")
+        self._hmac_secret = _resolve_audit_secret(db_path, hmac_secret)
         self._lock = threading.RLock()
         self._persistent_conn: Optional[sqlite3.Connection] = None
         if db_path == ":memory:":

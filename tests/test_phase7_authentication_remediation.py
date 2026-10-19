@@ -272,7 +272,14 @@ def test_openapi_contract_no_longer_advertises_identity_headers(env: SimpleNames
 
     assert "X-User-Id" not in declared
     assert "X-Company-Id" not in declared
-    assert protected_without_security == []
+    # The public set is exactly what the implementation serves without a
+    # credential: the health probe, the endpoint that *issues* credentials, and
+    # the deliberately non-sensitive upload-policy description.  Anything else
+    # appearing here would mean a protected route is published as open.
+    assert protected_without_security == [
+        "GET /api/v1/upload-policy",
+        "POST /api/v1/auth/token",
+    ], f"unexpected public operations: {protected_without_security}"
 
     schemes = schema.get("components", {}).get("securitySchemes", {})
     assert "BearerAuth" in schemes
@@ -1014,3 +1021,87 @@ def test_negative_ttl_is_refused(env: SimpleNamespace) -> None:
         env.auth.issue_token("clerk_a", "Clerk#2026x", ttl_seconds=0)
     with pytest.raises(ValueError):
         env.auth.issue_token("clerk_a", "Clerk#2026x", ttl_seconds=-1)
+
+
+# ----------------------------------------------------------------------
+# Denial-audit coverage: what is attributable and what is not
+# ----------------------------------------------------------------------
+def test_attributed_auth_denials_are_durable_audit_events(env: SimpleNamespace) -> None:
+    """Revoked, expired and inactive-user rejections must survive as audit rows.
+
+    The audit write happens inside ``AuthManager.authenticate`` and the error is
+    raised only after that transaction commits, so the forensic record is not
+    rolled back with the rejection.  This is the property that makes a blocked
+    credential reconstructable after the fact.
+    """
+    client = env.client
+    token = _token(client, "clerk_a", "Clerk#2026x")
+
+    # Revoked.
+    client.post("/api/v1/auth/revoke", json={"reason": "sign-out"}, headers=_bearer(token))
+    resp = client.get("/api/v1/auth/session", headers=_bearer(token))
+    assert resp.status_code == 401, resp.text
+
+    # Expired.  The fixture clock only moves through advance(); assigning to a
+    # nonexistent `offset` attribute silently does nothing.
+    fresh = _token(client, "clerk_a", "Clerk#2026x")
+    env.clock.advance(hours=9)
+    resp = client.get("/api/v1/auth/session", headers=_bearer(fresh))
+    assert resp.status_code == 401, resp.text
+
+    with env.db.transaction() as conn:
+        actions = [row["action_type"] for row in conn.execute("SELECT action_type FROM audit_events").fetchall()]
+
+    for expected in ("AUTH_CREDENTIAL_REVOKED_REJECTED", "AUTH_CREDENTIAL_EXPIRED_REJECTED"):
+        assert expected in actions, f"{expected} missing from audit_events (have: {sorted(set(actions))})"
+
+    assert env.db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_unattributable_auth_failures_are_deliberately_not_tenant_audited(env: SimpleNamespace) -> None:
+    """Document the limit of the audit trail for credential failures with no owner.
+
+    A missing, malformed or unknown token resolves to no ``users`` row, so there
+    is no ``company_id`` to attribute the event to - and ``audit_events.company_id``
+    is ``NOT NULL`` and tenant-scoped precisely so that one tenant can never read
+    another's audit trail.  Attributing an unattributable rejection would mean
+    either inventing a tenant or widening that column, and both would weaken the
+    isolation guarantee.
+
+    Consequence, stated plainly: an unknown token leaves no row in
+    ``audit_events``.  The exposure is bounded - session tokens carry 256 bits of
+    CSPRNG entropy, so guessing one is not a practical attack, and the realistic
+    brute-force vector (password guessing) *is* durably counted through
+    ``users.failed_login_count`` and drives the account lockout.
+
+    This test pins the design so a future change to it is deliberate: either the
+    attribution rule or the tenant-isolation rule must be re-decided explicitly.
+    """
+    client = env.client
+    before = _audit_actions(env)
+
+    for header in (None, "", "Bearer", "Basic abc", "Bearer dzsess_unknown", "Bearer dzsess_" + "x" * 43):
+        headers = {} if header is None else {"Authorization": header}
+        assert client.get("/api/v1/auth/session", headers=headers).status_code == 401
+
+    after = _audit_actions(env)
+    assert after == before, (
+        "unattributed credential failures unexpectedly produced audit_events rows; "
+        "if that is now intended, this test and the tenant-isolation rule must be re-decided"
+    )
+
+    # The password path, by contrast, IS durably counted.
+    for _ in range(5):
+        client.post("/api/v1/auth/token", json={"username": "clerk_a", "password": "wrong-password"})
+    with env.db.transaction() as conn:
+        row = conn.execute("SELECT failed_login_count, locked_until FROM users WHERE id = 1").fetchone()
+    # The counter is deliberately reset to 0 when the account locks: it counts
+    # failures toward the *next* lockout window, and `locked_until` is what
+    # enforces the current one.
+    assert row["locked_until"] is not None, "the account was not locked after 5 failures"
+    assert row["failed_login_count"] == 0, "the counter should reset on lockout"
+
+
+def _audit_actions(env: SimpleNamespace) -> List[str]:
+    with env.db.transaction() as conn:
+        return sorted(row["action_type"] for row in conn.execute("SELECT action_type FROM audit_events").fetchall())

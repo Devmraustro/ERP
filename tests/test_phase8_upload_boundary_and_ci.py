@@ -1306,16 +1306,17 @@ def test_file_backed_database_never_uses_the_published_default_key(tmp_path: Pat
     assert db._hmac_secret != DEFAULT_AUDIT_HMAC_SECRET
 
 
-def test_audit_key_is_generated_beside_the_database_with_owner_only_permissions(tmp_path: Path) -> None:
+def test_audit_key_is_generated_beside_the_database_with_owner_only_permissions(
+    tmp_path: Path, assert_owner_only_permissions
+) -> None:
     """The generated key must be stable across restarts and unreadable by others."""
-    import stat
 
     db_path = tmp_path / "erp.sqlite3"
     first = ERPDatabase(str(db_path))._hmac_secret
     key_file = tmp_path / (db_path.name + AUDIT_KEY_SUFFIX)
 
     assert key_file.exists(), "no key file was generated beside the database"
-    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600, "the key file is readable by other users"
+    assert_owner_only_permissions(key_file)
     # Stable across a reopen: otherwise verify_audit_chain would fail on restart.
     assert ERPDatabase(str(db_path))._hmac_secret == first
 
@@ -1388,7 +1389,9 @@ def test_backup_and_restore_preserve_the_audit_key(env: SimpleNamespace) -> None
 # ----------------------------------------------------------------------
 # Vault key persistence (Workstream D)
 # ----------------------------------------------------------------------
-def test_vault_key_is_persisted_so_documents_survive_a_restart(tmp_path: Path) -> None:
+def test_vault_key_is_persisted_so_documents_survive_a_restart(
+    tmp_path: Path, assert_owner_only_permissions
+) -> None:
     """A fresh key per process silently destroys every stored document.
 
     ``PrivateDocumentVault`` used to call ``Fernet.generate_key()`` whenever no
@@ -1398,15 +1401,13 @@ def test_vault_key_is_persisted_so_documents_survive_a_restart(tmp_path: Path) -
     never caught it because each test builds its vault in the same process that
     wrote to it.
     """
-    import stat
-
     vault_root = tmp_path / "vault"
     first = PrivateDocumentVault(vault_root)
     stored_path = first.store_bytes(company_id=1, file_sha256="a" * 64, content=b"SECRET INVOICE BYTES")
 
     key_file = tmp_path / (vault_root.name + VAULT_KEY_SUFFIX)
     assert key_file.exists(), "no key file was generated beside the vault"
-    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600, "the vault key file is readable by other users"
+    assert_owner_only_permissions(key_file)
 
     # A new instance over the same directory must decrypt what the first wrote.
     restarted = PrivateDocumentVault(vault_root)
@@ -1445,7 +1446,9 @@ def test_vault_key_precedence_and_failure_mode(tmp_path: Path, monkeypatch: pyte
 # ----------------------------------------------------------------------
 # Restore must leave a usable deployment (Workstream F)
 # ----------------------------------------------------------------------
-def test_restored_database_and_vault_are_reopenable_without_the_original_secrets(tmp_path: Path) -> None:
+def test_restored_database_and_vault_are_reopenable_without_the_original_secrets(
+    tmp_path: Path, assert_owner_only_permissions
+) -> None:
     """A restore that only works through the returned objects is not a restore.
 
     The keys were passed in memory, so ``restore_and_verify_backup`` verified
@@ -1455,8 +1458,6 @@ def test_restored_database_and_vault_are_reopenable_without_the_original_secrets
     ``InvalidToken``.  Disaster recovery is precisely "open it later", so the
     keys have to survive the restore.
     """
-    import stat
-
     from dz_erp.database import ERPDatabase as _ERPDB
     from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_backup
 
@@ -1487,8 +1488,8 @@ def test_restored_database_and_vault_are_reopenable_without_the_original_secrets
     out = root / "out"
     audit_key = out / "erp_snapshot.sqlite3.audit.key"
     vault_key = out / "vault.vault.key"
-    assert audit_key.exists() and oct(stat.S_IMODE(audit_key.stat().st_mode)) == "0o600"
-    assert vault_key.exists() and oct(stat.S_IMODE(vault_key.stat().st_mode)) == "0o600"
+    assert_owner_only_permissions(audit_key)
+    assert_owner_only_permissions(vault_key)
 
     # Reopen exactly as a recovering deployment would: no secrets supplied.
     reopened_db = _ERPDB(str(out / "erp_snapshot.sqlite3"))

@@ -109,3 +109,7 @@ tqdm==4.70.1
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 uvicorn==0.34.0
+# Windows-only terminal colour support for pytest/tqdm (declared with
+# platform markers in upstream metadata; pinned here so the lockfile is
+# cross-platform complete and `pip check` passes on Windows).
+colorama==0.4.6 ; sys_platform == "win32"

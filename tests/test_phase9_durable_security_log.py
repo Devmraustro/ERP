@@ -14,7 +14,6 @@ run left no durable trace.
 from __future__ import annotations
 
 import json
-import stat
 import threading
 from typing import Any, Dict, List
 
@@ -23,7 +22,9 @@ import pytest
 from dz_erp.security_audit import JsonlSecurityLog, StructuredRedactingLogger
 
 
-def test_rejections_are_written_to_a_durable_file_with_no_tenant_attribution(tmp_path, monkeypatch):
+def test_rejections_are_written_to_a_durable_file_with_no_tenant_attribution(
+    tmp_path, monkeypatch, assert_owner_only_permissions
+):
     """The whole point: the record must outlive the process and invent no company."""
     monkeypatch.setenv("ERP_SECURITY_LOG_PATH", str(tmp_path / "security.jsonl"))
 
@@ -60,7 +61,7 @@ def test_rejections_are_written_to_a_durable_file_with_no_tenant_attribution(tmp
     # The presented credential must never reach the log.
     assert "not-a-real-token" not in log_file.read_text()
     # Owner-only from creation, never tightened after the fact.
-    assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+    assert_owner_only_permissions(log_file)
 
 
 def test_a_failing_sink_is_not_swallowed():

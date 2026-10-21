@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata as importlib_metadata
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -129,8 +130,20 @@ def _failures() -> List[str]:
     # --- 3. the headless build must be the one that owns cv2 --------------
     site_packages = _site_packages()
     if site_packages is not None:
-        if not (site_packages / OPENCV_HEADLESS_PAYLOAD_DIR).is_dir():
-            problems.append(f"expected headless payload directory {OPENCV_HEADLESS_PAYLOAD_DIR}/ in {site_packages}")
+        # The headless wheel creates a `.libs` payload directory on POSIX
+        # (manylinux/musllinux wheels bundle OpenCV shared libs there).  On
+        # Windows the DLLs are shipped directly in the package, so no
+        # `.libs` directory is created.  We therefore only assert its presence
+        # on POSIX, but we assert the GUI wheel's payload directory is absent
+        # on ALL platforms (if the GUI wheel were installed on Windows it would
+        # also not create a `.libs` directory, but the dist-info name would
+        # still be `opencv-python` which we already check via the declared
+        # dependencies).
+        if os.name == "posix":
+            if not (site_packages / OPENCV_HEADLESS_PAYLOAD_DIR).is_dir():
+                problems.append(
+                    f"expected headless payload directory {OPENCV_HEADLESS_PAYLOAD_DIR}/ in {site_packages}"
+                )
         if (site_packages / OPENCV_GUI_PAYLOAD_DIR).is_dir():
             problems.append(
                 f"GUI OpenCV payload directory {OPENCV_GUI_PAYLOAD_DIR}/ is present; the headless build "

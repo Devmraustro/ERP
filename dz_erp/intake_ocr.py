@@ -23,6 +23,20 @@ from rapidocr_onnxruntime import RapidOCR
 
 from .database import ERPDatabase, TenantIsolationError
 from .decimal_utils import format_dzd
+from .key_rotation import (
+    BLOB_MAGIC,
+    LEGACY_KEY_VERSION,
+    BlobFormatError,
+    KeyConfigurationError,
+    KeyRing,
+    KeyVersionInUseError,
+    KeyVersionUnavailableError,
+    RotationJournal,
+    atomic_write_bytes,
+    encode_versioned_blob,
+    rotation_lock,
+    split_blob,
+)
 
 EICAR_SIGNATURE = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 DANGEROUS_PDF_TOKENS = (b"/JavaScript", b"/JS", b"/Launch", b"/RichMedia")
@@ -98,13 +112,23 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 
 
 # Suffix of the per-vault key file, written beside the vault directory.
+# This file is the *version 1* (legacy) key. It remains the bootstrap key of a
+# vault that has never been rotated.
 VAULT_KEY_SUFFIX = ".vault.key"
+
+# Version registry, written beside the vault directory only once a rotation has
+# happened. When it exists it is authoritative for every key version.
+VAULT_KEYRING_SUFFIX = ".vault.keys.json"
+
+# Rotation progress journal and exclusive rotation lock, both beside the vault.
+VAULT_ROTATION_JOURNAL_SUFFIX = ".vault.rotation.jsonl"
+VAULT_ROTATION_LOCK_SUFFIX = ".vault.rotation.lock"
 
 # Environment variable that supplies the vault key in a real deployment.
 VAULT_KEY_ENV = "ERP_VAULT_KEY"
 
 
-class VaultKeyUnavailableError(RuntimeError):
+class VaultKeyUnavailableError(KeyVersionUnavailableError):
     """Raised when the vault key is missing while encrypted documents still exist.
 
     Distinct from a decryption failure so an operator can tell "the key was
@@ -165,21 +189,181 @@ def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
 
 
 class PrivateDocumentVault:
-    """Encrypted-at-rest, company-isolated private document storage."""
+    """Encrypted-at-rest, company-isolated private document storage.
 
-    def __init__(self, vault_root: Path, encryption_key: Optional[bytes] = None) -> None:
+    Key versioning
+    --------------
+    Every blob written by this build starts with ``DZKV`` + one version byte, so
+    the blob itself states which key decrypts it (see
+    :mod:`dz_erp.key_rotation`). A blob without that header is legacy ciphertext
+    written before versioning existed and is, by definition, version 1.
+
+    The version registry (``<vault>.vault.keys.json``) is created by the first
+    rotation. Until then the vault behaves exactly as it always has: one key in
+    ``<vault>.vault.key``, which is version 1. That is what makes the upgrade
+    backward compatible - no document is rewritten and no key is replaced on
+    upgrade.
+
+    A missing *historical* key is fatal, not repairable: reads of blobs that
+    need it raise :class:`VaultKeyUnavailableError` instead of "decrypting" with
+    whatever key happens to be active.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        encryption_key: Optional[bytes] = None,
+        keyring: Optional[KeyRing] = None,
+    ) -> None:
         self.vault_root = Path(vault_root)
         self.vault_root.mkdir(parents=True, exist_ok=True)
-        self.encryption_key = _resolve_vault_key(self.vault_root, encryption_key)
+        self.vault_key_path = self.vault_root.parent / (self.vault_root.name + VAULT_KEY_SUFFIX)
+        self.keyring_path = self.vault_root.parent / (self.vault_root.name + VAULT_KEYRING_SUFFIX)
+        self.rotation_journal_path = self.vault_root.parent / (
+            self.vault_root.name + VAULT_ROTATION_JOURNAL_SUFFIX
+        )
+        self.rotation_lock_path = self.vault_root.parent / (self.vault_root.name + VAULT_ROTATION_LOCK_SUFFIX)
+
+        if keyring is not None:
+            self._keyring = keyring
+            self._keyring_persisted = True
+        elif self.keyring_path.exists():
+            self._keyring = KeyRing.load(self.keyring_path, "vault")
+            self._keyring_persisted = True
+        else:
+            # Un-rotated vault: the pre-existing single key is version 1 and no
+            # registry file is written. Upgrading therefore changes no data.
+            self._keyring = KeyRing.bootstrap(
+                "vault", _resolve_vault_key(self.vault_root, encryption_key)
+            )
+            self._keyring_persisted = False
+
+        if self._keyring_persisted:
+            self._assert_sources_agree(encryption_key)
+
+        self._fernets: Dict[int, Fernet] = {}
+        self._refresh_active_key()
+        self.validate_key_configuration()
+
+    # ------------------------------------------------------------------
+    # Key configuration
+    # ------------------------------------------------------------------
+    @property
+    def keyring(self) -> KeyRing:
+        return self._keyring
+
+    @property
+    def active_key_version(self) -> int:
+        return self._keyring.active_version
+
+    def _refresh_active_key(self) -> None:
+        """Rebuild the cached key material and validate every retained version."""
+        self.encryption_key = self._keyring.active_material
         self._fernet = Fernet(self.encryption_key)
+        # Eagerly construct a Fernet for every retained version so a corrupted
+        # historical key surfaces at start-up rather than during an incident.
+        # Fernet() raises ValueError for malformed material, which is the same
+        # failure the previous single-key implementation produced.
+        self._fernets = {version: Fernet(self._keyring.material_for(version)) for version in self._keyring.versions}
+
+    def _assert_sources_agree(self, explicit: Optional[bytes]) -> None:
+        """Refuse to run when a supplied key contradicts the persisted registry.
+
+        Precedence cannot resolve this one: an explicit key and a registry may
+        not disagree about which key is active, because silently preferring
+        either would write new documents under a key the other half of the
+        deployment cannot read.
+        """
+        active = self._keyring.active_material
+        if explicit is not None and bytes(explicit) != active:
+            raise KeyConfigurationError(
+                f"The explicit vault key disagrees with the active key (version "
+                f"{self._keyring.active_version}) in {self.keyring_path}. Refusing to guess which key "
+                "is authoritative."
+            )
+        from_env = os.environ.get(VAULT_KEY_ENV)
+        if from_env and from_env.encode("utf-8") != active:
+            raise KeyConfigurationError(
+                f"{VAULT_KEY_ENV} disagrees with the active key (version {self._keyring.active_version}) in "
+                f"{self.keyring_path}. Once a key registry exists it is authoritative; update or remove "
+                "the environment variable."
+            )
+        if self.vault_key_path.exists() and self._keyring.has_version(LEGACY_KEY_VERSION):
+            legacy = self.vault_key_path.read_bytes().strip()
+            if legacy != self._keyring.material_for(LEGACY_KEY_VERSION):
+                raise KeyConfigurationError(
+                    f"{self.vault_key_path} does not match version {LEGACY_KEY_VERSION} of the key registry "
+                    f"{self.keyring_path}. One of the two is stale; refusing to pick one."
+                )
+
+    def validate_key_configuration(self, *, check_referenced_versions: bool = True) -> Dict[str, Any]:
+        """Fail closed unless every key needed by stored data is present and valid."""
+        for version in self._keyring.versions:
+            Fernet(self._keyring.material_for(version))
+        report: Dict[str, Any] = {"active_version": self._keyring.active_version, "versions": list(self._keyring.versions)}
+        if check_referenced_versions:
+            referenced = self.scan_blob_versions()
+            missing = sorted(set(referenced) - set(self._keyring.versions))
+            report["blobs_by_version"] = referenced
+            if missing:
+                raise VaultKeyUnavailableError(
+                    f"{sum(referenced[v] for v in missing)} document(s) in {self.vault_root} require "
+                    f"vault key version(s) {missing}, which are absent from {self.keyring_path}. "
+                    "Restore the missing key version before starting the service; substituting another "
+                    "key would permanently orphan those documents."
+                )
+        return report
+
+    def _fernet_for(self, version: int) -> Fernet:
+        fernet = self._fernets.get(version)
+        if fernet is None:
+            try:
+                fernet = Fernet(self._keyring.material_for(version))
+            except KeyVersionUnavailableError as exc:
+                raise VaultKeyUnavailableError(str(exc)) from exc
+            self._fernets[version] = fernet
+        return fernet
+
+    # ------------------------------------------------------------------
+    # Blob storage
+    # ------------------------------------------------------------------
+    def _blob_version_of_file(self, path: Path) -> int:
+        """Read only the header of a stored blob. Never decrypts anything."""
+        with open(path, "rb") as handle:
+            head = handle.read(len(BLOB_MAGIC) + 1)
+        if head.startswith(BLOB_MAGIC):
+            if len(head) <= len(BLOB_MAGIC):
+                raise BlobFormatError(f"Blob {path.name} has a truncated key-version header.")
+            version = head[len(BLOB_MAGIC)]
+            if version == 0:
+                raise BlobFormatError(f"Blob {path.name} declares key version 0.")
+            return version
+        return LEGACY_KEY_VERSION
+
+    def scan_blob_versions(self) -> Dict[int, int]:
+        """Count stored blobs by the key version their header requires."""
+        counts: Dict[int, int] = {}
+        for path in sorted(self.vault_root.rglob("*.enc")):
+            try:
+                version = self._blob_version_of_file(path)
+            except (OSError, BlobFormatError):
+                # A structurally broken blob is reported by verify_blobs(); it
+                # must not stop the service from starting, and it must never be
+                # re-interpreted as a different version here.
+                continue
+            counts[version] = counts.get(version, 0) + 1
+        return counts
 
     def store_bytes(self, company_id: int, file_sha256: str, content: bytes) -> str:
         comp_dir = self.vault_root / f"company_{company_id}"
         comp_dir.mkdir(parents=True, exist_ok=True)
         dest = comp_dir / f"{file_sha256}.enc"
         if not dest.exists():
-            encrypted = self._fernet.encrypt(content)
-            dest.write_bytes(encrypted)
+            version = self._keyring.active_version
+            blob = encode_versioned_blob(version, self._fernet_for(version).encrypt(content))
+            # Atomic: a crash mid-write can no longer leave a truncated blob
+            # that would fail to decrypt forever with no explanation.
+            atomic_write_bytes(dest, blob, mode=0o600)
         return str(dest)
 
     def read_bytes(self, company_id: int, requesting_company_id: int, vault_path: str) -> bytes:
@@ -201,8 +385,269 @@ class PrivateDocumentVault:
             if not anchored.exists():
                 raise TenantIsolationError("Vault path traversal or cross-company path detected.")
             p = anchored
-        encrypted = p.read_bytes()
-        return self._fernet.decrypt(encrypted)
+        version, payload, _legacy = split_blob(p.read_bytes())
+        # A wrong key still raises InvalidToken; a *missing* key version raises
+        # VaultKeyUnavailableError. Keeping those distinct is the difference
+        # between "someone tampered" and "the key was lost".
+        return self._fernet_for(version).decrypt(payload)
+
+    def verify_blobs(self) -> Dict[str, Any]:
+        """Decrypt every stored blob and report per-version counts and failures."""
+        report: Dict[str, Any] = {"checked": 0, "failed": 0, "by_version": {}, "errors": []}
+        for path in sorted(self.vault_root.rglob("*.enc")):
+            rel = str(path.relative_to(self.vault_root))
+            try:
+                version, payload, _legacy = split_blob(path.read_bytes())
+                self._fernet_for(version).decrypt(payload)
+            except Exception as exc:
+                report["failed"] += 1
+                report["errors"].append({"blob": rel, "reason": type(exc).__name__})
+                continue
+            report["checked"] += 1
+            report["by_version"][str(version)] = report["by_version"].get(str(version), 0) + 1
+        return report
+
+    # ------------------------------------------------------------------
+    # Rotation
+    # ------------------------------------------------------------------
+    def rotate_key(
+        self,
+        new_key: Optional[bytes] = None,
+        *,
+        new_version: Optional[int] = None,
+        journal_path: Optional[Path] = None,
+        max_retries: int = 2,
+    ) -> Dict[str, Any]:
+        """Re-encrypt every blob with a new active key, safely and resumably.
+
+        The registry is written *before* the first blob is touched, so an
+        interruption at any point leaves both the old and the new key available
+        and every blob readable. Re-running with the same ``new_key`` resumes
+        the interrupted migration instead of inventing yet another version.
+
+        Concurrency is optimistic: each blob's identity and timestamps are
+        captured before it is read and re-checked before the atomic replace, so
+        a concurrent writer's update is never silently overwritten. A contended
+        blob is re-read and retried; one that keeps changing is reported as
+        skipped rather than forced.
+        """
+        ring = self._keyring
+        if new_key is not None:
+            new_key = bytes(new_key)
+            Fernet(new_key)  # ValueError for malformed material, before anything changes
+            resume_version = ring.version_of_material(new_key)
+        else:
+            new_key = Fernet.generate_key()
+            resume_version = None
+
+        with rotation_lock(self.rotation_lock_path):
+            journal = RotationJournal(journal_path or self.rotation_journal_path)
+            referenced = self.scan_blob_versions()
+            missing = sorted(set(referenced) - set(ring.versions))
+            if missing:
+                raise VaultKeyUnavailableError(
+                    f"Cannot rotate: existing documents require missing key version(s) {missing}. "
+                    "Rotation must not run while any ciphertext is unreadable."
+                )
+
+            working = KeyRing.from_dict(ring.to_dict())
+            previous_version = working.active_version
+            if resume_version is not None:
+                target_version = resume_version
+                if working.active_version != target_version:
+                    working.set_active(target_version)
+            else:
+                target_version = working.add_version(new_key, version=new_version)
+
+            # Persist first, swap in memory only after the write succeeded: if
+            # this fails, nothing has been re-encrypted and the running process
+            # keeps using the key the registry still names.
+            working.save(self.keyring_path)
+            self._keyring = working
+            self._keyring_persisted = True
+            self._refresh_active_key()
+
+            journal.record(
+                event="rotation_started",
+                previous_version=previous_version,
+                target_version=target_version,
+                resumed=resume_version is not None,
+                blobs_by_version={str(k): v for k, v in referenced.items()},
+            )
+
+            report: Dict[str, Any] = {
+                "vault_root": str(self.vault_root),
+                "keyring_path": str(self.keyring_path),
+                "journal_path": str(journal.path),
+                "previous_version": previous_version,
+                "active_version": target_version,
+                "resumed": resume_version is not None,
+                "attempted": 0,
+                "completed": 0,
+                "skipped_already_current": 0,
+                "skipped_concurrent": 0,
+                "skipped_missing": 0,
+                "failed": 0,
+                "errors": [],
+            }
+
+            for path in sorted(self.vault_root.rglob("*.enc")):
+                report["attempted"] += 1
+                self._rotate_one(path, target_version, max_retries, journal, report)
+
+            verification = self.verify_blobs()
+            report["verification"] = verification
+            report["verified_ok"] = verification["failed"] == 0
+            journal.record(
+                event="rotation_finished",
+                target_version=target_version,
+                completed=report["completed"],
+                skipped=report["skipped_already_current"] + report["skipped_concurrent"],
+                failed=report["failed"],
+                verification_failures=verification["failed"],
+            )
+            return report
+
+    def _rotate_one(
+        self,
+        path: Path,
+        target_version: int,
+        max_retries: int,
+        journal: RotationJournal,
+        report: Dict[str, Any],
+    ) -> None:
+        rel = str(path.relative_to(self.vault_root))
+        for attempt in range(max_retries + 1):
+            try:
+                before = path.stat()
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                # Deleted by a concurrent actor. Nothing to migrate, and it is
+                # certainly not "completed".
+                report["skipped_missing"] += 1
+                journal.record(event="blob_missing", blob=rel)
+                return
+            try:
+                version, payload, _legacy = split_blob(raw)
+            except BlobFormatError:
+                report["failed"] += 1
+                report["errors"].append({"blob": rel, "reason": "BlobFormatError"})
+                journal.record(event="blob_failed", blob=rel, reason="BlobFormatError")
+                return
+            if version == target_version:
+                report["skipped_already_current"] += 1
+                return
+            try:
+                plaintext = self._fernet_for(version).decrypt(payload)
+                blob = encode_versioned_blob(
+                    target_version, self._fernet_for(target_version).encrypt(plaintext)
+                )
+                # Prove the migrated ciphertext round-trips to the identical
+                # plaintext before it is allowed to replace the original.
+                if self._fernet_for(target_version).decrypt(split_blob(blob)[1]) != plaintext:
+                    raise BlobFormatError("re-encrypted blob did not round-trip")
+            except (KeyVersionUnavailableError, BlobFormatError) as exc:
+                report["failed"] += 1
+                report["errors"].append({"blob": rel, "reason": type(exc).__name__, "from_version": version})
+                journal.record(
+                    event="blob_failed", blob=rel, from_version=version, reason=type(exc).__name__
+                )
+                return
+            except Exception as exc:
+                report["failed"] += 1
+                report["errors"].append({"blob": rel, "reason": type(exc).__name__, "from_version": version})
+                journal.record(
+                    event="blob_failed", blob=rel, from_version=version, reason=type(exc).__name__
+                )
+                return
+
+            if self._replace_if_unchanged(path, blob, before):
+                report["completed"] += 1
+                journal.record(event="blob_reencrypted", blob=rel, from_version=version, to_version=target_version)
+                return
+            journal.record(event="blob_contended", blob=rel, attempt=attempt + 1)
+
+        report["skipped_concurrent"] += 1
+        journal.record(event="blob_skipped_concurrent", blob=rel)
+
+    @staticmethod
+    def _replace_if_unchanged(path: Path, blob: bytes, before: os.stat_result) -> bool:
+        """Atomically replace *path* only if nothing else has written it since."""
+        tmp = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        atomic_write_bytes(tmp, blob, mode=0o600)
+        try:
+            current = path.stat()
+        except FileNotFoundError:
+            tmp.unlink(missing_ok=True)
+            return False
+        unchanged = (current.st_ino, current.st_mtime_ns, current.st_size) == (
+            before.st_ino,
+            before.st_mtime_ns,
+            before.st_size,
+        )
+        if not unchanged:
+            tmp.unlink(missing_ok=True)
+            return False
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+        return True
+
+    # ------------------------------------------------------------------
+    # Key lifecycle
+    # ------------------------------------------------------------------
+    def set_active_key_version(self, version: int) -> Dict[str, Any]:
+        """Documented rollback: write new documents with an existing version again.
+
+        This is the safe reverse of a rotation. It never deletes anything and
+        never rewrites existing blobs, so documents already written under the
+        newer version stay readable - which is what distinguishes a rollback
+        from a data-loss event.
+        """
+        working = KeyRing.from_dict(self._keyring.to_dict())
+        working.set_active(version)
+        working.save(self.keyring_path)
+        self._keyring = working
+        self._refresh_active_key()
+        return {
+            "active_version": working.active_version,
+            "retained_versions": list(working.versions),
+            "blobs_by_version": self.scan_blob_versions(),
+            "verified": self.verify_blobs(),
+        }
+
+    def retire_key(self, version: int) -> Dict[str, Any]:
+        """Mark a version retired: still usable to decrypt, never for new writes."""
+        working = KeyRing.from_dict(self._keyring.to_dict())
+        working.retire(version)
+        working.save(self.keyring_path)
+        self._keyring = working
+        self._refresh_active_key()
+        return {"retired_version": int(version), "active_version": self._keyring.active_version}
+
+    def remove_key(self, version: int, *, confirm_retained_copies: bool = False) -> Dict[str, Any]:
+        """Delete a key version - refused while any blob still needs it."""
+        version = int(version)
+        # Checked first so the operator gets the *precise* reason: an active key
+        # is never removable, no matter what the data currently looks like.
+        if version == self._keyring.active_version:
+            raise KeyConfigurationError(
+                f"Vault key version {version} is the active version and cannot be removed."
+            )
+        referenced = self.scan_blob_versions()
+        if referenced.get(version):
+            raise KeyVersionInUseError(
+                f"Refusing to remove vault key version {version}: {referenced[version]} document(s) in "
+                f"{self.vault_root} are still encrypted with it. Re-encrypt them first, then verify."
+            )
+        working = KeyRing.from_dict(self._keyring.to_dict())
+        working.remove(version, confirm_retained_copies=confirm_retained_copies)
+        working.save(self.keyring_path)
+        self._keyring = working
+        self._refresh_active_key()
+        return {"removed_version": version, "active_version": self._keyring.active_version}
 
 
 def inspect_and_validate_file_security(

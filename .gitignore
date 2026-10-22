@@ -20,3 +20,8 @@ build/
 .env
 *.secret
 *.key
+# Key-version registries and rotation journals: they contain key material or
+# operator activity records and must never be committed.
+*.keys.json
+*.rotation.jsonl
+*.rotation.lock

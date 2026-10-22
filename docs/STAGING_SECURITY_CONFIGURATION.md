@@ -28,8 +28,10 @@ Three independent secrets protect three different things. They are deliberately 
 
 | Secret | Environment variable | Key file (auto-generated) | Protects |
 |---|---|---|---|
-| Audit chain HMAC key | `ERP_AUDIT_HMAC_SECRET` | `<dbname>.audit.key` | The tamper-evidence of `audit_events` |
-| Vault encryption key | `ERP_VAULT_KEY` | `<vaultname>.vault.key` | Every stored document at rest |
+| Audit chain HMAC key (version 1) | `ERP_AUDIT_HMAC_SECRET` | `<dbname>.audit.key` | The tamper-evidence of `audit_events` |
+| Vault encryption key (version 1) | `ERP_VAULT_KEY` | `<vaultname>.vault.key` | Every stored document at rest |
+| Audit key registry (all versions) | — (file only) | `<dbname>.audit.keys.json` | Created by the first audit-key rotation |
+| Vault key registry (all versions) | — (file only) | `<vaultname>.vault.keys.json` | Created by the first vault-key rotation |
 | Backup encryption key | *(no default)* | — | The encrypted backup archive |
 
 ### 1.1 Precedence (audit and vault keys)
@@ -70,10 +72,13 @@ Set `ERP_AUDIT_HMAC_SECRET` and `ERP_VAULT_KEY` explicitly, from a secret manage
 - **Back both key files up with the same care as the database.** Losing the vault key means
   every stored document is permanently unreadable; losing the audit key means the chain can
   never be verified again. Both are correct fail-closed behaviour and both are permanent.
-- **Rotate deliberately, never in place.** There is no in-place rotation: re-encrypting the
-  vault requires reading every blob with the old key and writing it with the new one, and
-  re-chaining the audit log is not possible without invalidating it. Treat rotation as a
-  migration with a maintenance window, and validate it on a copy first.
+- **Rotate deliberately, with a verified backup first.** Rotation is now implemented
+  (`PrivateDocumentVault.rotate_key` / `ERPDatabase.rotate_audit_key`) and is additive: the new
+  key version is activated while every historical version is retained, so no record becomes
+  unreadable at any point. Old keys are never deleted automatically - see
+  `KEY_ROTATION_DESIGN.md` and `docs/KEY_MIGRATION_AND_RECOVERY_GUIDE.md`. Rotation is still an
+  operator action taken on a validated copy during a maintenance window; it is not exposed over
+  the API.
 - **Never commit a key.** `git ls-files | grep -E '\.(audit|vault)\.key$'` returns nothing, and
   must keep returning nothing.
 
@@ -303,9 +308,8 @@ Then confirm:
 
 | Gap | Severity | Remediation |
 |---|---|---|
-| No key rotation mechanism | Medium for production | Plan as a migration; validate on a copy. Not needed for staging. |
-| No security-log rotation | Low | `logrotate`. The log holds no financial data. |
-| `/docs` and `/redoc` not parameterised by env var | Medium for production | Disable in `dz_erp/serve.py` before a production build. |
+| Key rotation requires operator filesystem access; no scheduled/automatic rotation | Medium for production | Run the documented rotation on a schedule with a verified backup; see the recovery guide. |
+| Key material is protected by file permissions, not an HSM | Medium for production | File mode `0600` is enforced; hardware-backed custody is a deployment control, not implemented here. |
 | `source_documents.vault_path` stores an absolute path | Low | Mitigated by re-anchoring on read; a relative path would be cleaner. |
 | OCR accuracy not statistically established | **High for unattended posting** | Keep human review mandatory; build a powered benchmark. |
 

@@ -22,13 +22,17 @@ from cryptography.fernet import Fernet
 
 from .database import (
     AUDIT_KEY_SUFFIX,
+    AUDIT_KEYRING_SUFFIX,
+    AUDIT_KEY_ENV,
+    AuditKeyUnavailableError,
     AuthorizationError,
     ERPDatabase,
     FinancialIntegrityError,
     TenantIsolationError,
 )
+from .key_rotation import KeyConfigurationError, KeyRing
 from .decimal_utils import format_dzd, to_decimal
-from .intake_ocr import VAULT_KEY_SUFFIX, PrivateDocumentVault
+from .intake_ocr import VAULT_KEY_ENV, VAULT_KEY_SUFFIX, VAULT_KEYRING_SUFFIX, PrivateDocumentVault
 
 SENSITIVE_KEYS = {
     "password",
@@ -518,16 +522,37 @@ def create_encrypted_backup(
         else:
             vault_copy_dir.mkdir(parents=True, exist_ok=True)
 
+        # A restore must reproduce *every* key version the archived ciphertext
+        # and audit rows depend on - not just the currently active one. Rotating
+        # after this backup was taken moves the active version on, and a
+        # manifest that only carried "the key" would then restore artifacts it
+        # could no longer read.
+        vault_ring = vault.keyring
+        audit_ring = db.audit_keyring
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "db_sha256": db_sha256,
             "vault_file_hashes": vault_hashes,
+            # Human-readable requirement statement: which versions, and which
+            # one is active. Contains no key material, so it is safe to surface
+            # in an operator-facing report or restore preflight check.
+            "vault_key_versions": vault_ring.summary(),
+            "audit_key_versions": audit_ring.summary(),
+            # Version-1 material is what the legacy single-key fields mean; see
+            # the note on the key registry in dz_erp/key_rotation.py.
             "vault_encryption_key_b64": base64.b64encode(vault.encryption_key).decode("ascii"),
-            # The audit chain is only verifiable with the key that wrote it, so a
-            # backup that cannot restore that key cannot prove its own integrity.
-            # It travels inside the Fernet-encrypted archive, i.e. under exactly
-            # the same protection as the vault key above.
+            # The audit chain is only verifiable with the keys that wrote it, so
+            # a backup that cannot restore them cannot prove its own integrity.
+            # The rings travel inside the Fernet-encrypted archive, i.e. under
+            # exactly the same protection as the vault key above; nothing here
+            # is exposed in clear.
             "audit_hmac_secret_b64": base64.b64encode(db._hmac_secret).decode("ascii"),
+            "vault_keyring_b64": base64.b64encode(
+                json.dumps(vault_ring.to_dict(), sort_keys=True).encode("utf-8")
+            ).decode("ascii"),
+            "audit_keyring_b64": base64.b64encode(
+                json.dumps(audit_ring.to_dict(), sort_keys=True).encode("utf-8")
+            ).decode("ascii"),
         }
         (tmp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -546,9 +571,66 @@ def create_encrypted_backup(
             "encrypted_size_bytes": len(encrypted_archive),
             "db_sha256": db_sha256,
             "vault_file_count": len(vault_hashes),
+            # Version numbers only - no key material. An operator can tell from
+            # the backup alone which keys a restore will require.
+            "vault_key_versions": vault_ring.summary()["versions"],
+            "audit_key_versions": audit_ring.summary()["versions"],
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _keyring_from_manifest(
+    manifest: Dict[str, Any],
+    ring_field: str,
+    legacy_field: str,
+    *,
+    kind: str,
+    explicit: Optional[bytes],
+) -> KeyRing:
+    """Rebuild a key registry from a backup, tolerating pre-registry archives.
+
+    A backup written before versioning existed carries one key and no registry.
+    That key is version 1 by definition, so those archives stay restorable -
+    they are simply never rotatable until the next backup is taken.
+    """
+    encoded = manifest.get(ring_field)
+    if encoded:
+        try:
+            payload = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise FinancialIntegrityError(f"Backup field {ring_field} is not a valid key registry.") from exc
+        ring = KeyRing.from_dict(payload)
+        if ring.kind != kind:
+            raise FinancialIntegrityError(
+                f"Backup field {ring_field} holds a {ring.kind!r} key registry but a {kind!r} registry is required."
+            )
+        if explicit is not None and bytes(explicit) != ring.active_material:
+            raise KeyConfigurationError(
+                f"The supplied {kind} key is not the active key recorded in the backup; refusing to guess."
+            )
+        # Preflight the environment too, and do it here rather than in the
+        # constructors below: those run *after* the restore has already written
+        # key files into the target directory, so a configuration conflict would
+        # leave a half-restored directory behind.
+        env_var = VAULT_KEY_ENV if kind == "vault" else AUDIT_KEY_ENV
+        from_env = os.environ.get(env_var)
+        if from_env and from_env.encode("utf-8") != ring.active_material:
+            raise KeyConfigurationError(
+                f"{env_var} disagrees with the active {kind} key recorded in the backup. "
+                "Refusing to restore an archive that would not be readable by this configuration."
+            )
+        return ring
+
+    if manifest.get(legacy_field):
+        legacy = base64.b64decode(manifest[legacy_field])
+    elif explicit is not None:
+        legacy = bytes(explicit)
+    else:
+        raise FinancialIntegrityError(
+            f"The backup carries no {kind} key material, so its encrypted artefacts could not be restored."
+        )
+    return KeyRing.bootstrap(kind, legacy)
 
 
 def _write_key_file(key_path: Path, secret: bytes) -> None:
@@ -590,33 +672,43 @@ def restore_and_verify_backup(
         if not fp.exists() or hashlib.sha256(fp.read_bytes()).hexdigest() != expected_sha:
             raise FinancialIntegrityError(f"Restored vault blob {rel_path} failed SHA-256 verification!")
 
-    # An explicit secret wins; otherwise take the one the backup was written
-    # with.  Archives created before the key was carried have no such field, so
-    # fall back to whatever ERPDatabase would resolve on its own.
-    audit_secret = (
-        hmac_secret
-        or base64.b64decode(manifest["audit_hmac_secret_b64"])
-        if manifest.get("audit_hmac_secret_b64")
-        else hmac_secret
+    # Restore every key version the archive needs.  An explicit secret still
+    # wins, but it can only be the *active* key of the archived registry -
+    # historical versions must come from the archive itself or the restore is
+    # incomplete by construction.
+    audit_ring = _keyring_from_manifest(
+        manifest, "audit_keyring_b64", "audit_hmac_secret_b64", kind="audit", explicit=hmac_secret
     )
-    vault_secret = base64.b64decode(manifest["vault_encryption_key_b64"])
+    vault_ring = _keyring_from_manifest(
+        manifest, "vault_keyring_b64", "vault_encryption_key_b64", kind="vault", explicit=None
+    )
 
-    # Persist both keys beside the restored artefacts.  Without this the
-    # restore only works through the objects returned here: reopening the
-    # restored database in a fresh process - which is the entire point of a
-    # restore - resolves a brand-new key, so every audit hash reads as
-    # EVENT_HASH_TAMPERED and every stored document raises InvalidToken.  The
-    # keys are already inside the Fernet-encrypted archive, so writing them to
-    # the freshly-restored 0600 directory adds no new exposure.
-    if audit_secret:
-        _write_key_file(Path(str(restored_db_path) + AUDIT_KEY_SUFFIX), audit_secret)
+    # Persist the registries and the version-1 key files beside the restored
+    # artefacts.  Without this the restore only works through the objects
+    # returned here: reopening the restored database in a fresh process - which
+    # is the entire point of a restore - resolves the one legacy key, so every
+    # audit hash reads as EVENT_HASH_TAMPERED and every stored document raises
+    # InvalidToken.  The material is already inside the Fernet-encrypted
+    # archive, so writing it to the freshly-restored 0600 directory adds no new
+    # exposure.
+    audit_keyring_path = Path(str(restored_db_path) + AUDIT_KEYRING_SUFFIX)
+    audit_ring.save(audit_keyring_path)
+    vault_ring.save(restored_vault_dir.parent / (restored_vault_dir.name + VAULT_KEYRING_SUFFIX))
+
+    # The legacy single-key files keep meaning "version 1", so a deployment
+    # whose registry is later lost still resolves the historical key rather
+    # than a newer one that cannot read the oldest ciphertext.
+    _write_key_file(
+        Path(str(restored_db_path) + AUDIT_KEY_SUFFIX),
+        audit_ring.material_for(1) if audit_ring.has_version(1) else audit_ring.active_material,
+    )
     _write_key_file(
         restored_vault_dir.parent / (restored_vault_dir.name + VAULT_KEY_SUFFIX),
-        vault_secret,
+        vault_ring.material_for(1) if vault_ring.has_version(1) else vault_ring.active_material,
     )
 
-    restored_db = ERPDatabase(db_path=str(restored_db_path), hmac_secret=audit_secret)
-    restored_vault = PrivateDocumentVault(vault_root=restored_vault_dir, encryption_key=vault_secret)
+    restored_db = ERPDatabase(db_path=str(restored_db_path), hmac_secret=audit_ring.active_material)
+    restored_vault = PrivateDocumentVault(vault_root=restored_vault_dir, keyring=vault_ring)
 
     with restored_db.transaction() as conn:
         companies = [r["id"] for r in conn.execute("SELECT id FROM companies").fetchall()]
@@ -636,6 +728,18 @@ def restore_and_verify_backup(
 
     audit_verifications = {cid: restored_db.verify_audit_chain(cid) for cid in companies}
     if not all(v["valid"] for v in audit_verifications.values()):
+        unavailable = sorted(
+            {v for r in audit_verifications.values() for v in r.get("missing_key_versions", [])}
+        )
+        if unavailable:
+            # A lost key is not evidence of tampering. Reporting it as such
+            # would send the operator hunting for an intrusion that never
+            # happened while the real cause (an unrestored key version) went
+            # unmentioned.
+            raise AuditKeyUnavailableError(
+                f"The restored audit chain needs key version(s) {unavailable} that are not available. "
+                "Restore those key versions before treating the chain as verified."
+            )
         raise FinancialIntegrityError(f"Restored audit chain verification failed: {audit_verifications}")
 
     return {

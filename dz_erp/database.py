@@ -13,6 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
+from .key_rotation import (
+    LEGACY_KEY_VERSION,
+    MIN_HMAC_KEY_BYTES,
+    KeyConfigurationError,
+    KeyRing,
+    KeyVersionInUseError,
+    KeyVersionUnavailableError,
+    RotationJournal,
+    rotation_lock,
+)
+
 
 class FinancialIntegrityError(RuntimeError):
     """Raised when an operation violates accounting or stock integrity constraints."""
@@ -22,7 +33,7 @@ class AuditTamperError(RuntimeError):
     """Raised when an attempt is made to mutate or delete audit records."""
 
 
-class AuditKeyUnavailableError(RuntimeError):
+class AuditKeyUnavailableError(KeyVersionUnavailableError):
     """Raised when the audit key is missing while audit events already exist.
 
     Distinct from ``AuditTamperError`` so an operator can tell "the key was
@@ -499,6 +510,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
     correlation_id      TEXT,
     before_json         TEXT,
     after_json          TEXT NOT NULL,
+    -- Which audit key version signed this row. Added with a DEFAULT of 1 so
+    -- every pre-existing row keeps the verifiable meaning it already had: it
+    -- was signed with the only key that existed, which is now version 1.
+    hmac_key_version    INTEGER NOT NULL DEFAULT 1,
     prev_hash           TEXT NOT NULL,
     event_hash          TEXT NOT NULL
 );
@@ -525,8 +540,20 @@ END;
 # will ever try to trust.  See _resolve_audit_secret.
 DEFAULT_AUDIT_HMAC_SECRET = b"dz-erp-default-test-hmac-key-change-in-prod"
 
+# Environment variable that supplies the audit HMAC key in a real deployment.
+AUDIT_KEY_ENV = "ERP_AUDIT_HMAC_SECRET"
+
 # Suffix of the per-database key file created beside a file-backed database.
+# This file holds the *version 1* (legacy) HMAC key and remains the bootstrap
+# key of a database that has never been rotated.
 AUDIT_KEY_SUFFIX = ".audit.key"
+
+# Version registry, created beside the database by the first rotation. Once it
+# exists it is authoritative for every version, exactly like the vault ring.
+AUDIT_KEYRING_SUFFIX = ".audit.keys.json"
+
+# Rotation journal and exclusive rotation lock, both beside the database.
+AUDIT_ROTATION_JOURNAL_SUFFIX = ".audit.rotation.jsonl"
 
 
 def _file_backed_db_has_audit_events(db_path: str) -> bool:
@@ -614,12 +641,55 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
     return DEFAULT_AUDIT_HMAC_SECRET
 
 
+def _resolve_audit_keyring(db_path: str, explicit: Optional[bytes]) -> tuple:
+    """Resolve the audit key version registry for ``db_path``.
+
+    A persisted registry is authoritative. Until one exists the resolved single
+    secret is version 1, which is exactly what every existing database means.
+
+    A caller-supplied secret or environment variable that contradicts a
+    persisted registry is a configuration error, not a precedence question:
+    silently preferring either would sign new events with a key the verifier
+    does not know about.
+    """
+    if db_path == ":memory:":
+        # No durable registry is possible, and the documented test default is
+        # only reachable here. Rotation is refused for in-memory databases.
+        return KeyRing.bootstrap("audit", _resolve_audit_secret(db_path, explicit)), None
+
+    ring_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEYRING_SUFFIX)
+    if ring_path.exists():
+        ring = KeyRing.load(ring_path, "audit")
+        active = ring.active_material
+        if explicit is not None and bytes(explicit) != active:
+            raise KeyConfigurationError(
+                f"The explicit audit key disagrees with the active key (version {ring.active_version}) "
+                f"in {ring_path}. Refusing to guess which key is authoritative."
+            )
+        from_env = os.environ.get(AUDIT_KEY_ENV)
+        if from_env and from_env.encode("utf-8") != active:
+            raise KeyConfigurationError(
+                f"ERP_AUDIT_HMAC_SECRET disagrees with the active key (version {ring.active_version}) "
+                f"in {ring_path}. Once a key registry exists it is authoritative; update or remove the "
+                "environment variable."
+            )
+        return ring, ring_path
+
+    # No registry yet: the legacy single key is version 1, and the path records
+    # where a registry will be written if this database is ever rotated.
+    return KeyRing.bootstrap("audit", _resolve_audit_secret(db_path, explicit)), ring_path
+
+
 class ERPDatabase:
     """Thread-safe transactional database manager with audit hash-chaining."""
 
     def __init__(self, db_path: str = ":memory:", hmac_secret: Optional[bytes] = None) -> None:
         self.db_path = db_path
-        self._hmac_secret = _resolve_audit_secret(db_path, hmac_secret)
+        self._audit_keyring, self._keyring_path = _resolve_audit_keyring(db_path, hmac_secret)
+        # Retained as the *active* key because existing code and tests read it,
+        # but it is now one entry in a versioned registry rather than the only
+        # key the chain can be verified with.
+        self._hmac_secret = self._audit_keyring.active_material
         self._lock = threading.RLock()
         self._persistent_conn: Optional[sqlite3.Connection] = None
         if db_path == ":memory:":
@@ -629,6 +699,49 @@ class ERPDatabase:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             with self._create_connection() as conn:
                 self._init_schema(conn)
+        # Fail closed at start-up: if any stored event needs a key version this
+        # process does not have, the service must not come up pretending the
+        # chain is merely "unverified".
+        self.validate_audit_key_configuration()
+
+    # ------------------------------------------------------------------
+    # Audit key configuration
+    # ------------------------------------------------------------------
+    @property
+    def audit_keyring(self) -> KeyRing:
+        return self._audit_keyring
+
+    @property
+    def audit_keyring_path(self) -> Optional[Path]:
+        return self._keyring_path
+
+    @property
+    def active_audit_key_version(self) -> int:
+        return self._audit_keyring.active_version
+
+    def audit_events_by_key_version(self) -> Dict[int, int]:
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT hmac_key_version AS v, COUNT(*) AS n FROM audit_events GROUP BY hmac_key_version"
+            ).fetchall()
+        return {int(row["v"]): int(row["n"]) for row in rows}
+
+    def validate_audit_key_configuration(self) -> Dict[str, Any]:
+        """Refuse to run when a stored event's signing key is unavailable."""
+        by_version = self.audit_events_by_key_version()
+        missing = sorted(v for v in by_version if not self._audit_keyring.has_version(v))
+        if missing:
+            raise AuditKeyUnavailableError(
+                f"{sum(by_version[v] for v in missing)} audit event(s) in {self.db_path} were signed with "
+                f"key version(s) {missing}, which are absent from the key registry "
+                f"{self._keyring_path}. Restore those key versions before starting the service; "
+                "verifying with a different key would misreport an intact chain as tampered."
+            )
+        return {
+            "active_version": self._audit_keyring.active_version,
+            "versions": list(self._audit_keyring.versions),
+            "events_by_version": by_version,
+        }
 
     def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False, isolation_level=None)
@@ -661,6 +774,19 @@ class ERPDatabase:
         # Legacy column retained for schema compatibility; superseded by auth_tokens.
         if user_cols and "api_token_hash" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN api_token_hash TEXT")
+
+        # Audit key versioning (Phase 2 of the key-rotation work). Every row
+        # that exists before this migration was signed with the only key there
+        # was, so the DEFAULT of 1 is the factual backfill rather than a guess.
+        # The migration is idempotent and never rewrites a stored hash: the old
+        # events stay verifiable exactly as they are.
+        audit_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        if audit_cols and "hmac_key_version" not in audit_cols:
+            conn.execute(
+                "ALTER TABLE audit_events ADD COLUMN hmac_key_version INTEGER NOT NULL DEFAULT 1"
+            )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -702,7 +828,21 @@ class ERPDatabase:
         before_json: Optional[str],
         after_json: str,
         prev_hash: str,
+        key_version: Optional[int] = None,
     ) -> str:
+        """HMAC one event with the key for *key_version*.
+
+        The MAC input is byte-for-byte what it has always been, so events
+        written before versioning existed verify unchanged. The version is a
+        property of the *row* (persisted alongside the hash), not of the MAC
+        input, which is what makes historical verification possible without
+        rewriting - and therefore without re-signing - those events.
+        """
+        version = self._audit_keyring.active_version if key_version is None else int(key_version)
+        try:
+            material = self._audit_keyring.material_for(version)
+        except KeyVersionUnavailableError as exc:
+            raise AuditKeyUnavailableError(str(exc)) from exc
         payload = "|".join(
             [
                 str(company_id),
@@ -716,7 +856,7 @@ class ERPDatabase:
                 prev_hash,
             ]
         ).encode("utf-8")
-        return hmac.new(self._hmac_secret, payload, hashlib.sha256).hexdigest()
+        return hmac.new(material, payload, hashlib.sha256).hexdigest()
 
     def append_audit_event(
         self,
@@ -739,6 +879,7 @@ class ERPDatabase:
         occurred_at = datetime.now(timezone.utc).isoformat()
         before_json = json.dumps(before_state, sort_keys=True, ensure_ascii=False) if before_state is not None else None
         after_json = json.dumps(after_state, sort_keys=True, ensure_ascii=False)
+        key_version = self._audit_keyring.active_version
         event_hash = self._compute_audit_hash(
             company_id=company_id,
             occurred_at=occurred_at,
@@ -749,14 +890,15 @@ class ERPDatabase:
             before_json=before_json,
             after_json=after_json,
             prev_hash=prev_hash,
+            key_version=key_version,
         )
         cur = conn.execute(
             """
             INSERT INTO audit_events (
                 company_id, occurred_at, actor_user_id, action_type,
                 target_model, target_id, correlation_id, before_json, after_json,
-                prev_hash, event_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                hmac_key_version, prev_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 company_id,
@@ -768,6 +910,7 @@ class ERPDatabase:
                 correlation_id,
                 before_json,
                 after_json,
+                key_version,
                 prev_hash,
                 event_hash,
             ),
@@ -775,38 +918,256 @@ class ERPDatabase:
         return int(cur.lastrowid)
 
     def verify_audit_chain(self, company_id: int) -> Dict[str, Any]:
-        """Verify hash-chain continuity and HMAC integrity for all audit events of a company."""
+        """Verify chain continuity and per-event HMAC integrity for a company.
+
+        Each event is checked with the key version recorded on its own row, so a
+        chain that spans a rotation verifies end to end.
+
+        A version whose key is missing produces ``AUDIT_KEY_UNAVAILABLE``, never
+        ``valid: True``: the unverifiable events are counted and named, so a lost
+        key cannot be reported as an intact chain, and an intact chain cannot be
+        reported as tampering.
+        """
         with self.transaction() as conn:
             rows = conn.execute(
                 "SELECT * FROM audit_events WHERE company_id = ? ORDER BY id ASC",
                 (company_id,),
             ).fetchall()
         expected_prev = "0" * 64
+        missing_versions: set = set()
+        events_by_version: Dict[str, int] = {}
+        verified = 0
         for idx, row in enumerate(rows):
+            version = (
+                int(row["hmac_key_version"])
+                if "hmac_key_version" in row.keys()
+                else LEGACY_KEY_VERSION
+            )
+            events_by_version[str(version)] = events_by_version.get(str(version), 0) + 1
+
+            # Chain linkage is structural and independent of key availability:
+            # a deleted, reordered or spliced event is detectable even when a
+            # key is missing, so this check runs first.
             if row["prev_hash"] != expected_prev:
                 return {
                     "valid": False,
-                    "checked_count": idx,
+                    "checked_count": verified,
                     "broken_at_id": row["id"],
                     "reason": "PREV_HASH_MISMATCH",
+                    "event_count": len(rows),
+                    "key_versions": events_by_version,
                 }
-            recomputed = self._compute_audit_hash(
-                company_id=row["company_id"],
-                occurred_at=row["occurred_at"],
-                actor_user_id=row["actor_user_id"],
-                action_type=row["action_type"],
-                target_model=row["target_model"],
-                target_id=row["target_id"],
-                before_json=row["before_json"],
-                after_json=row["after_json"],
-                prev_hash=row["prev_hash"],
-            )
+            try:
+                recomputed = self._compute_audit_hash(
+                    company_id=row["company_id"],
+                    occurred_at=row["occurred_at"],
+                    actor_user_id=row["actor_user_id"],
+                    action_type=row["action_type"],
+                    target_model=row["target_model"],
+                    target_id=row["target_id"],
+                    before_json=row["before_json"],
+                    after_json=row["after_json"],
+                    prev_hash=row["prev_hash"],
+                    key_version=version,
+                )
+            except AuditKeyUnavailableError:
+                # Cannot judge this event either way. Keep walking so the rest
+                # of the chain is still checked, but never return valid=True.
+                missing_versions.add(version)
+                expected_prev = row["event_hash"]
+                continue
             if not hmac.compare_digest(recomputed, row["event_hash"]):
                 return {
                     "valid": False,
-                    "checked_count": idx,
+                    "checked_count": verified,
                     "broken_at_id": row["id"],
                     "reason": "EVENT_HASH_TAMPERED",
+                    "event_count": len(rows),
+                    "key_versions": events_by_version,
                 }
+            verified += 1
             expected_prev = row["event_hash"]
-        return {"valid": True, "checked_count": len(rows), "last_hash": expected_prev}
+
+        if missing_versions:
+            return {
+                "valid": False,
+                "reason": "AUDIT_KEY_UNAVAILABLE",
+                "key_unavailable": True,
+                "missing_key_versions": sorted(missing_versions),
+                "verified_count": verified,
+                "unverifiable_count": len(rows) - verified,
+                "event_count": len(rows),
+                "key_versions": events_by_version,
+                "broken_at_id": None,
+            }
+        return {
+            "valid": True,
+            "checked_count": len(rows),
+            "last_hash": expected_prev,
+            "event_count": len(rows),
+            "key_versions": events_by_version,
+        }
+
+    # ------------------------------------------------------------------
+    # Audit key rotation
+    # ------------------------------------------------------------------
+    def verify_all_audit_chains(self) -> Dict[str, Any]:
+        """Verify the chain of every company, with a single overall verdict."""
+        with self.transaction() as conn:
+            company_ids = [int(r["id"]) for r in conn.execute("SELECT id FROM companies").fetchall()]
+        per_company = {cid: self.verify_audit_chain(cid) for cid in company_ids}
+        key_unavailable = sorted(
+            {v for r in per_company.values() if r.get("key_unavailable") for v in r["missing_key_versions"]}
+        )
+        return {
+            "valid": all(r["valid"] for r in per_company.values()),
+            "companies": per_company,
+            "key_unavailable": bool(key_unavailable),
+            "missing_key_versions": key_unavailable,
+        }
+
+    def _require_verifiable_chain(self, phase: str) -> Dict[str, Any]:
+        """Refuse to change signing keys while the chain cannot be verified."""
+        result = self.verify_all_audit_chains()
+        if result["valid"]:
+            return result
+        broken = {
+            cid: r.get("reason")
+            for cid, r in result["companies"].items()
+            if not r["valid"]
+        }
+        if result["key_unavailable"]:
+            raise AuditKeyUnavailableError(
+                f"Cannot {phase}: the audit chain needs key version(s) "
+                f"{result['missing_key_versions']} that are not available. Restore them first."
+            )
+        raise AuditTamperError(
+            f"Refusing to {phase}: the audit chain of company/companies {broken} does not verify "
+            f"({sorted(set(broken.values()))}). A key change on top of an unverifiable chain would make the "
+            "original damage impossible to reconstruct; investigate the chain first."
+        )
+
+    def _persist_audit_keyring(self, working: KeyRing) -> None:
+        """Write the registry atomically, then adopt it in memory.
+
+        The on-disk registry is updated before the running process switches
+        keys, so a crash can never leave events signed with a key the registry
+        does not know about.
+        """
+        if self._keyring_path is None:
+            raise KeyConfigurationError(
+                "This database has no durable key registry (in-memory databases cannot be rotated)."
+            )
+        working.save(self._keyring_path)
+        self._audit_keyring = working
+        self._hmac_secret = working.active_material
+
+    def rotate_audit_key(
+        self,
+        new_key: Optional[bytes] = None,
+        *,
+        new_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Activate a new audit signing key; historical events keep their key.
+
+        Unlike the vault there is nothing to re-encrypt: a MAC cannot be
+        recomputed without rewriting history, and rewriting history is exactly
+        what an audit trail must never do. Rotation therefore means "sign new
+        events with version N+1, and keep version N so every existing event
+        still verifies". The only state change is one atomic registry write, so
+        an interruption either happens (both keys retained, new events signed
+        with the new key) or does not (nothing changes).
+        """
+        if self._keyring_path is None:
+            raise KeyConfigurationError(
+                "In-memory databases have no durable key registry, so their audit key cannot be rotated."
+            )
+        if new_key is None:
+            new_key = base64.urlsafe_b64encode(os.urandom(32))
+        new_key = bytes(new_key)
+        if len(new_key) < MIN_HMAC_KEY_BYTES:
+            raise KeyConfigurationError(
+                f"New audit key material is {len(new_key)} bytes; at least {MIN_HMAC_KEY_BYTES} are required."
+            )
+
+        journal = RotationJournal(
+            Path(self.db_path).with_name(Path(self.db_path).name + AUDIT_ROTATION_JOURNAL_SUFFIX)
+        )
+        lock_path = Path(self.db_path).with_name(Path(self.db_path).name + ".audit.rotation.lock")
+        with rotation_lock(lock_path):
+            before = self._require_verifiable_chain("rotate the audit signing key")
+
+            working = KeyRing.from_dict(self._audit_keyring.to_dict())
+            previous_version = working.active_version
+            resume_version = working.version_of_material(new_key)
+            if resume_version is not None:
+                target_version = resume_version
+                resume = True
+                if working.active_version != target_version:
+                    working.set_active(target_version)
+            else:
+                target_version = working.add_version(new_key, version=new_version, min_bytes=MIN_HMAC_KEY_BYTES)
+                resume = False
+
+            journal.record(
+                event="rotation_started",
+                previous_version=previous_version,
+                target_version=target_version,
+                resumed=resume,
+            )
+            self._persist_audit_keyring(working)
+            after = self.verify_all_audit_chains()
+            journal.record(
+                event="rotation_finished",
+                target_version=target_version,
+                chain_valid=after["valid"],
+            )
+
+            return {
+                "db_path": self.db_path,
+                "keyring_path": str(self._keyring_path),
+                "journal_path": str(journal.path),
+                "previous_version": previous_version,
+                "active_version": target_version,
+                "resumed": resume,
+                "events_by_version": self.audit_events_by_key_version(),
+                "chain_valid_before": before["valid"],
+                "chain_valid_after": after["valid"],
+                "retained_versions": list(self._audit_keyring.versions),
+            }
+
+    def set_active_audit_key_version(self, version: int) -> Dict[str, Any]:
+        """Documented rollback: sign new events with an existing version again."""
+        if self._keyring_path is None:
+            raise KeyConfigurationError("This database has no durable key registry.")
+        working = KeyRing.from_dict(self._audit_keyring.to_dict())
+        working.set_active(version)
+        self._persist_audit_keyring(working)
+        return {
+            "active_version": working.active_version,
+            "events_unchanged": True,
+            "chain_valid": self.verify_all_audit_chains()["valid"],
+        }
+
+    def remove_audit_key_version(
+        self, version: int, *, confirm_retained_copies: bool = False
+    ) -> Dict[str, Any]:
+        """Delete a key version - refused while any event still depends on it."""
+        if self._keyring_path is None:
+            raise KeyConfigurationError("This database has no durable key registry.")
+        version = int(version)
+        if version == self._audit_keyring.active_version:
+            raise KeyConfigurationError(
+                f"Audit key version {version} is the active version and cannot be removed."
+            )
+        by_version = self.audit_events_by_key_version()
+        if by_version.get(version):
+            raise KeyVersionInUseError(
+                f"Refusing to remove audit key version {version}: {by_version[version]} event(s) in "
+                f"{self.db_path} are still signed with it. Historical events cannot be re-signed without "
+                "rewriting the audit trail."
+            )
+        working = KeyRing.from_dict(self._audit_keyring.to_dict())
+        working.remove(version, confirm_retained_copies=confirm_retained_copies)
+        self._persist_audit_keyring(working)
+        return {"removed_version": version, "active_version": working.active_version}

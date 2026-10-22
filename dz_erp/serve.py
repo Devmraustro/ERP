@@ -102,12 +102,17 @@ def build_app(
     # key here would orphan every document on the next restart.
     vault = PrivateDocumentVault(vault_path)
 
+    # API documentation is disabled by default for security (staging/production).
+    # Set ERP_DOCS_ENABLED=true for local development only.
+    docs_enabled = os.environ.get("ERP_DOCS_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+
     return create_erp_fastapi_app(
         db,
         vault,
         auth_manager=auth_manager,
         token_ttl_seconds=int(os.environ.get("ERP_TOKEN_TTL_SECONDS", "28800")),
         trusted_proxies=None,  # fail-closed default; see dz_erp/net.py
+        docs_enabled=docs_enabled,
     )
 
 

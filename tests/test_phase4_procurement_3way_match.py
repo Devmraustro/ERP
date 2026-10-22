@@ -10,12 +10,15 @@ from dz_erp.localization import load_official_odoo_chart
 from dz_erp.procurement_stock import (
     create_and_validate_supplier_invoice,
     create_purchase_order,
+    create_reversal_request,
     decide_invoice_approval,
+    decide_reversal_approval,
     deduct_stock_concurrent_safe,
+    post_reversal,
     post_supplier_invoice,
     receive_goods_against_po,
-    reverse_posted_invoice,
     submit_invoice_for_approval,
+    submit_reversal_for_approval,
 )
 
 
@@ -283,11 +286,13 @@ def test_duplicate_detection_price_tax_mismatch_idempotent_retry_and_reversal() 
     assert any("FUZZY_DUPLICATE_SUSPECTED" in e for e in fuzzy_dup["validation_errors"])
 
     # 6. Reverse posted invoice via Credit Note; verify original stays POSTED and untouched
+    # The reversal must go through the approval workflow
     with pytest.raises(FinancialIntegrityError, match="FINANCIAL_INTEGRITY_VIOLATION"):
         with db.transaction() as conn:
             conn.execute("DELETE FROM journal_entries WHERE id = ?", (p1["journal_entry_id"],))
 
-    rev = reverse_posted_invoice(
+    # Step 1: Create reversal request (NeedsReview state)
+    rev = create_reversal_request(
         db,
         company_id=1,
         accountant_user_id=4,
@@ -296,6 +301,39 @@ def test_duplicate_detection_price_tax_mismatch_idempotent_retry_and_reversal() 
         idempotency_key="rev-key-01",
     )
     assert rev["reversal_journal_entry_id"] is not None
+    assert rev["workflow_state"] == "NeedsReview"
+    reversal_invoice_id = rev["credit_note_invoice_id"]
+
+    # Step 2: Submit for approval
+    rev = submit_reversal_for_approval(
+        db,
+        company_id=1,
+        user_id=4,
+        reversal_invoice_id=reversal_invoice_id,
+    )
+    assert rev["workflow_state"] == "PendingApproval"
+
+    # Step 3: Approve (different user for SoD)
+    rev = decide_reversal_approval(
+        db,
+        company_id=1,
+        approver_user_id=3,  # fin_approver
+        reversal_invoice_id=reversal_invoice_id,
+        approve=True,
+        reason="Approved for correction",
+    )
+    assert rev["workflow_state"] == "Approved"
+
+    # Step 4: Post the reversal
+    rev = post_reversal(
+        db,
+        company_id=1,
+        accountant_user_id=4,
+        reversal_invoice_id=reversal_invoice_id,
+        idempotency_key="rev-post-key-01",
+    )
+    assert rev["reversal_journal_entry_id"] is not None
+    assert rev["workflow_state"] == "Posted"
 
     with db.transaction() as conn:
         orig_row = conn.execute("SELECT * FROM supplier_invoices WHERE id = ?", (valid_inv["invoice_id"],)).fetchone()

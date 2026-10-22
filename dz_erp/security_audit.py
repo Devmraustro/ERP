@@ -58,10 +58,105 @@ except ImportError:  # pragma: no cover - not reachable on Windows
 # How long a writer waits for a contended cross-process lock before giving up.
 _LOG_LOCK_TIMEOUT_SECONDS = 30.0
 
+# Security log rotation configuration (can be overridden via environment)
+# Max file size in bytes before rotation (default: 100 MB)
+_LOG_MAX_FILE_SIZE = int(os.environ.get("ERP_SECURITY_LOG_MAX_SIZE", "104857600"))
+# Number of rotated files to retain (default: 10)
+_LOG_MAX_FILES = int(os.environ.get("ERP_SECURITY_LOG_MAX_FILES", "10"))
+
 # Process-local write locks, keyed by the resolved log path, so that two
 # ``JsonlSecurityLog`` instances aimed at the same file still share one lock.
 _LOG_WRITE_LOCKS: Dict[str, threading.Lock] = {}
 _LOG_WRITE_LOCKS_GUARD = threading.Lock()
+
+# Rotation locks (separate from write locks to avoid deadlock)
+_LOG_ROTATION_LOCKS: Dict[str, threading.Lock] = {}
+_LOG_ROTATION_LOCKS_GUARD = threading.Lock()
+
+
+def _rotation_lock_for(path: Path) -> threading.Lock:
+    """Return the process-local lock that serialises rotation of *path*."""
+    key = str(Path(path).resolve())
+    with _LOG_ROTATION_LOCKS_GUARD:
+        lock = _LOG_ROTATION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOG_ROTATION_LOCKS[key] = lock
+        return lock
+
+
+def _rotate_security_log(path: Path) -> None:
+    """Rotate the security log file if it exceeds the configured maximum size.
+
+    Rotation is performed atomically using os.replace (POSIX) or MoveFileEx
+    (Windows) to avoid losing records. The rotation is serialised with a
+    process-local lock to prevent concurrent rotations.
+
+    Retention policy: keep the current file plus _LOG_MAX_FILES - 1 rotated files.
+    """
+    # Check if rotation is needed
+    try:
+        if path.stat().st_size < _LOG_MAX_FILE_SIZE:
+            return
+    except OSError:
+        return  # File doesn't exist or can't be accessed
+
+    # Acquire rotation lock for this specific log file
+    rot_lock = _rotation_lock_for(path)
+    with rot_lock:
+        # Re-check size after acquiring lock (another thread/process may have rotated)
+        try:
+            if path.stat().st_size < _LOG_MAX_FILE_SIZE:
+                return
+        except OSError:
+            return
+
+        # Determine rotation sequence numbers
+        # Find the highest existing rotation number
+        max_num = -1
+        for rotated in path.parent.glob(f"{path.name}.*"):
+            try:
+                suffix = rotated.name[len(path.name) + 1:]
+                if suffix.isdigit():
+                    max_num = max(max_num, int(suffix))
+            except (ValueError, IndexError):
+                continue
+
+        # Remove oldest file if we've reached the retention limit
+        if max_num >= _LOG_MAX_FILES - 1:
+            oldest = path.parent / f"{path.name}.{max_num}"
+            try:
+                oldest.unlink()
+            except OSError:
+                pass  # Best effort
+
+        # Rotate existing files down by one number (highest first to avoid overwrites)
+        for num in range(max_num, 0, -1):
+            src = path.parent / f"{path.name}.{num}"
+            dst = path.parent / f"{path.name}.{num + 1}"
+            if src.exists():
+                try:
+                    if os.name == "nt":
+                        # Windows: use os.replace which uses MoveFileEx internally
+                        # We need to ensure the destination doesn't exist
+                        if dst.exists():
+                            dst.unlink()
+                    os.replace(src, dst)
+                except OSError:
+                    pass  # Best effort
+
+        # Rotate current log to .1
+        dst = path.parent / f"{path.name}.1"
+        try:
+            if os.name == "nt" and dst.exists():
+                dst.unlink()
+            os.replace(path, dst)
+        except OSError:
+            return  # Rotation failed, will retry on next write
+
+        # Create new empty log file with owner-only permissions
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
 
 
 def _write_lock_for(path: Path) -> threading.Lock:
@@ -219,11 +314,14 @@ class JsonlSecurityLog:
                     written = os.write(fd, payload)
             finally:
                 os.close(fd)
-        if written != len(payload):
-            raise OSError(
-                f"Security log write to {self.path} was short "
-                f"({written} of {len(payload)} bytes); the record may be truncated."
-            )
+            if written != len(payload):
+                raise OSError(
+                    f"Security log write to {self.path} was short "
+                    f"({written} of {len(payload)} bytes); the record may be truncated."
+                )
+            # Check if rotation is needed after successful write (within the lock
+            # to avoid race with concurrent writers).
+            _rotate_security_log(self.path)
 
 
 class StructuredRedactingLogger:

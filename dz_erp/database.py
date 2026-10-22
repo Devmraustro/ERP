@@ -406,9 +406,10 @@ CREATE TABLE IF NOT EXISTS journal_entries (
     total_debit_dzd     TEXT NOT NULL,
     total_credit_dzd    TEXT NOT NULL,
     reversal_entry_id   INTEGER REFERENCES journal_entries(id) ON DELETE RESTRICT,
-    posted_by_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    posted_at           TEXT NOT NULL,
+    posted_by_id        INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    posted_at           TEXT,
     CHECK (total_debit_dzd = total_credit_dzd),
+    CHECK (state = 'POSTED' AND posted_by_id IS NOT NULL AND posted_at IS NOT NULL OR state = 'DRAFT'),
     UNIQUE(company_id, entry_number)
 );
 

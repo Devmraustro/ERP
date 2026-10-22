@@ -36,10 +36,13 @@ from .intake_ocr import PrivateDocumentVault, update_extracted_field_by_human, u
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
 from .procurement_stock import (
     create_and_validate_supplier_invoice,
+    create_reversal_request,
     decide_invoice_approval,
+    decide_reversal_approval,
+    post_reversal,
     post_supplier_invoice,
-    reverse_posted_invoice,
     submit_invoice_for_approval,
+    submit_reversal_for_approval,
 )
 from .security_audit import (
     JsonlSecurityLog,
@@ -95,6 +98,11 @@ class ReversalInput(BaseModel):
     reason: str
 
 
+class ReversalApprovalDecisionInput(BaseModel):
+    approve: bool
+    reason: str = ""
+
+
 class FieldEditInput(BaseModel):
     field_name: str
     new_value: str
@@ -116,7 +124,13 @@ def create_erp_fastapi_app(
     auth_manager: Optional[AuthManager] = None,
     token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
     trusted_proxies: Optional[TrustedProxyPolicy] = None,
+    docs_enabled: bool = False,
 ) -> FastAPI:
+    # Secure default: docs disabled unless explicitly enabled for local development
+    docs_url = "/docs" if docs_enabled else None
+    redoc_url = "/redoc" if docs_enabled else None
+    openapi_url = "/openapi.json" if docs_enabled else None
+
     app = FastAPI(
         title="Algerian AI ERP API",
         version="0.2.0",
@@ -125,6 +139,9 @@ def create_erp_fastapi_app(
             "`Authorization: Bearer <token>`. Obtain one from `POST /api/v1/auth/token`. "
             "Identity headers (`X-User-Id`, `X-Company-Id`) are not trusted and are ignored."
         ),
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
     )
     # Durable sink for security-relevant events that cannot be attributed to a
     # tenant (see JsonlSecurityLog).  Configured by ERP_SECURITY_LOG_PATH; when
@@ -527,12 +544,70 @@ def create_erp_fastapi_app(
         if not idempotency_key:
             raise HTTPException(status_code=400, detail="Missing mandatory Idempotency-Key header.")
         try:
-            return reverse_posted_invoice(
+            return create_reversal_request(
                 db=db,
                 company_id=auth.company_id,
                 accountant_user_id=auth.user_id,
                 original_invoice_id=invoice_id,
                 reason=body.reason,
+                idempotency_key=idempotency_key,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FinancialIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/v1/invoices/{reversal_invoice_id}/submit-approval")
+    def api_submit_reversal_approval(
+        reversal_invoice_id: int,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        try:
+            return submit_reversal_for_approval(
+                db=db,
+                company_id=auth.company_id,
+                user_id=auth.user_id,
+                reversal_invoice_id=reversal_invoice_id,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FinancialIntegrityError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/v1/invoices/{reversal_invoice_id}/decide-approval")
+    def api_decide_reversal_approval(
+        reversal_invoice_id: int,
+        body: ReversalApprovalDecisionInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        try:
+            return decide_reversal_approval(
+                db=db,
+                company_id=auth.company_id,
+                approver_user_id=auth.user_id,
+                reversal_invoice_id=reversal_invoice_id,
+                approve=body.approve,
+                reason=body.reason,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FinancialIntegrityError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/v1/invoices/{reversal_invoice_id}/post")
+    def api_post_reversal(
+        reversal_invoice_id: int,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="Missing mandatory Idempotency-Key header.")
+        try:
+            return post_reversal(
+                db=db,
+                company_id=auth.company_id,
+                accountant_user_id=auth.user_id,
+                reversal_invoice_id=reversal_invoice_id,
                 idempotency_key=idempotency_key,
             )
         except (AuthorizationError, TenantIsolationError) as exc:

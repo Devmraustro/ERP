@@ -1283,3 +1283,454 @@ def reverse_posted_invoice(
             after_state=result,
         )
         return result
+
+
+def create_reversal_request(
+    db: ERPDatabase,
+    company_id: int,
+    accountant_user_id: int,
+    original_invoice_id: int,
+    reason: str,
+    idempotency_key: str,
+) -> Dict[str, Any]:
+    """Create a Credit Note (Facture d'Avoir) reversal request in NeedsReview state.
+    
+    The reversal must go through approval workflow before posting.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    req_hash = hashlib.sha256(f"{company_id}:{original_invoice_id}:REVERSE:{reason}".encode("utf-8")).hexdigest()
+
+    with db.transaction() as conn:
+        _check_user_and_tenant(conn, company_id, accountant_user_id, ("accountant", "admin"))
+        idem = conn.execute(
+            "SELECT * FROM idempotency_records WHERE company_id = ? AND idempotency_key = ? AND operation = 'REVERSE_INVOICE'",
+            (company_id, idempotency_key),
+        ).fetchone()
+        if idem:
+            cached = json.loads(idem["response_json"])
+            cached["idempotent_replay"] = True
+            return cached
+
+        orig = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ?",
+            (original_invoice_id, company_id),
+        ).fetchone()
+        if not orig or orig["workflow_state"] != "Posted":
+            raise FinancialIntegrityError("Only a Posted invoice can be reversed.")
+
+        orig_je = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (orig["journal_entry_id"],)).fetchone()
+        orig_je_lines = conn.execute(
+            "SELECT * FROM journal_entry_lines WHERE journal_entry_id = ?",
+            (orig["journal_entry_id"],),
+        ).fetchall()
+
+        rev_entry_no = f"RAVOIR/{orig['fiscal_year']}/{original_invoice_id:05d}"
+        # Create journal entry in DRAFT state (will be POSTED after approval)
+        jcur = conn.execute(
+            """
+            INSERT INTO journal_entries (
+                company_id, branch_id, entry_number, journal_code, entry_date,
+                state, source_model, source_id, source_document_id,
+                total_debit_dzd, total_credit_dzd, reversal_entry_id,
+                posted_by_id, posted_at
+            ) VALUES (?, ?, ?, 'ACH', ?, 'DRAFT', 'supplier_invoices_reversal', ?, ?, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                company_id,
+                orig["branch_id"],
+                rev_entry_no,
+                now_iso[:10],
+                str(original_invoice_id),
+                orig["document_id"],
+                orig_je["total_credit_dzd"],
+                orig_je["total_debit_dzd"],
+                orig_je["id"],
+            ),
+        )
+        rev_je_id = int(jcur.lastrowid)
+
+        for ol in orig_je_lines:
+            conn.execute(
+                """
+                INSERT INTO journal_entry_lines (
+                    company_id, journal_entry_id, account_code, partner_id,
+                    label, debit_dzd, credit_dzd, g50_tag, reconciled, reconciliation_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    company_id,
+                    rev_je_id,
+                    ol["account_code"],
+                    ol["partner_id"],
+                    f"REVERSAL ({reason}): {ol['label']}",
+                    ol["credit_dzd"],
+                    ol["debit_dzd"],
+                    ol["g50_tag"],
+                    f"REV-JE-{orig_je['id']}",
+                ),
+            )
+
+        # Link original journal entry to its reversal entry (permitted by trigger)
+        conn.execute(
+            "UPDATE journal_entries SET reversal_entry_id = ? WHERE id = ?",
+            (rev_je_id, orig_je["id"]),
+        )
+
+        # Create credit note record in NeedsReview state
+        cn_no = f"AVOIR-{orig['supplier_invoice_no']}"
+        ic = conn.execute(
+            """
+            INSERT INTO supplier_invoices (
+                company_id, branch_id, document_id, supplier_id, po_id, grn_id,
+                invoice_type, supplier_invoice_no, normalized_invoice_no, fiscal_year,
+                invoice_date, currency_code, payment_method,
+                amount_ht_dzd, amount_tva_dzd, amount_timbre_dzd, amount_ttc_dzd,
+                workflow_state, payload_sha256, approved_payload_sha256,
+                created_by_id, approved_by_id, approved_at, posted_by_id, posted_at,
+                journal_entry_id, reversal_of_invoice_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'IN_REFUND', ?, ?, ?, ?, 'DZD', ?, ?, ?, ?, ?, 'NeedsReview', ?, NULL, ?, NULL, NULL, NULL, NULL, ?, ?, ?)
+            """,
+            (
+                company_id,
+                orig["branch_id"],
+                orig["document_id"],
+                orig["supplier_id"],
+                orig["po_id"],
+                orig["grn_id"],
+                cn_no,
+                normalize_invoice_ref(cn_no),
+                orig["fiscal_year"],
+                now_iso[:10],
+                orig["payment_method"],
+                orig["amount_ht_dzd"],
+                orig["amount_tva_dzd"],
+                orig["amount_timbre_dzd"],
+                orig["amount_ttc_dzd"],
+                orig["payload_sha256"],
+                accountant_user_id,
+                rev_je_id,
+                original_invoice_id,
+                now_iso,
+            ),
+        )
+        cn_id = int(ic.lastrowid)
+
+        # Copy invoice lines to the credit note
+        orig_lines = conn.execute(
+            "SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?",
+            (original_invoice_id,),
+        ).fetchall()
+        for line in orig_lines:
+            conn.execute(
+                """
+                INSERT INTO supplier_invoice_lines (
+                    company_id, invoice_id, po_line_id, product_id, description,
+                    qty, unit_price_dzd, discount_pct, tax_rate,
+                    line_ht_dzd, line_tva_dzd, line_ttc_dzd
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company_id,
+                    cn_id,
+                    line["po_line_id"],
+                    line["product_id"],
+                    line["description"],
+                    line["qty"],
+                    line["unit_price_dzd"],
+                    line["discount_pct"],
+                    line["tax_rate"],
+                    line["line_ht_dzd"],
+                    line["line_tva_dzd"],
+                    line["line_ttc_dzd"],
+                ),
+            )
+
+        result = {
+            "original_invoice_id": original_invoice_id,
+            "credit_note_invoice_id": cn_id,
+            "reversal_journal_entry_id": rev_je_id,
+            "reversal_entry_number": rev_entry_no,
+            "reason": reason,
+            "workflow_state": "NeedsReview",
+            "idempotent_replay": False,
+        }
+        conn.execute(
+            """
+            INSERT INTO idempotency_records (company_id, idempotency_key, operation, request_sha256, status, response_json, created_at)
+            VALUES (?, ?, 'REVERSE_INVOICE', ?, 'COMPLETED', ?, ?)
+            """,
+            (company_id, idempotency_key, req_hash, json.dumps(result), now_iso),
+        )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=accountant_user_id,
+            action_type="REVERSAL_REQUESTED",
+            target_model="supplier_invoices",
+            target_id=str(cn_id),
+            after_state={"reversal_request": result, "original_invoice_id": original_invoice_id},
+        )
+        return result
+
+
+def submit_reversal_for_approval(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    reversal_invoice_id: int,
+) -> Dict[str, Any]:
+    """Transition a Validated reversal to PendingApproval."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db.transaction() as conn:
+        _check_user_and_tenant(conn, company_id, user_id, ("accountant", "admin"))
+        inv = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ? AND invoice_type = 'IN_REFUND'",
+            (reversal_invoice_id, company_id),
+        ).fetchone()
+        if not inv:
+            raise TenantIsolationError("Reversal invoice not found in target company.")
+        if inv["workflow_state"] != "NeedsReview":
+            raise FinancialIntegrityError(
+                f"Cannot request approval for reversal in state '{inv['workflow_state']}'; must be 'NeedsReview'."
+            )
+
+        cur = conn.execute(
+            """
+            INSERT INTO approval_requests (
+                company_id, target_model, target_id, payload_sha256,
+                requested_by_id, requested_at, decision
+            ) VALUES (?, 'supplier_invoices_reversal', ?, ?, ?, ?, 'PENDING')
+            """,
+            (company_id, reversal_invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
+        )
+        req_id = int(cur.lastrowid)
+        conn.execute(
+            "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
+            (reversal_invoice_id,),
+        )
+        if inv["document_id"]:
+            conn.execute(
+                "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
+                (inv["document_id"],),
+            )
+
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type="REVERSAL_APPROVAL_REQUESTED",
+            target_model="supplier_invoices_reversal",
+            target_id=str(reversal_invoice_id),
+            after_state={"approval_request_id": req_id, "workflow_state": "PendingApproval"},
+        )
+        return {"reversal_invoice_id": reversal_invoice_id, "approval_request_id": req_id, "workflow_state": "PendingApproval"}
+
+
+def decide_reversal_approval(
+    db: ERPDatabase,
+    company_id: int,
+    approver_user_id: int,
+    reversal_invoice_id: int,
+    approve: bool,
+    reason: str = "",
+) -> Dict[str, Any]:
+    """Approve or reject a PendingApproval reversal with strict Segregation of Duties enforcement."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db.transaction() as conn:
+        _check_user_and_tenant(conn, company_id, approver_user_id, ("approver", "accountant", "admin"))
+        inv = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ? AND invoice_type = 'IN_REFUND'",
+            (reversal_invoice_id, company_id),
+        ).fetchone()
+        if not inv:
+            raise TenantIsolationError("Reversal invoice not found in target company.")
+        if inv["workflow_state"] != "PendingApproval":
+            raise FinancialIntegrityError(
+                f"Reversal {reversal_invoice_id} is in state '{inv['workflow_state']}', not 'PendingApproval'."
+            )
+        if approve and inv["created_by_id"] == approver_user_id:
+            raise AuthorizationError(
+                "SEGREGATION_OF_DUTIES_VIOLATION: Reversal requester cannot approve their own reversal."
+            )
+
+        req = conn.execute(
+            """
+            SELECT * FROM approval_requests
+            WHERE company_id = ? AND target_model = 'supplier_invoices_reversal' AND target_id = ? AND decision = 'PENDING'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (company_id, reversal_invoice_id),
+        ).fetchone()
+        if not req:
+            raise FinancialIntegrityError("No pending approval request found for reversal.")
+
+        decision_str = "APPROVED" if approve else "REJECTED"
+        new_wf_state = "Approved" if approve else "Rejected"
+
+        conn.execute(
+            """
+            UPDATE approval_requests
+            SET decision = ?, decided_by_id = ?, decided_at = ?, reason = ?
+            WHERE id = ?
+            """,
+            (decision_str, approver_user_id, now_iso, reason, req["id"]),
+        )
+        conn.execute(
+            """
+            UPDATE supplier_invoices
+            SET workflow_state = ?,
+                approved_payload_sha256 = ?,
+                approved_by_id = ?,
+                approved_at = ?
+            WHERE id = ?
+            """,
+            (
+                new_wf_state,
+                inv["payload_sha256"] if approve else None,
+                approver_user_id if approve else None,
+                now_iso if approve else None,
+                reversal_invoice_id,
+            ),
+        )
+        if inv["document_id"]:
+            conn.execute(
+                "UPDATE source_documents SET workflow_state = ?, rejection_reason = ? WHERE id = ?",
+                (new_wf_state, None if approve else reason, inv["document_id"]),
+            )
+
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=approver_user_id,
+            action_type="REVERSAL_APPROVED" if approve else "REVERSAL_REJECTED",
+            target_model="supplier_invoices_reversal",
+            target_id=str(reversal_invoice_id),
+            after_state={
+                "workflow_state": new_wf_state,
+                "approved_payload_sha256": inv["payload_sha256"] if approve else None,
+                "reason": reason,
+            },
+        )
+        return {"reversal_invoice_id": reversal_invoice_id, "workflow_state": new_wf_state, "decision": decision_str}
+
+
+def post_reversal(
+    db: ERPDatabase,
+    company_id: int,
+    accountant_user_id: int,
+    reversal_invoice_id: int,
+    idempotency_key: str,
+) -> Dict[str, Any]:
+    """Atomically post an Approved reversal to the General Ledger with idempotency."""
+    if not idempotency_key or not idempotency_key.strip():
+        raise ValueError("idempotency_key is mandatory for financial posting.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    req_hash = hashlib.sha256(f"{company_id}:{reversal_invoice_id}:POST_REVERSAL".encode("utf-8")).hexdigest()
+
+    with db.transaction() as conn:
+        _check_user_and_tenant(conn, company_id, accountant_user_id, ("accountant", "admin"))
+
+        idem = conn.execute(
+            """
+            SELECT * FROM idempotency_records
+            WHERE company_id = ? AND idempotency_key = ? AND operation = 'POST_REVERSAL'
+            """,
+            (company_id, idempotency_key),
+        ).fetchone()
+        if idem:
+            if idem["request_sha256"] != req_hash:
+                raise FinancialIntegrityError("IDEMPOTENCY_KEY_PAYLOAD_MISMATCH")
+            cached = json.loads(idem["response_json"])
+            cached["idempotent_replay"] = True
+            return cached
+
+        inv = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ? AND invoice_type = 'IN_REFUND'",
+            (reversal_invoice_id, company_id),
+        ).fetchone()
+        if not inv:
+            raise TenantIsolationError("Reversal invoice not found in target company.")
+
+        if inv["workflow_state"] == "Posted":
+            raise FinancialIntegrityError(f"Reversal {reversal_invoice_id} is already Posted.")
+        if inv["workflow_state"] != "Approved":
+            raise FinancialIntegrityError(
+                f"Cannot post reversal {reversal_invoice_id} in state '{inv['workflow_state']}'; requires 'Approved' state."
+            )
+        if not inv["approved_payload_sha256"] or inv["payload_sha256"] != inv["approved_payload_sha256"]:
+            raise FinancialIntegrityError(
+                "APPROVAL_PAYLOAD_HASH_MISMATCH: Reversal was modified after approval; re-validation and approval required."
+            )
+
+        # Get the associated journal entry (should be in DRAFT state)
+        rev_je = conn.execute(
+            "SELECT * FROM journal_entries WHERE id = ? AND company_id = ?",
+            (inv["journal_entry_id"], company_id),
+        ).fetchone()
+        if not rev_je:
+            raise FinancialIntegrityError("Reversal journal entry not found.")
+        if rev_je["state"] != "DRAFT":
+            raise FinancialIntegrityError(f"Reversal journal entry is in state '{rev_je['state']}', expected 'DRAFT'.")
+
+        # Update journal entry to POSTED state
+        conn.execute(
+            """
+            UPDATE journal_entries
+            SET state = 'POSTED', posted_by_id = ?, posted_at = ?
+            WHERE id = ?
+            """,
+            (accountant_user_id, now_iso, rev_je["id"]),
+        )
+
+        # Decrement po_line.qty_invoiced so a replacement bill can be matched
+        orig_lines = conn.execute(
+            "SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?",
+            (inv["reversal_of_invoice_id"],),
+        ).fetchall()
+        for line in orig_lines:
+            if line["po_line_id"]:
+                pol = conn.execute("SELECT * FROM purchase_order_lines WHERE id = ?", (line["po_line_id"],)).fetchone()
+                if pol:
+                    updated_inv_qty = max(Decimal("0.000000"), round_qty(to_decimal(pol["qty_invoiced"]) - to_decimal(line["qty"])))
+                    conn.execute(
+                        "UPDATE purchase_order_lines SET qty_invoiced = ? WHERE id = ?",
+                        (f"{updated_inv_qty:.6f}", pol["id"]),
+                    )
+
+        # Update reversal invoice to Posted state
+        conn.execute(
+            """
+            UPDATE supplier_invoices
+            SET workflow_state = 'Posted', posted_by_id = ?, posted_at = ?
+            WHERE id = ?
+            """,
+            (accountant_user_id, now_iso, reversal_invoice_id),
+        )
+
+        result = {
+            "reversal_invoice_id": reversal_invoice_id,
+            "reversal_journal_entry_id": rev_je["id"],
+            "reversal_entry_number": rev_je["entry_number"],
+            "original_invoice_id": inv["reversal_of_invoice_id"],
+            "reason": None,  # reason is in the approval request
+            "workflow_state": "Posted",
+            "idempotent_replay": False,
+        }
+        conn.execute(
+            """
+            INSERT INTO idempotency_records (company_id, idempotency_key, operation, request_sha256, status, response_json, created_at)
+            VALUES (?, ?, 'POST_REVERSAL', ?, 'COMPLETED', ?, ?)
+            """,
+            (company_id, idempotency_key, req_hash, json.dumps(result), now_iso),
+        )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=accountant_user_id,
+            action_type="REVERSAL_POSTED",
+            target_model="supplier_invoices_reversal",
+            target_id=str(reversal_invoice_id),
+            after_state=result,
+        )
+        return result

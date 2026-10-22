@@ -1268,7 +1268,7 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
         "GET /healthz",
         "POST /api/v1/auth/token",
     ], f"unexpected public set: {sorted(public)}"
-    assert len(protected) == 11, f"expected 11 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert len(protected) == 14, f"expected 14 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

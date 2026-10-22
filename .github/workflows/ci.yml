@@ -10,7 +10,10 @@ on:
   pull_request:
   push:
     branches:
+      # The earlier working branch is kept so its history remains covered; the
+      # key-rotation work continues on the current one.
       - arena/5c240e1d-erp
+      - arena/6c474c64-erp
   workflow_dispatch:
 
 concurrency:

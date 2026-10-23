@@ -621,6 +621,12 @@ def test_status_and_monitor_leave_database_bytes_unchanged(tmp_path: Path, capsy
     ERPDatabase(str(db_path))
     before = db_path.read_bytes()
 
+    readonly_db = ERPDatabase(str(db_path), read_only=True)
+    with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+        with readonly_db.transaction() as conn:
+            conn.execute("CREATE TABLE must_not_be_created (id INTEGER)")
+    assert db_path.read_bytes() == before, "SQLite accepted a schema write in read-only mode"
+
     code = main(["monitor", "--db", str(db_path)])
     monitor_report = json.loads(capsys.readouterr().out)
     assert code == 0

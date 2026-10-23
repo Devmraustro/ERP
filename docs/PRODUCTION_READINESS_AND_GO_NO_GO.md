@@ -4,7 +4,7 @@
 
 | Scope | Release Verdict | Rationale |
 | :--- | :--- | :--- |
-| **Engineering Core, Localization Fixes, Procure-to-Pay (`PO → GRN → Invoice → Post`), Security/RBAC/Audit & OCR Intake (`arena/f74b041f-erp`)** | **CONDITIONAL GO (Controlled Pilot / Single-Tenant & Cloud VPC Staging)** | All `30 / 30` automated unit, integration, concurrency, security, OCR benchmark, and 14-step end-to-end tests are **`Passed`**. Database triggers enforce immutability of posted journal entries, audit events, and raw OCR fields; stock movements are strictly isolated to physical receipts/issues (`380` clearing account); and encrypted backups are verified via isolated restoration. |
+| **Engineering Core, Localization Fixes, Procure-to-Pay (`PO → GRN → Invoice → Post`), Security/RBAC/Audit & OCR Intake (`arena/f74b041f-erp`)** | **CONDITIONAL GO (Controlled Pilot / Single-Tenant & Cloud VPC Staging)** | The full suite is **`Passed`** (**418 tests**: unit, integration, concurrency, security, OCR benchmark and the 14-step end-to-end flow), plus **33/33** staging acceptance checks; the `30 / 30` figure in earlier revisions described the Phase 2 localization suite alone. Database triggers enforce immutability of posted journal entries, audit events, and raw OCR fields; stock movements are strictly isolated to physical receipts/issues (`380` clearing account); and encrypted backups are verified via isolated restoration. |
 | **Autonomous Statutory G50 Filing / Certified Algerian SCF Statutory Statements / Law 18-07 ANPDP Certification** | **NO-GO Until External Professional Sign-Off** | Per strict engineering and regulatory governance, no claim of statutory SCF/G50 certification or Law 18-07 legal certification may be made until a licensed Algerian *Expert-Comptable* / *Commissaire aux Comptes* (ONEC) and Algerian legal counsel execute formal written sign-off on customer-specific configurations. |
 
 ---
@@ -30,7 +30,7 @@ We strictly distinguish between `Verified`, `Passed`, `Implemented, not verified
 | **Phase 6** | Empirical 18-document Algerian invoice OCR benchmark across 6 strata + 14-step E2E acceptance test | `Passed` | `benchmarks/results/ground_truth_and_results.json`, `tests/test_phase6_ocr_benchmark_e2e.py` |
 | **Phase 7** | Server-verified bearer-token authentication (opaque `dzsess_` tokens, SHA-256 digest only, per-token revocation, PBKDF2-SHA256 600k iterations, lockout); identity and tenant resolved from the credential, never from a request header | `Passed` | `dz_erp/auth.py`, `dz_erp/api.py`, `tests/test_phase7_authentication_remediation.py` (`57 / 57` passed) |
 | **Phase 8** | Bounded upload boundary (10 MiB default, enforced while streaming; type allowlist cross-checked against actual magic bytes); fail-closed forwarded-header trust; reproducible headless-OpenCV dependency resolution; GitHub Actions CI | `Passed` | `dz_erp/upload.py`, `dz_erp/net.py`, `tests/test_phase8_upload_boundary_and_ci.py` (`127 / 127` passed), `tools/verify_dependency_graph.py`, `.github/workflows/ci.yml` |
-| **Phase 8** | CI run green on a clean runner, both supported Python versions | `Verified` | GitHub Actions run `39077748167` (`push`) and `39077751326` (`pull_request`) against `44d4511`; all 12 steps green on Python 3.11 and 3.12 |
+| **Phase 8** | CI green on a clean runner, both supported Python versions, **and Windows** | `Verified` | GitHub Actions run `39934498454` on `329ffb2`: Python 3.11, Python 3.12 and the `verify-windows` rotation/backup job all green |
 | **Phase 8** | Deterministic OCR inference (pinned ONNX Runtime thread counts) and host-independent benchmark thresholds | `Passed` | `dz_erp/intake_ocr.py`, `tests/test_phase6_ocr_benchmark_e2e.py`, §5.5 |
 | **Phase 8** | OCR *accuracy* figures stable across arbitrary hosts | **Not verified — and not claimable** | ONNX Runtime, OpenCV and PDFium dispatch SIMD kernels by host CPU feature; §5.5 |
 
@@ -44,6 +44,22 @@ The architecture preserves complete deployment flexibility:
    - Zero outbound internet calls are required at runtime (`RapidOCR` ONNX models and `pdfplumber` run 100% locally on CPU).
 2. **Multi-Company Shared Instance (Holding Groups / Multi-Subsidiary Algerian Enterprises):**
    - Enforced via mandatory `company_id` scoping on every table, server-verified bearer-token authentication (company is resolved from the credential's owning user record, never from a request header), and company-partitioned `PrivateDocumentVault` subdirectories.
+
+---
+
+## 3.1 Risk-closure round (this branch)
+
+| Deliverable | Status | Evidence |
+|---|---|---|
+| Tamper-evident rotation ledger, independent key | `Verified` | `dz_erp/rotation_audit.py`; 23 tests (`tests/test_phase14_rotation_audit_ledger.py`) |
+| Key custody enforced at read time | `Verified` | `dz_erp/key_provider.py`; phases 15 and 17 (28 tests); `docs/KEY_CUSTODY_THREAT_MODEL.md` |
+| Rotation convergence under concurrent writes | `Verified` | `tests/test_phase16_rotation_concurrency_convergence.py`; defect found by the drill and closed |
+| Machine-readable health monitoring | `Verified` | `python -m dz_erp.rotate_keys monitor` (exit 3 when unhealthy) |
+| Reproducible load/interruption drill | `Verified` (synthetic) | `tools/rotation_scale_drill.py`; `docs/KEY_ROTATION_SCALE_AND_DRILL_RESULTS.md` |
+| Risk register with severity/evidence/owner/action | `Verified` | `docs/RISK_REGISTER.md` (31 risks) |
+| Compliance review package | `Verified` | `docs/COMPLIANCE_REVIEW_PACKAGE.md` |
+| OCR evaluation protocol | `Verified` (protocol only; no engine change) | `docs/OCR_EVALUATION_PROTOCOL.md` |
+| Production-scale drill, HSM/KMS, scheduler | **`Open`** | `docs/RISK_REGISTER.md` S1, S3, D4, D6 |
 
 ---
 

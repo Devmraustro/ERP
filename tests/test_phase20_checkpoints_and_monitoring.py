@@ -583,6 +583,69 @@ def test_monitor_refuses_missing_vault_even_when_environment_key_is_set(
     assert not list(tmp_path.rglob("*.vault.keys.json"))
 
 
+def test_monitor_refuses_missing_or_uninitialised_database_without_writing(tmp_path: Path, capsys, monkeypatch) -> None:
+    """Monitoring must not create a DB/schema/key after a typo or empty file."""
+    monkeypatch.delenv("ERP_AUDIT_HMAC_SECRET", raising=False)
+    missing = tmp_path / "missing-parent" / "erp.sqlite3"
+
+    code = main(["monitor", "--db", str(missing)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert report["healthy"] is False
+    assert report["audit"]["configured"] is False
+    assert report["audit"]["reason"] == "DB_NOT_CONFIGURED"
+    assert not missing.exists()
+    assert not missing.parent.exists()
+    assert not Path(str(missing) + ".audit.key").exists()
+    assert not Path(str(missing) + ".audit.keys.json").exists()
+
+    empty = tmp_path / "empty.sqlite3"
+    empty.touch()
+    code = main(["monitor", "--db", str(empty)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert report["healthy"] is False
+    assert report["audit"]["configured"] is False
+    assert report["audit"]["reason"] == "DB_NOT_CONFIGURED"
+    assert empty.read_bytes() == b"", "monitoring initialized an existing empty database file"
+    assert not Path(str(empty) + ".audit.key").exists()
+    assert not Path(str(empty) + ".audit.keys.json").exists()
+
+
+def test_status_refuses_a_missing_database_without_initializing_it(tmp_path: Path, capsys) -> None:
+    missing = tmp_path / "typo" / "erp.sqlite3"
+
+    code = main(["status", "--db", str(missing)])
+    captured = capsys.readouterr()
+
+    assert code == 3
+    assert "DB:" in captured.err
+    assert not missing.exists()
+    assert not missing.parent.exists()
+    assert not Path(str(missing) + ".audit.key").exists()
+
+
+def test_status_refuses_a_missing_vault_even_when_environment_key_is_set(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    from cryptography.fernet import Fernet
+
+    missing = tmp_path / "typo" / "vault"
+    monkeypatch.setenv("ERP_VAULT_KEY", Fernet.generate_key().decode("ascii"))
+
+    code = main(["status", "--vault", str(missing)])
+    captured = capsys.readouterr()
+
+    assert code == 3
+    assert "VAULT:" in captured.err
+    assert not missing.exists()
+    assert not missing.parent.exists()
+    assert not list(tmp_path.rglob("*.vault.key"))
+    assert not list(tmp_path.rglob("*.vault.keys.json"))
+
+
 def test_monitor_refuses_an_empty_vault_directory_without_a_key(tmp_path: Path, capsys) -> None:
     """The directory existing is not the same as a deployment being configured."""
     root = tmp_path / "vault"

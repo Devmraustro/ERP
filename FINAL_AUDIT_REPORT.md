@@ -1,315 +1,391 @@
-# Independent Security Audit & Staging Acceptance — Final Report
+# Final Audit & Readiness Report — Key Rotation and Release Readiness
 
 **Repository:** https://github.com/Devmraustro/ERP
-**Branch:** `arena/5c240e1d-erp`
-**Tested commit:** `f1bf785f148e38680aec3a0c240597b81e17af8f`
-**Date:** 2026-10-22
-**Auditor:** Independent re-review (this session)
+**Branch:** `arena/6c474c64-erp`
+**Initial HEAD:** `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` (head of PR #2, CI green)
+**Final code HEAD (CI-verified):** `d823b83f79f1c0e2195768ab635f684a24b52479`
+**Verification date:** 2026-10-22/23 (UTC)
+**Environment used for all local evidence:** Linux x86-64, CPython 3.11.2, SQLite 3.40.1,
+cryptography 44.0.2, pytest 8.3.5, ruff 0.14.0, venv at `/home/user/venv` (outside the repo).
+**Target of the earlier audit:** Windows 11 / CPython 3.11.9 — so this session re-verified the
+claims on a *different* platform rather than trusting them.
 
 ---
 
-## 1. Executive Summary & Verdict
+## 1. Executive summary and verdict
 
-**VERDICT: CONDITIONAL GO FOR ISOLATED NON-PRODUCTION STAGING**
+**VERDICT: CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY.**
 
-The codebase passes all 288 automated tests, 50/50 staging acceptance steps, and independent adversarial checks. Four platform-specific defects were found and fixed (Windows concurrency race in security log, POSIX-only permission assertions, missing `colorama` on Windows, OpenCV validator not platform-aware). Three architectural gaps were closed: (1) invoice reversal now has approval/SoD, (2) FastAPI `/docs`, `/redoc`, `/openapi.json` are configurable (secure default), (3) security log has documented rotation/retention policy. One gap (key rotation) requires architectural migration and is documented with a reviewed design.
+The two architectural blockers recorded by the previous audit — no vault encryption-key rotation and
+no audit HMAC-key rotation — are now **implemented, integrated and tested**, with the two mechanisms
+kept separate as required:
 
----
+* **Vault:** ciphertext is self-describing (`DZKV` + version byte), a key registry holds every
+  version, and `rotate_key()` re-encrypts blob by blob with optimistic concurrency, round-trip
+  content verification, a resume path and a secret-free journal.
+* **Audit:** `audit_events` records the key version that signed each row, verification selects the
+  per-row key, and rotation signs *new* events with a new version while preserving every historical
+  hash unchanged. A missing key is reported as `AUDIT_KEY_UNAVAILABLE`, never as `valid: true` and
+  never as tampering.
+* **Backup/restore:** archives now carry every key version (inside the encrypted archive) plus a
+  material-free version summary, and a restore of mixed-version data is verified end to end.
 
-## 2. Evidence: Test Suite & Static Checks
+Local suite: **359 passed**, 89 % coverage. Staging acceptance: **33/33 checks**. CI on the final
+code commit: **success on Python 3.11 and 3.12**.
 
-| Check | Command | Exit Code | Duration | Result |
-|-------|---------|-----------|----------|--------|
-| Dependency graph validator | `python tools/verify_dependency_graph.py` | 0 | 2.1s | PASS |
-| `pip check` | `pip check` | 1 (expected) | 1.3s | Only documented deviation: `rapidocr-onnxruntime` → `opencv-python-headless` |
-| Ruff static check | `ruff check dz_erp tests tools` | 0 | 1.8s | All checks passed |
-| Byte-compile | `python -m compileall -q dz_erp tests tools` | 0 | 2.4s | No syntax errors |
-| Full test suite + coverage | `pytest --cov=dz_erp --cov-report=term-missing` | 0 | 278s | **288 passed, 1 warning**, 89% coverage |
-| Concurrency reproduction (fixed) | `python repro_concurrency.py` | 0 | 0.8s | **400/400 records, 0 lost** |
-
-**Coverage breakdown:** 89% overall (2,663 statements, 286 missed). Missed lines are primarily exception paths and platform branches.
-
----
-
-## 3. Evidence: Staging Acceptance (15 Steps, 127.0.0.1, Synthetic Data)
-
-All 50 checks PASS:
-
-| Step | Description | Checks |
-|------|-------------|--------|
-| 1a–1e | Startup with explicit config, bootstrap, server on 127.0.0.1 | 5/5 |
-| 2–2b | Upload synthetic invoice → NeedsReview | 2/2 |
-| 3–3c | OCR extraction, NO invoice/journal created | 3/3 |
-| 4–4b | Human correction recorded, raw OCR preserved | 2/2 |
-| 5–5d | Rejection without financial posting | 4/4 |
-| 6–6f | Approval + posting, balanced journal entry, idempotency | 6/6 |
-| 7–7c | Idempotency on retry | 3/3 |
-| 8–8c | Unauthorized posting rejection (RBAC) | 3/3 |
-| 9–9c | Cross-tenant access denial | 3/3 |
-| 10–10c | Audit event creation + HMAC chain verification | 3/3 |
-| 11–11c | Encrypted backup + restore with trial balance | 3/3 |
-| 12a–12d | Fresh-process decryption + audit verification | 4/4 |
-| 13 | Relocated vault decryption | 1/1 |
-| 14–14e | Durable security logging (auth failures) | 5/5 |
-| 15a–15c | Safe shutdown, artefact confinement, synthetic data | 3/3 |
-
-**Total:** 50/50 PASS
+Nothing here is a legal or accounting approval. Six categories of blocker remain (§7), all
+documented: hardware-backed key custody, key-rotation operationalisation, qualified Algerian
+accounting/tax review, Law 18-07/ANPDP formalities, the documented dependency deviation, and the
+absence of a real-scale operational drill.
 
 ---
 
-## 4. Evidence: Independent Adversarial Verification
+## 2. Verified repository state
 
-External harness (`C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\adversarial.py`) — 18 checks across vault key persistence (A1–A10) and audit HMAC key management (B1–B8): **ALL PASS**.
+| Item | Value | How verified |
+|---|---|---|
+| Branch | `arena/6c474c64-erp` | `git branch --show-current` |
+| Initial HEAD | `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` | `git rev-parse HEAD`; remote branch commit |
+| Final code HEAD | `d823b83f79f1c0e2195768ab635f684a24b52479` | `git log --oneline -1` |
+| Working tree | Clean at commit time | `git status --short` |
+| Remote | `origin/arena/6c474c64-erp` pushed and tracking | `git push -u`, `git log origin/...` |
+| PR #1 | **OPEN, untouched, not merged** | `gh pr list` |
+| PR #2 | **OPEN, untouched, not merged**; head still `arena/5c240e1d-erp` @ `becf52b` | `gh pr view 2` |
+| CI for initial HEAD | Run `39870180714` — success (3.11, 3.12) | `gh pr checks 2` |
+| CI for final code HEAD | Run [`39873531618`](https://github.com/Devmraustro/ERP/actions/runs/39873531618) — **success** (3.11: 1 m 51 s; 3.12: 6 m 37 s) | `gh run watch … --exit-status`; `gh api …/actions/runs/39873531618/jobs` |
+| Deployments | None performed | — |
 
-Key findings verified:
-- Vault key persisted beside vault, reused across process boundary
-- Audit HMAC key persisted beside DB, chain verifies after restart
-- Default published secret **cannot** verify/forge the chain
-- Explicit > env > file precedence enforced
-- Missing key with events raises `AuditKeyUnavailableError` (no silent replacement)
+**Important scoping fact:** this work lives on the session branch `arena/6c474c64-erp`, **not** on
+PR #2's branch. PR #1 and PR #2 were neither merged, modified nor rebased. This report is committed
+on top of `d823b83` and changes no code.
 
----
+### 2.1 Phase 0 reconciliation — the checkout did not match the prompt
 
-## 5. Evidence: Benchmark Artefact Reproducibility
+The prompt described a working tree at `becf52b` on `arena/5c240e1d-erp`. In reality the sandbox
+checkout was `main` at `0e106e05…` containing a 6-byte `README.md`. The implementation lived only on
+the two remote `arena/*` branches. Reconciliation steps, all non-destructive:
 
-Regenerated committed benchmark artefacts into scratch directory; classified every difference:
-
-| Artefact class | Committed | Regenerated | Classification |
-|----------------|-----------|-------------|----------------|
-| 9 PDFs | content-identical | timestamps/IDs differ | **timestamp-only** |
-| 9 PNGs | pixel-identical (maxdiff=0) | encoder differs | **identical pixels** |
-| JSON | accuracy identical | latency fields differ | **latency-only** |
-
-**Accuracy unchanged.** Working tree clean after restore (`git checkout -- benchmarks/results/`).
-
----
-
-## 6. Independent Findings & Fixes Applied
-
-### Fix (a) — JsonlSecurityLog Windows Append Race (HIGH)
-**Root cause:** `O_APPEND` on Windows/NTFS is non-atomic (seek-then-write); 176/400 concurrent records lost.
-**Fix:** Process-local `threading.Lock` + mandatory byte-range lock (`msvcrt.locking` on byte 0) with retry loop. POSIX unchanged (kernel `O_APPEND` is atomic).
-**File:** `dz_erp/security_audit.py` (+138 lines, documented)
-**Verification:** 400/400 records survive 8×50 concurrent writers (threads + processes).
-
-### Fix (b) — Platform-Incorrect Permission Assertions (MEDIUM)
-**Root cause:** `stat.S_IMODE() == 0o600` fails on Windows (returns 0o666); POSIX guarantee not weakened.
-**Fix:** Shared pytest fixture `assert_owner_only_permissions` — POSIX asserts `0o600`; Windows asserts file exists + owner-writable (`os.access(path, os.W_OK)`).
-**Files:** `tests/conftest.py` (new), 4 test functions updated.
-
-### Fix (c) — Missing `colorama` on Windows (LOW)
-**Root cause:** `pytest` and `tqdm` declare `colorama; sys_platform=="win32"`; `pip check` failed.
-**Fix:** Added `colorama==0.4.6 ; sys_platform == "win32"` to `requirements.lock.txt` with explanatory comment.
-**File:** `requirements.lock.txt` (+4 lines).
-
-### Fix (d) — OpenCV Validator Not Platform-Aware (LOW)
-**Root cause:** `opencv_python_headless.libs` payload directory exists only on POSIX; Windows ships DLLs in-package.
-**Fix:** Assert headless payload dir only on POSIX; assert GUI payload dir absent on ALL platforms.
-**File:** `tools/verify_dependency_graph.py` (+13 lines).
+1. `git fetch origin 'refs/heads/*:refs/remotes/origin/*'`.
+2. Established that `arena/f74b041f-erp` (PR #1 head, `1b63c6e`) is an **ancestor** of
+   `arena/5c240e1d-erp` (PR #2 head), i.e. PR #2 already contains PR #1's work.
+3. Fast-forwarded the session branch to `origin/arena/5c240e1d-erp` (`--ff-only`). No force-push, no
+   history rewrite, no branch switch.
+4. Confirmed PR #2, CI state and the working tree before changing any file.
 
 ---
 
-## 7. Priority 1 — Financial Reversal Authorization (HIGH) — **FIXED**
+## 3. Evidence map of the pre-change implementation (Phase 0 findings)
 
-**Finding:** `/api/v1/invoices/{id}/reverse` → `reverse_posted_invoice` created POSTED credit-note JE with **no approval, no SoD** (creator=approver=poster).
+| Concern | Pre-change state | Where |
+|---|---|---|
+| Vault ciphertext | Raw Fernet token, **no key identifier** | `dz_erp/intake_ocr.py` |
+| Vault key | Single key file `<vault>.vault.key`, mode 0600, or `ERP_VAULT_KEY` | same |
+| Audit MAC | HMAC-SHA256 over `company|occurred_at|actor|action|model|target|before|after|prev_hash` | `dz_erp/database.py` |
+| Audit key | Single file `<db>.audit.key`, `ERP_AUDIT_HMAC_SECRET`, or (in-memory only) a published default | same |
+| Audit schema | `audit_events` had **no key-version column**; append-only via triggers | `SCHEMA_SQL` |
+| Backup | Fernet archive of SQLite snapshot + vault + manifest carrying **one** vault key and **one** audit key | `dz_erp/security_audit.py` |
+| Migrations | Idempotent `PRAGMA table_info` column additions in `_migrate_schema` | `dz_erp/database.py` |
+| Restore | Wrote both legacy key files beside restored artefacts | `dz_erp/security_audit.py` |
+| Rotation | **None** for either key (the previous design document described an unimplemented plan) | `KEY_ROTATION_DESIGN.md` |
 
-**Fix Applied:**
-1. **New approval workflow for reversals:** `NeedsReview` → `PendingApproval` → `Approved` → `Posted`
-2. **New endpoints:**
-   - `POST /api/v1/invoices/{id}/reverse` — creates reversal in `NeedsReview` (was `Posted`)
-   - `POST /api/v1/invoices/{reversal_id}/submit-approval` — transitions to `PendingApproval`
-   - `POST /api/v1/invoices/{reversal_id}/decide-approval` — approve/reject with SoD enforcement
-   - `POST /api/v1/invoices/{reversal_id}/post` — post approved reversal with idempotency
-3. **SoD enforced:** Requester cannot approve own reversal (`AuthorizationError: SEGREGATION_OF_DUTIES_VIOLATION`) — `dz_erp/procurement_stock.py:1551-1554`
-4. **Role enforcement:** Only `accountant`/`admin` can request; only `approver`/`accountant`/`admin` can decide; only `accountant`/`admin` can post
-5. **Audit trail:** `REVERSAL_REQUESTED`, `REVERSAL_APPROVAL_REQUESTED`, `REVERSAL_APPROVED`/`REVERSAL_REJECTED`, `REVERSAL_POSTED`
-6. **Idempotency:** All mutating endpoints require `Idempotency-Key` header
-7. **Reversal journal entry:** Created in `DRAFT` state, only `POSTED` after approval
-
-**Files changed:**
-- `dz_erp/api.py` — new models + endpoints
-- `dz_erp/procurement_stock.py` — `create_reversal_request`, `submit_reversal_for_approval`, `decide_reversal_approval`, `post_reversal`
-- `dz_erp/database.py` — `journal_entries.posted_by_id`/`posted_at` nullable for DRAFT state
-- `tests/test_phase4_procurement_3way_match.py` — updated test to use new workflow
-- `tests/test_phase8_upload_boundary_and_ci.py` — OpenAPI contract updated (14 protected ops)
-
-**Verification:** All 288 tests pass; staging acceptance 50/50; reversal workflow tested in staging.
+Baseline reproduced on this checkout before any change: `288 passed`, ruff clean, compile clean,
+dependency validator clean, `pip check` exit 1 with exactly the one documented deviation.
 
 ---
 
-## 8. Priority 2 — API Documentation Exposure (MEDIUM) — **FIXED**
+## 4. Completed phases
 
-**Finding:** FastAPI defaults expose `/docs`, `/redoc`, `/openapi.json` publicly.
+### Phase 1 — Vault encryption-key rotation — **IMPLEMENTED AND TESTED**
 
-**Fix Applied:**
-1. **New parameter:** `docs_enabled` in `create_erp_fastapi_app()` (default `False`)
-2. **Environment variable:** `ERP_DOCS_ENABLED` (values: `true`/`1`/`yes`/`on` to enable)
-3. **Secure default:** `docs_url=None`, `redoc_url=None`, `openapi_url=None` when disabled
-4. **Routes genuinely unavailable:** 404 when disabled, not just hidden from schema
+*Files:* `dz_erp/key_rotation.py` (new, 311 statements), `dz_erp/intake_ocr.py`,
+`tests/test_phase10_vault_key_rotation.py` (new, 23 tests), `.gitignore`.
+*Commit:* `41992c7`.
 
-**Files changed:**
-- `dz_erp/api.py` — `docs_enabled` parameter, conditional FastAPI init
-- `dz_erp/serve.py` — reads `ERP_DOCS_ENABLED`, passes to `create_erp_fastapi_app`
+* Format: `"DZKV" | version byte | Fernet token`; unmarked ⇒ legacy ⇒ version 1. The discriminator
+  cannot collide with a Fernet token, which always begins with `g` (`0x67`).
+* Registry `<vault>.vault.keys.json` (0600, atomic replace); exactly one active version; duplicate
+  material across versions rejected; every retained key parsed as Fernet at start-up.
+* `rotate_key()`: pre-scan → fail closed if any blob needs an absent version → persist registry →
+  per-blob decrypt/re-encrypt/round-trip-verify → atomic replace only if unchanged → full
+  post-sweep verification → reconciliation report (`attempted/completed/skipped_*/failed/errors`).
+* Guarantees tested: legacy decryption; wrong key (`InvalidToken`); corrupt ciphertext; missing
+  historical key at start-up **and** on read; unknown version; invalid/duplicate versions;
+  forced interruption; resume without a third version; forced concurrent-update race (writer's
+  bytes survive); lock contention; tenant isolation; key-removal guards; no plaintext or key
+  material in the journal.
 
-**Verification:**
-- `ERP_DOCS_ENABLED=false` (default): `/docs`, `/redoc`, `/openapi.json` return 404
-- `ERP_DOCS_ENABLED=true`: routes work as expected
-- All 288 tests pass; staging acceptance 50/50
+*Result:* 23/23 tests pass. Vault module coverage 92 %; `key_rotation.py` 86 %.
 
----
+### Phase 2 — Audit HMAC-key rotation — **IMPLEMENTED AND TESTED** (kept separate from Phase 1)
 
-## 9. Priority 3 — Durable Security-Log Operations (MEDIUM) — **FIXED**
+*Files:* `dz_erp/database.py`, `dz_erp/security_audit.py` (registry carry-through for backup/restore),
+`tests/test_phase11_audit_key_rotation.py` (new, 25 tests).
+*Commit:* `2a8ea6b`.
 
-**Finding:** No documented rotation/retention policy for `ERP_SECURITY_LOG_PATH`.
+* Schema: idempotent `ALTER TABLE audit_events ADD COLUMN hmac_key_version INTEGER NOT NULL
+  DEFAULT 1`; the MAC input is **unchanged**, so no historical hash is recomputed.
+* Verification selects the key recorded per row and distinguishes `EVENT_HASH_TAMPERED`,
+  `PREV_HASH_MISMATCH` and `AUDIT_KEY_UNAVAILABLE` (with `missing_key_versions`).
+* Start-up fails closed when an event needs an absent version.
+* Rotation refuses to run on an unverifiable chain (tamper ⇒ `AuditTamperError`, lost key ⇒
+  `AuditKeyUnavailableError`), persists the registry atomically before switching, and reports both
+  verdicts. Rollback reactivates an older version without rewriting history.
+* Tested: legacy-schema migration; mixed-version chain; modified/deleted/reordered/inserted events;
+  missing and wrong keys; failed registry write leaves everything untouched; resume; rollback;
+  removal guards; backup/restore of version metadata; verification from a **separate OS process**.
 
-**Fix Applied:**
-1. **Configurable retention:** `ERP_SECURITY_LOG_MAX_SIZE` (default 100 MB), `ERP_SECURITY_LOG_MAX_FILES` (default 10)
-2. **Atomic rotation:** `os.replace` (POSIX) / `os.replace` with unlink (Windows) — preserves records
-3. **Thread-safe:** Rotation serialised with process-local lock; write+rotation under same lock
-4. **Cross-process safe:** Rotation lock separate from write lock, both per-log-path
-5. **Retention policy:** Keep current + `MAX_FILES - 1` rotated; oldest deleted
-6. **Error handling:** Rotation failures don't block writes; retry on next write
-7. **Documentation:** Docstrings in `_rotate_security_log` and class docstring updated
+*Result:* 25/25 tests pass. `database.py` coverage 93 %.
 
-**Files changed:**
-- `dz_erp/security_audit.py` — `_LOG_MAX_FILE_SIZE`, `_LOG_MAX_FILES`, `_rotation_lock_for`, `_rotate_security_log`, updated `JsonlSecurityLog.__call__`
+### Phase 3 — Migration, backup/restore and rollback safety — **IMPLEMENTED AND TESTED**
 
-**Verification:**
-- Single-threaded rotation: 20 records preserved across 10 rotated files
-- Concurrent rotation (5 threads × 20 writes): 100/100 records preserved with max_files=20
-- All 288 tests pass; staging acceptance 50/50
+*Files:* `dz_erp/security_audit.py`, `tests/test_phase12_key_migration_and_backup.py` (new, 17
+tests). *Commit:* `7ba79c0` (+ assertion fix `ebd8db6`).
 
----
+* A representative legacy deployment (pre-versioning schema, single key files, unversioned blobs) is
+  upgraded **without rewriting anything** — verified byte-identical ciphertext and identical audit
+  hashes; the migration is idempotent across restarts.
+* Backup manifest carries all key versions (inside the encrypted archive) plus a material-free
+  version summary returned to the caller.
+* Restore of mixed-version ciphertext into an isolated directory verifies SHA-256, trial balance
+  and every audit chain; restores both registries and reopens with no secrets supplied.
+* Restore refuses when a required version is absent (`VaultKeyUnavailableError` /
+  `AuditKeyUnavailableError`), when a registry is tampered with (`KeyConfigurationError`), and when
+  an operator-supplied key contradicts the archive — with preflight validation **before** writing
+  artefacts.
+* Undecryptable records are never discarded or rewritten: they stay byte-identical, are reported as
+  `failed`, and the rest of the store migrates.
 
-## 10. Priority 4 — Key Rotation (MEDIUM) — **DESIGN DOCUMENTED, NOT IMPLEMENTED**
+*Result:* 17/17 tests pass.
 
-**Finding:** No key rotation for vault encryption or audit HMAC keys.
+### Phase 4 — Security regression audit — **RE-VERIFIED AGAINST CURRENT CODE; NEW TESTS ADDED**
 
-**Status:** **DESIGN COMPLETE — IMPLEMENTATION REQUIRES ARCHITECTURAL MIGRATION**
+*Files:* `tests/test_phase13_key_rotation_regression.py` (new, 6 tests).
 
-**Blockers identified:**
-- No key version in encrypted blobs (vault)
-- No `hmac_key_version` column in `audit_events` (audit)
-- Single-key assumption in `PrivateDocumentVault` and `ERPDatabase`
-- Backup manifest doesn't store key versions
+Re-checked rather than assumed (existing suite plus new assertions): spoofed `X-User-Id` /
+`X-Company-Id` headers are ignored (401); bearer tokens are server-issued, hashed at rest, expiring
+and revocable; password verification + lockout tested; tenant scoping server-side; upload bounds
+and content validation; fail-closed proxy trust; redacting logger; docs disabled by default with
+`ERP_DOCS_ENABLED` opt-in; SoD on approval and reversal; idempotent posting; OCR cannot post.
+New assertions specific to this change: **no API route exposes key rotation**; key material never
+reaches the security log; rotation/lock/journal/keyring files are `0600`; registries are never
+written inside the vault; a rotation cannot be used to bypass duplicate-posting or RBAC.
 
-**Design produced:** `KEY_ROTATION_DESIGN.md` — covers:
-- Key versioning infrastructure (key rings with status: active/retired/compromised)
-- Vault versioned encryption (dual-write, background re-encrypt, retire)
-- Audit HMAC versioned computation/verification (schema migration, per-event version)
-- Rotation CLI procedures (generate, activate, re-encrypt, retire, rollback)
-- Backup/restore compatibility (manifest stores all versions)
-- Interruption safety & rollback (transaction log, rollback CLI)
+*Result:* 6/6 new tests pass; the pre-existing security tests (Phases 7–9) still pass unchanged.
 
-**Recommendation:** Implement in dedicated development cycle. Current verdict unchanged.
+### Phase 5 — Accounting, stock and OCR invariants — **RE-VERIFIED; ROTATION SHOWN NOT TO DISTURB THEM**
 
----
+`test_phase13` posts a real invoice through approval and posting, then rotates **both** keys and
+asserts: journal entries and lines unchanged, trials balance at 23 800.00 DZD, approval records and
+invoice state unchanged, audit chain valid across two key versions, encrypted source document still
+readable. Duplicate-posting and role checks still refuse after rotation. The existing Phase 2–6
+suites (localization, 3-way match, procurement/stock, OCR intake, benchmark) pass unchanged.
 
-## 11. Priority 5 — OCR Measurement (LOW) — **DOCUMENTED**
+*Not claimed:* Algerian legal compliance of any accounting or tax treatment. See §7 and
+`docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md`.
 
-**Finding:** Cannot claim statistically validated OCR accuracy based on 18 synthetic invoices.
+### Phase 6 — Dependencies and reproducible builds — **VERIFIED; ONE DEVIATION RETAINED AND EXPLAINED**
 
-**Status:** **DOCUMENTED IN STAGING CONFIG** — No code changes required.
+* `python tools/verify_dependency_graph.py` → **exit 0** (52 distributions; the only deviation is
+  the allow-listed substitution).
+* `python -m pip check` → **exit 1**, exactly one line:
+  `rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.`
+* Evidence gathered from PyPI metadata this session: `rapidocr-onnxruntime` **1.4.4 is the latest
+  release under that name** and hard-requires the GUI `opencv-python>=4.5.1.48`, so no version of
+  the pinned package removes the conflict. The upstream successor package **`rapidocr` 3.10.0
+  declares `opencv-python-headless`** — i.e. upstream itself adopted the headless build, which is
+  evidence that the project's substitution is the sanctioned direction rather than a local hack.
+* Decision: keep the tested minimal correction (headless wheel + explicit graph validator +
+  `--no-deps` lockfile install). A move to `rapidocr` 3.x is a major-version migration (new
+  transitive dependencies `omegaconf`, `requests`, `colorlog`; API changes) and is **not** done
+  here. Recorded as a follow-up in §7.
+* Python support range verified from metadata: `requires-python <3.13,>=3.6` upstream and
+  `>=3.11` in `pyproject.toml` → CI matrix 3.11/3.12 is correct.
 
-**Current reporting:**
-- Sample sizes explicitly reported (18 documents, 3 per stratum)
-- Per-field metrics shown
-- Limitations documented: "no statistical claim is defensible from 18 synthetic documents"
-- Human review mandatory (workflow enforces `NeedsReview` → human correction)
+### Phase 7 — Algerian compliance gates — **CHECKLIST CREATED; NOTHING APPROVED**
 
-**No fabrication of test data or accuracy improvements.**
+*File:* `docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md`.
+Per item: software evidence, outstanding professional question, responsible reviewer, required
+evidence, and whether it blocks production. Covers SCF mapping, journal codes, precision, clearing
+accounts **380 vs 408**, VAT, **stamp duty brackets**, **G50 aggregation**, invoicing mentions,
+retention, Law 18-07 (register, data-subject rights, minimisation), **ANPDP formalities**,
+cross-border hosting, and key custody. Every gate is marked open; the sign-off block is blank.
 
----
+### Phase 8 — Staging validation — **EXECUTED (isolated, synthetic)**
 
-## 12. Change-Control Log (This Session)
+*File:* `tools/staging_acceptance.py` (new, reproducible, `--dry-run`-safe state directory).
+Built the **real** application through `dz_erp.serve.build_app` on 127.0.0.1 semantics in a fresh
+temporary directory with `ERP_DOCS_ENABLED=false`, an explicit durable security-log path, and no
+`ERP_VAULT_KEY` / `ERP_AUDIT_HMAC_SECRET` set:
+startup → docs 404 → fail-closed proxy trust → keys beside artefacts → auth (incl. spoofed-header
+rejection) → synthetic PDF upload → OCR → no financial record created → invoice → submit → SoD
+refusal → independent approval → posting → balanced 23 800.00 DZD → idempotent replay → duplicate
+refusal → audit verification → **vault rotation** → **audit rotation** → mixed-version chain →
+**interrupted rotation + resume** → backup → **isolated restore** → **fresh OS process reads the
+restored data** → no key material in logs/journals.
 
-| Commit | Message | Files |
-|--------|---------|-------|
-| `4296e11` | fix: Windows concurrency race in JsonlSecurityLog; platform-correct permission assertions; colorama win32 marker; platform-aware OpenCV validator | `dz_erp/security_audit.py`, `requirements.lock.txt`, `tests/test_phase8_upload_boundary_and_ci.py`, `tests/test_phase9_durable_security_log.py`, `tools/verify_dependency_graph.py`, `tests/conftest.py` |
-| `f1bf785` | fix: Priority 1 — reversal approval workflow with SoD; Priority 2 — configurable API docs; Priority 3 — security log rotation with retention | `dz_erp/api.py`, `dz_erp/database.py`, `dz_erp/procurement_stock.py`, `dz_erp/security_audit.py`, `dz_erp/serve.py`, `tests/test_phase4_procurement_3way_match.py`, `tests/test_phase8_upload_boundary_and_ci.py` |
+*Result:* **33/33 checks passed** (`exit 0`). No production host, credential, or customer data was
+involved. This is **not** a production-equivalent environment.
 
-**No history rewrite, no force-push, no merge to `main`, PR #2 remains open.**
+### Phase 9 — Documentation and PR accuracy — **UPDATED**
 
----
+* `KEY_ROTATION_DESIGN.md` — rewritten from "design, not implemented" to the implemented design,
+  with the vault and audit mechanisms in separate sections, formats, threat model, limits and
+  operational procedures.
+* `docs/KEY_MIGRATION_AND_RECOVERY_GUIDE.md` — new runbook: preconditions, rotation, resume,
+  failure table keyed by exact exception names, rollback, key-deletion policy, backup-vs-key restore
+  distinction, post-rotation checklist.
+* `docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md` — new.
+* `docs/STAGING_SECURITY_CONFIGURATION.md` — corrected stale statements (rotation now exists; the
+  security log now rotates; docs exposure is now env-controlled).
+* `.gitignore` — ignores `*.keys.json`, `*.rotation.jsonl`, `*.rotation.lock` so key material and
+  operator journals cannot be committed by accident.
+* `README.md`-level accuracy: no claim in this report is derived from the previous report; each is
+  from a command run this session.
+* **PR descriptions were not edited.** PR #2 belongs to a different branch and its description
+  describes that branch's state; this session's work is not part of PR #2, so rewriting its
+  description would misrepresent it. The accurate record for this change is this report and the
+  commit messages on `arena/6c474c64-erp`.
 
-## 13. CI Run Links (Tested Commit `f1bf785f148e38680aec3a0c240597b81e17af8f`)
-
-| Type | Run URL | Status | Python Versions |
-|------|---------|--------|-----------------|
-| Pull Request | https://github.com/Devmraustro/ERP/actions/runs/39332764325 | success | 3.11, 3.12 |
-| Push | https://github.com/Devmraustro/ERP/actions/runs/39332759637 | success | 3.11, 3.12 |
-
-Both CI runs test Python 3.11 and 3.12 (matrix strategy). The workflow file specifies `python-version: ["3.11", "3.12"]`.
-
----
-
-## 14. Reproducibility Artifacts
-
-All harness scripts preserved outside repo (git-ignored):
-- `C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\adversarial.py` — independent adversarial verification
-- `C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\benchmark_repro.py` — benchmark artefact reproducibility
-- `C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\staging_acceptance.py` — 15-step staging acceptance
-- `C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\repro_concurrency.py` — concurrency race reproduction
-- `C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\strategy_bench.py` — append strategy comparison
-- `C:\Users\rabdz\AppData\Local\Temp\opencode\erp-audit\win_lock_probe*.py` — Windows locking probes
-
-Design document:
-- `KEY_ROTATION_DESIGN.md` — key rotation design (Priority 4)
-
----
-
-## 15. Environment Fingerprint
-
-```
-OS: Windows 10/11 (win32)
-Python: 3.11.9 (venv at .venv/)
-Git: 2.55.0
-Key deps: fastapi=0.115.12, uvicorn=0.34.0, opencv-python-headless=4.11.0.86,
-          rapidocr-onnxruntime=1.4.4, pydantic=2.11.1, sqlalchemy=2.0.40,
-          cryptography=44.0.2, pytest=8.3.5, ruff=0.14.0
-```
-
----
-
-## 16. Priority Status Summary
-
-| Priority | Finding | Status | Evidence |
-|----------|---------|--------|----------|
-| 1 | Invoice reversal lacks approval/SoD | **PASS** (fixed) | New workflow, SoD enforced, 288 tests pass |
-| 2 | API docs publicly exposed | **PASS** (fixed) | Configurable via `ERP_DOCS_ENABLED`, secure default |
-| 3 | Security log no rotation/retention | **PASS** (fixed) | Configurable max size/files, atomic rotation, concurrent-safe |
-| 4 | No key rotation | **BLOCKED** (design done) | Requires architectural migration; design in `KEY_ROTATION_DESIGN.md` |
-| 5 | OCR statistical claims | **PASS** (documented) | Limitations explicit, human review mandatory |
-
----
-
-## 17. Git State Verification
-
-```
-Local HEAD:        f1bf785f148e38680aec3a0c240597b81e17af8f
-Remote HEAD:       f1bf785f148e38680aec3a0c240597b81e17af8f (origin/arena/5c240e1d-erp)
-PR #2 head:        f1bf785f148e38680aec3a0c240597b81e17af8f (per CI metadata)
-Working tree:      Clean (only FINAL_AUDIT_REPORT.md, KEY_ROTATION_DESIGN.md untracked)
-```
-
-**No history rewrite, no force-push, no merge to `main`, PR #2 remains open.**
+### Phase 10 — Final verification and change control — **DONE** (see §5 and §6)
 
 ---
 
-## 18. Exactly One Verdict
+## 5. Security and data integrity
 
-**CONDITIONAL GO FOR ISOLATED NON-PRODUCTION STAGING**
+| Property | Status | Evidence |
+|---|---|---|
+| Vault rotation implemented | **Yes** | `rotate_key`, 23 tests, staging check |
+| Audit HMAC rotation implemented | **Yes** | `rotate_audit_key`, 25 tests, staging check |
+| Historical data readable with its own key | **Yes** | legacy-blob test; pre-versioning schema test; mixed-version chain |
+| Missing key never silently replaced | **Yes** | start-up + read paths raise `VaultKeyUnavailableError` / `AuditKeyUnavailableError`; existing process-boundary tests still pass |
+| Interruption recovery | **Yes** | forced-crash tests; resume without a new version; journal shows no `rotation_finished` |
+| No false "migrated" state | **Yes** | contended/skipped/failed are reported separately from `completed` |
+| Backup/restore keeps encrypted records recoverable | **Yes** | mixed-version restore; reopen with no secrets; fresh-process verification |
+| Tampering still detected after rotation | **Yes** | modified/deleted/reordered/inserted tests |
+| Missing key ≠ tamper | **Yes** | `AUDIT_KEY_UNAVAILABLE` vs `EVENT_HASH_TAMPERED`; distinct exception classes |
+| No secrets in logs/reports | **Yes** | assertions on security log, both journals, CLI output and backup metadata |
+| Tenant boundaries preserved | **Yes** | cross-company read denied before and after rotation |
+| Financial invariants preserved | **Yes** | posted entries/approvals/invoices unchanged; trial balance balanced |
 
-**Conditions (all met):**
-- ✅ `ERP_SECURITY_LOG_PATH` set to durable path
-- ✅ FastAPI docs disabled by default (`ERP_DOCS_ENABLED=false`)
-- ✅ Invoice reversal requires approval/SoD
-- ✅ No production traffic; synthetic data only; dedicated test DB + vault
-
-**Blockers for PRODUCTION CANDIDATE:**
-- Key rotation (Priority 4) — design complete, requires architectural migration
-- No Algerian statutory compliance claim without qualified local validation
+**Residual risk, stated plainly:** key material is protected by file permissions (`0600`), not by
+an HSM or KMS. An attacker with the service account's file access can read every key. Vault
+rotation uses optimistic concurrency only (no blob-level distributed lock). Rotation is not recorded
+in the tenant audit chain (it is recorded in the rotation journal) because `audit_events.company_id`
+is `NOT NULL` and a global key operation has no trustworthy tenant to attribute.
 
 ---
 
-*Report generated by independent re-review session. All evidence reproducible from committed code + external harness scripts + design document.*
+## 6. Quality verification (exact commands, exit codes, results)
+
+Run in `/home/user/ERP` with `/home/user/venv/bin/python` (CPython 3.11.2):
+
+| # | Command | Exit | Result |
+|---|---|---|---|
+| 1 | `python tools/verify_dependency_graph.py` | 0 | 52 distributions match the declared graph; only the documented substitution |
+| 2 | `python -m pip check` | 1 (expected) | `rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.` — documented, allow-listed, not concealed |
+| 3 | `python -m ruff check dz_erp tests tools` | 0 | All checks passed |
+| 4 | `python -m compileall -q dz_erp tests tools` | 0 | No syntax errors |
+| 5 | `python -m pytest --cov=dz_erp --cov-report=term -q` | 0 | **359 passed, 1 warning in 74.47 s**; total coverage **89 %** (3439 statements, 395 missed) |
+| 6 | `python tools/staging_acceptance.py` | 0 | **33/33 checks passed** (isolated, synthetic) |
+| 7 | CI run `39873531618` on `d823b83f79…` | 0 | success — Python 3.11 (1 m 51 s), Python 3.12 (6 m 37 s) |
+
+Coverage of the touched modules: `key_rotation.py` 86 %, `database.py` 93 %, `intake_ocr.py` 92 %,
+`security_audit.py` 70 %, `serve.py` 100 %.
+
+**Stability:** the full suite was run twice after the final test fix (359 passed both times). One
+flaky assertion was found and **fixed rather than retried** (`ebd8db6`): it compared the SQLite file
+byte-for-byte across an online backup, which SQLite may legitimately rewrite; it now compares
+ciphertext and checks the source records logically.
+
+**Known non-failures:** the single pytest warning is an upstream Starlette `DeprecationWarning`
+about `anyio.abc.BlockingPortal`, unrelated to this change.
+
+**Not executed, and why:** no Windows run this session (the CI matrix and the earlier audit cover
+Windows-specific paths; the platform branches in `key_rotation._fsync_dir` and `rotation_lock` are
+`# pragma: no cover`), no container build (no Dockerfile in the repository), no load/performance
+test, no third-party penetration test, no real-scale backup/restore drill.
+
+---
+
+## 7. Outstanding blockers
+
+| # | Issue | Evidence | Risk | Required action | Blocks staging? | Blocks production? |
+|---|---|---|---|---|---|---|
+| 1 | Key material protected by filesystem permissions only (no HSM/KMS, no split custody) | `key_rotation.py` stores keys as `0600` files; §5 | High | Select and document key custody (KMS/HSM or equivalent operational control) | No | **Yes** |
+| 2 | Rotation is operator-invoked; no scheduler, no rotation policy, no alerting on failed rotation | `dz_erp/rotate_keys.py` is manual; journal is not monitored | Medium | Define a rotation schedule, monitoring and an on-call procedure; decide whether rotation must also be recorded in a global audit stream | No | **Yes** |
+| 3 | Rotation is not an event in the tamper-evident audit chain | §5, design §5.2 | Medium | Design a global (non-tenant) audit stream or an approved compensating control | No | **Yes** |
+| 4 | Algerian accounting/tax treatment unvalidated | `docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md` — every gate open | High | Qualified review of SCF mapping, **380 vs 408**, VAT, **stamp duty**, **G50**, invoicing; signed sign-off block | No | **Yes** |
+| 5 | Law 18-07 / ANPDP obligations unaddressed in software and process | No processing register, no data-subject-rights workflow, no filing evidence, no cross-border decision | **High** | DPO/legal: register, rights procedure, ANPDP formalities, hosting decision | No | **Yes** |
+| 6 | `pip check` exits 1 on the documented OpenCV substitution | §6 row 2; PyPI metadata evidence | Low | Accept-and-document (current), or migrate to `rapidocr` 3.x in a dedicated change | No | No (documented) |
+| 7 | OCR accuracy not statistically established (18 synthetic documents) | `docs/OCR_BENCHMARK_REPORT.md` | High *for unattended posting* | Keep human review mandatory; build a powered benchmark on real, consented data | No | No, while human review is enforced |
+| 8 | Optimistic concurrency only during vault rotation | design §2.5 | Low | Run rotation in a maintenance window; document the window | No | No (procedure) |
+| 9 | No real-scale restore/rotation drill (large database, many blobs, real backup media) | Only synthetic fixtures this session | Medium | Execute one drill on a copy of production-scale data before go-live | No | **Yes** |
+
+**What is *not* a blocker any more:** vault key rotation, audit HMAC rotation, historical
+verification, interruption recovery, backup/restore of versioned keys, API docs exposure, security
+log rotation, reversal approval/SoD. Each is implemented and has executable evidence.
+
+---
+
+## 8. Classification of every claim in this report
+
+**Implemented and tested:** vault rotation; audit rotation; per-event key versions; legacy
+ciphertext/schema compatibility; interruption + resume; concurrency guard; key-removal guards;
+backup with all key versions; restore with verification; failure classification; tenant isolation;
+financial invariants across rotation; API surface unchanged; docs disabled by default; security-log
+redaction.
+
+**Implemented, incompletely tested:** Windows-specific branches of the rotation lock and directory
+`fsync` (present, not exercised in this session); very large vaults (resumability is tested
+functionally, not at scale); CLI on Windows.
+
+**Designed but not implemented:** global audit stream for rotation events; automated/scheduled
+rotation; HSM/KMS key custody; Law 18-07 register and rights workflows; business-record retention
+and erasure policy.
+
+**Blocked by missing credentials/infrastructure/approvals:** production-scale drill (needs
+production-like data and storage); HSM/KMS (infrastructure + budget); ANPDP filing (external
+approval); accounting/tax sign-off (qualified professionals).
+
+**Requiring external legal/professional validation:** all of §7 items 4 and 5, plus the FEC/SCF,
+VAT, stamp-duty and G50 mapping questions enumerated in the compliance checklist.
+
+---
+
+## 9. Exactly one verdict
+
+**CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY**
+
+Conditions met for staging: keys are supplied through files/environment with no silent fallback;
+API docs are disabled by default; rotation and restore are verified; synthetic data only; dedicated
+database and vault; the security log has a durable path and rotation policy.
+
+Conditions **not** met for production: §7 items 1–5 and 9.
+
+---
+
+## 10. Next actions, in priority order
+
+1. **Legal/accounting:** commission the qualified Algerian review in
+   `docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md`; resolve the **380 vs 408** clearing-account question
+   and the stamp-duty/G50 mapping first — they touch posting logic.
+2. **Data protection:** produce the Law 18-07 processing register, data-subject-rights procedure and
+   ANPDP filing plan; decide hosting (cross-border implications).
+3. **Key custody:** select KMS/HSM-backed custody or an equivalent documented control, and define
+   the rotation schedule with monitoring of the rotation journal and `AUDIT_KEY_UNAVAILABLE`.
+4. **Audit completeness:** design a global, non-tenant audit stream so rotation operations are
+   themselves tamper-evident.
+5. **Operational drill:** run one rotation + backup + restore on a production-scale copy, timing
+   each phase and confirming `verified_ok` and `chain_valid_after`.
+6. **Dependency follow-up:** evaluate `rapidocr` 3.x (already headless) as a planned major-version
+   migration; until then keep the documented substitution and the graph validator.
+7. **Scale testing:** benchmark rotation over a realistically sized vault; confirm the resume path
+   under a forced kill.
+8. **Windows verification:** run the rotation paths on Windows (CI matrix covers Linux only for this
+   change).
+
+---
+
+*Every number in this report comes from a command executed in this session against commit
+`d823b83f79…`; the CI result is the run for that exact SHA. Nothing in this report is inferred from
+the previous audit.*

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -56,6 +57,7 @@ from .database import (
     AuditTamperError,
     ERPDatabase,
     FinancialIntegrityError,
+    SCHEMA_SQL,
 )
 
 
@@ -145,16 +147,35 @@ def _require_existing_database(path: str) -> None:
             "or create audit key material from a read-only status/monitor command."
         )
 
-    required_tables = {"companies", "users", "audit_events"}
+    # Derive the expected table/index/trigger inventory from the same schema
+    # source that initializes writable deployments; do not allow a partial store
+    # to appear healthy merely because its companies/audit tables still exist.
+    required_tables = set(
+        re.findall(r"CREATE TABLE IF NOT EXISTS\\s+([A-Za-z_][A-Za-z0-9_]*)", SCHEMA_SQL, flags=re.IGNORECASE)
+    )
+    required_indexes = set(
+        re.findall(
+            r"CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+IF NOT EXISTS\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            SCHEMA_SQL,
+            flags=re.IGNORECASE,
+        )
+    )
+    required_triggers = set(
+        re.findall(
+            r"CREATE\\s+TRIGGER\\s+IF NOT EXISTS\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            SCHEMA_SQL,
+            flags=re.IGNORECASE,
+        )
+    )
     try:
         connection = sqlite3.connect(candidate.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            tables = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            objects = connection.execute(
+                "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"
+            ).fetchall()
+            tables = {str(row[1]) for row in objects if row[0] == "table"}
+            indexes = {str(row[1]) for row in objects if row[0] == "index"}
+            triggers = {str(row[1]) for row in objects if row[0] == "trigger"}
         finally:
             connection.close()
     except sqlite3.Error as exc:
@@ -164,12 +185,27 @@ def _require_existing_database(path: str) -> None:
             reason="DB_UNREADABLE",
         ) from exc
 
-    missing = sorted(required_tables - tables)
-    if missing:
+    missing_tables = sorted(required_tables - tables)
+    if missing_tables:
         raise DatabaseNotConfiguredError(
             f"Database file {candidate} is not an initialized ERP database; missing required "
-            f"tables: {', '.join(missing)}. Refusing to create schema or audit key material "
+            f"tables: {', '.join(missing_tables)}. Refusing to create schema or audit key material "
             "from a read-only command."
+        )
+
+    missing_indexes = sorted(required_indexes - indexes)
+    missing_triggers = sorted(required_triggers - triggers)
+    if missing_indexes or missing_triggers:
+        details = []
+        if missing_indexes:
+            details.append(f"indexes: {', '.join(missing_indexes)}")
+        if missing_triggers:
+            details.append(f"triggers: {', '.join(missing_triggers)}")
+        raise DatabaseNotConfiguredError(
+            f"Database schema at {candidate} is missing required integrity objects "
+            f"({'; '.join(details)}). Refusing to report it healthy or recreate controls during "
+            "read-only inspection; restore the reviewed schema through a separate migration.",
+            reason="DB_SCHEMA_INCOMPATIBLE",
         )
 
     # Read-only inspection deliberately does not run the application's schema

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,14 @@ class VaultNotConfiguredError(RuntimeError):
     and then report a healthy-looking v1 deployment. The one thing a monitoring
     run must never do is change the state it is measuring.
     """
+
+
+class DatabaseNotConfiguredError(RuntimeError):
+    """A read-only command was given a missing or uninitialised database path."""
+
+    def __init__(self, message: str, *, reason: str = "DB_NOT_CONFIGURED") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _vault(path: str):
@@ -108,6 +117,52 @@ def _require_existing_vault(path: str):
         )
     return _vault(path)
 
+
+def _require_existing_database(path: str) -> None:
+    """Prove a file-backed ERP database is already initialized without writing to it.
+
+    ERPDatabase's normal constructor creates directories, initializes schema and may
+    create audit key material. Status/monitor commands must inspect an existing ERP
+    store instead of turning a typo, empty file, or unrelated SQLite file into one.
+    """
+    candidate = Path(path)
+    if path == ":memory:":
+        raise DatabaseNotConfiguredError(
+            "Read-only status/monitoring requires an existing file-backed ERP database; "
+            "refusing to initialize an in-memory database."
+        )
+    if not candidate.is_file():
+        raise DatabaseNotConfiguredError(
+            f"No existing database file at {candidate}. Refusing to initialize a database "
+            "or create audit key material from a read-only status/monitor command."
+        )
+
+    required_tables = {"companies", "users", "audit_events"}
+    try:
+        connection = sqlite3.connect(candidate.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise DatabaseNotConfiguredError(
+            f"Cannot safely inspect database {candidate}: {exc}. Refusing to initialize or "
+            "mutate this file from a read-only command.",
+            reason="DB_UNREADABLE",
+        ) from exc
+
+    missing = sorted(required_tables - tables)
+    if missing:
+        raise DatabaseNotConfiguredError(
+            f"Database file {candidate} is not an initialized ERP database; missing required "
+            f"tables: {', '.join(missing)}. Refusing to create schema or audit key material "
+            "from a read-only command."
+        )
 
 DEFAULT_MAX_KEY_AGE_DAYS = 365
 
@@ -293,60 +348,71 @@ def build_monitoring_report(
         report["ledger"] = ledger_state
 
     if db_path:
-        db = ERPDatabase(db_path)
-        ring = db.audit_keyring
-        overdue = [
-            {"version": v, "age_days": round(age, 3)}
-            for v in ring.versions
-            if (age := ring.age_days(v)) is not None and age > max_key_age_days
-        ]
-        chains = db.verify_all_audit_chains()
-        ledger_path = Path(db.db_path).with_name(Path(db.db_path).name + ".rotation-ledger.jsonl")
-        ledger_state = (
-            _verify_ledger_without_creating_keys(ledger_path)
-            if ledger_path.exists()
-            else {"valid": True, "open_operations": []}
-        )
-        audit_key_path = Path(str(db.db_path) + ".audit.keys.json")
-        legacy_audit_key = Path(str(db.db_path) + ".audit.key")
-        report["key_provider"]["sources"].extend(
-            FileKeyProvider(p).describe()
-            for p in (legacy_audit_key, audit_key_path)
-            if p.exists()
-        )
-        report["audit"] = {
-            "db_path": db.db_path,
-            "active_version": ring.active_version,
-            "versions": [{"version": v, "status": ring.entries[v].status} for v in ring.versions],
-            "events_by_version": db.audit_events_by_key_version(),
-            "chain_valid": chains["valid"],
-            "chains": chains,
-            "keys_overdue": overdue,
-            "unfinished_operations": ledger_state.get("open_operations", []),
-        }
-        if not chains["valid"]:
+        try:
+            _require_existing_database(db_path)
+        except DatabaseNotConfiguredError as exc:
             healthy = False
-            report["blocking_notes"].append(
-                "An audit chain does not verify "
-                f"({sorted({r.get('reason') for r in chains['companies'].values() if not r['valid']})}); "
-                "investigate before rotating."
+            report["blocking_notes"].append(str(exc))
+            report["audit"] = {
+                "db_path": str(db_path),
+                "configured": False,
+                "reason": exc.reason,
+            }
+        else:
+            db = ERPDatabase(db_path)
+            ring = db.audit_keyring
+            overdue = [
+                {"version": v, "age_days": round(age, 3)}
+                for v in ring.versions
+                if (age := ring.age_days(v)) is not None and age > max_key_age_days
+            ]
+            chains = db.verify_all_audit_chains()
+            ledger_path = Path(db.db_path).with_name(Path(db.db_path).name + ".rotation-ledger.jsonl")
+            ledger_state = (
+                _verify_ledger_without_creating_keys(ledger_path)
+                if ledger_path.exists()
+                else {"valid": True, "open_operations": []}
             )
-        if overdue:
-            healthy = False
-            report["blocking_notes"].append(
-                f"{len(overdue)} audit key version(s) exceed the {max_key_age_days}-day rotation age."
+            audit_key_path = Path(str(db.db_path) + ".audit.keys.json")
+            legacy_audit_key = Path(str(db.db_path) + ".audit.key")
+            report["key_provider"]["sources"].extend(
+                FileKeyProvider(p).describe()
+                for p in (legacy_audit_key, audit_key_path)
+                if p.exists()
             )
-        if not ledger_state.get("valid", True):
-            healthy = False
-            if ledger_state.get("key_unavailable"):
+            report["audit"] = {
+                "db_path": db.db_path,
+                "active_version": ring.active_version,
+                "versions": [{"version": v, "status": ring.entries[v].status} for v in ring.versions],
+                "events_by_version": db.audit_events_by_key_version(),
+                "chain_valid": chains["valid"],
+                "chains": chains,
+                "keys_overdue": overdue,
+                "unfinished_operations": ledger_state.get("open_operations", []),
+            }
+            if not chains["valid"]:
+                healthy = False
                 report["blocking_notes"].append(
-                    "The audit rotation ledger key is unavailable, so the ledger cannot be verified. "
-                    "Restore the key from backup before drawing conclusions from the ledger."
+                    "An audit chain does not verify "
+                    f"({sorted({r.get('reason') for r in chains['companies'].values() if not r['valid']})}); "
+                    "investigate before rotating."
                 )
-            else:
+            if overdue:
+                healthy = False
                 report["blocking_notes"].append(
-                    f"The audit rotation ledger does not verify ({ledger_state.get('reason')})."
+                    f"{len(overdue)} audit key version(s) exceed the {max_key_age_days}-day rotation age."
                 )
+            if not ledger_state.get("valid", True):
+                healthy = False
+                if ledger_state.get("key_unavailable"):
+                    report["blocking_notes"].append(
+                        "The audit rotation ledger key is unavailable, so the ledger cannot be verified. "
+                        "Restore the key from backup before drawing conclusions from the ledger."
+                    )
+                else:
+                    report["blocking_notes"].append(
+                        f"The audit rotation ledger does not verify ({ledger_state.get('reason')})."
+                    )
 
     report["healthy"] = healthy
     return report
@@ -363,7 +429,7 @@ def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]
         },
     }
     if vault_path:
-        vault = _vault(vault_path)
+        vault = _require_existing_vault(vault_path)
         provider_sources = [
             FileKeyProvider(p).describe()
             for p in (vault.vault_key_path, vault.keyring_path)
@@ -379,6 +445,7 @@ def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]
             "verification": vault.verify_blobs(),
         }
     if db_path:
+        _require_existing_database(db_path)
         db = ERPDatabase(db_path)
         audit_key_path = Path(str(db.db_path) + ".audit.keys.json")
         legacy_audit_key = Path(str(db.db_path) + ".audit.key")
@@ -609,6 +676,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     except VaultNotConfiguredError as exc:
         print(f"VAULT: {exc}", file=sys.stderr)
+        return 3
+    except DatabaseNotConfiguredError as exc:
+        print(f"DB: {exc}", file=sys.stderr)
         return 3
     except RotationLedgerCheckpointError as exc:
         # A checkpoint that cannot be trusted is an operational failure, not a

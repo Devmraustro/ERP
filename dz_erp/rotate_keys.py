@@ -631,7 +631,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "vault-rotate":
-            vault = _vault(args.vault)
+            vault = _require_existing_vault(args.vault)
             if args.dry_run:
                 referenced = vault.scan_blob_versions()
                 _emit(
@@ -651,6 +651,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0 if report["verified_ok"] else 1
 
         if args.command == "audit-rotate":
+            _require_existing_database(args.db)
             db = ERPDatabase(args.db)
             if args.dry_run:
                 _emit(
@@ -669,16 +670,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0 if report["chain_valid_after"] else 1
 
         if args.command == "vault-rollback":
-            _emit(_vault(args.vault).set_active_key_version(args.version))
+            _emit(_require_existing_vault(args.vault).set_active_key_version(args.version))
             return 0
 
         if args.command == "audit-rollback":
+            _require_existing_database(args.db)
             _emit(ERPDatabase(args.db).set_active_audit_key_version(args.version))
             return 0
 
         if args.command == "vault-remove":
             _emit(
-                _vault(args.vault).remove_key(
+                _require_existing_vault(args.vault).remove_key(
                     args.version,
                     confirm_retained_copies=args.i_have_verified_retained_copies,
                 )
@@ -686,6 +688,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.command == "audit-remove":
+            _require_existing_database(args.db)
             _emit(
                 ERPDatabase(args.db).remove_audit_key_version(
                     args.version,

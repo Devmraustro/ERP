@@ -385,7 +385,7 @@ def build_monitoring_report(
                 "reason": exc.reason,
             }
         else:
-            db = ERPDatabase(db_path)
+            db = ERPDatabase(db_path, read_only=True)
             ring = db.audit_keyring
             overdue = [
                 {"version": v, "age_days": round(age, 3)}
@@ -472,7 +472,7 @@ def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]
         }
     if db_path:
         _require_existing_database(db_path)
-        db = ERPDatabase(db_path)
+        db = ERPDatabase(db_path, read_only=True)
         audit_key_path = Path(str(db.db_path) + ".audit.keys.json")
         legacy_audit_key = Path(str(db.db_path) + ".audit.key")
         report["key_provider"]["sources"].extend(

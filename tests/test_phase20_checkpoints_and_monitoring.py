@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import stat
+import sqlite3
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -612,6 +613,48 @@ def test_monitor_refuses_missing_or_uninitialised_database_without_writing(tmp_p
     assert empty.read_bytes() == b"", "monitoring initialized an existing empty database file"
     assert not Path(str(empty) + ".audit.key").exists()
     assert not Path(str(empty) + ".audit.keys.json").exists()
+
+
+def test_status_and_monitor_leave_database_bytes_unchanged(tmp_path: Path, capsys) -> None:
+    """Inspection is SQLite-enforced read-only, not merely a no-write convention."""
+    db_path = tmp_path / "erp.sqlite3"
+    ERPDatabase(str(db_path))
+    before = db_path.read_bytes()
+
+    code = main(["monitor", "--db", str(db_path)])
+    monitor_report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert monitor_report["healthy"] is True
+    assert db_path.read_bytes() == before, "monitor changed the database during inspection"
+
+    code = main(["status", "--db", str(db_path)])
+    status_report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert "audit" in status_report
+    assert db_path.read_bytes() == before, "status changed the database during inspection"
+
+
+def test_read_only_monitor_refuses_legacy_schema_without_running_migrations(
+    tmp_path: Path, capsys
+) -> None:
+    """An inspection must report an incompatible schema, not auto-migrate it."""
+    db_path = tmp_path / "legacy.sqlite3"
+    ERPDatabase(str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE audit_events DROP COLUMN hmac_key_version")
+        connection.commit()
+    before = db_path.read_bytes()
+
+    code = main(["monitor", "--db", str(db_path)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert report["healthy"] is False
+    assert report["audit"]["reason"] == "DB_SCHEMA_INCOMPATIBLE"
+    assert db_path.read_bytes() == before, "monitor migrated an incompatible schema"
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_events)")}
+    assert "hmac_key_version" not in columns
 
 
 def test_monitor_does_not_regenerate_a_missing_audit_key_for_an_empty_database(

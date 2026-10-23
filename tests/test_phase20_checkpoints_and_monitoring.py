@@ -561,6 +561,28 @@ def test_monitor_does_not_initialise_a_missing_deployment(tmp_path: Path, capsys
     assert not list(tmp_path.rglob("*.vault.key")) and not list(tmp_path.rglob("*.vault.keys.json"))
 
 
+def test_monitor_refuses_missing_vault_even_when_environment_key_is_set(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """An env key must not make a mistyped, absent vault look healthy."""
+    from cryptography.fernet import Fernet
+
+    missing = tmp_path / "typo" / "vault"
+    monkeypatch.setenv("ERP_VAULT_KEY", Fernet.generate_key().decode("ascii"))
+
+    code = main(["monitor", "--vault", str(missing)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert report["healthy"] is False
+    assert report["vault"]["configured"] is False
+    assert report["vault"]["reason"] == "VAULT_NOT_CONFIGURED"
+    assert not missing.exists(), "monitoring created a missing vault despite the environment key"
+    assert not missing.parent.exists(), "monitoring created the parent directory tree"
+    assert not list(tmp_path.rglob("*.vault.key"))
+    assert not list(tmp_path.rglob("*.vault.keys.json"))
+
+
 def test_monitor_refuses_an_empty_vault_directory_without_a_key(tmp_path: Path, capsys) -> None:
     """The directory existing is not the same as a deployment being configured."""
     root = tmp_path / "vault"

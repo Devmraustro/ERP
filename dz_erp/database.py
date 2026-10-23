@@ -702,8 +702,19 @@ def _resolve_audit_keyring(db_path: str, explicit: Optional[bytes]) -> tuple:
 class ERPDatabase:
     """Thread-safe transactional database manager with audit hash-chaining."""
 
-    def __init__(self, db_path: str = ":memory:", hmac_secret: Optional[bytes] = None) -> None:
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        hmac_secret: Optional[bytes] = None,
+        *,
+        read_only: bool = False,
+    ) -> None:
         self.db_path = db_path
+        self._read_only = read_only
+        if read_only and db_path == ":memory:":
+            raise ValueError("Read-only mode requires an existing file-backed database.")
+        if read_only and not Path(db_path).is_file():
+            raise FileNotFoundError(f"Read-only database does not exist: {db_path}")
         self._audit_keyring, self._keyring_path = _resolve_audit_keyring(db_path, hmac_secret)
         # Retained as the *active* key because existing code and tests read it,
         # but it is now one entry in a versioned registry rather than the only
@@ -714,6 +725,11 @@ class ERPDatabase:
         if db_path == ":memory:":
             self._persistent_conn = self._create_connection()
             self._init_schema(self._persistent_conn)
+        elif read_only:
+            # Inspection paths must not auto-migrate a database, create missing
+            # schema objects, or switch its journal mode. The read-only URI is
+            # enforced by SQLite itself, not by a caller convention.
+            pass
         else:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             with self._create_connection() as conn:
@@ -763,10 +779,22 @@ class ERPDatabase:
         }
 
     def _create_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False, isolation_level=None)
+        if self._read_only:
+            uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=30.0,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+        else:
+            conn = sqlite3.connect(
+                self.db_path, timeout=30.0, check_same_thread=False, isolation_level=None
+            )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        if self.db_path != ":memory:":
+        if self.db_path != ":memory:" and not self._read_only:
             conn.execute("PRAGMA journal_mode = WAL;")
         return conn
 
@@ -944,7 +972,7 @@ class ERPDatabase:
             in_tx = conn.in_transaction
             try:
                 if not in_tx:
-                    conn.execute("BEGIN IMMEDIATE;")
+                    conn.execute("BEGIN;" if self._read_only else "BEGIN IMMEDIATE;")
                 yield conn
                 if not in_tx:
                     conn.execute("COMMIT;")

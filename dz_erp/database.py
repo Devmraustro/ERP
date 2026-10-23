@@ -1253,7 +1253,6 @@ class ERPDatabase:
         new_version: Optional[int] = None,
         ledger: Optional[RotationLedger] = None,
     ) -> Dict[str, Any]:
-        self._ensure_writable("rotate the audit key")
         """Activate a new audit signing key; historical events keep their key.
 
         Unlike the vault there is nothing to re-encrypt: a MAC cannot be
@@ -1264,6 +1263,7 @@ class ERPDatabase:
         an interruption either happens (both keys retained, new events signed
         with the new key) or does not (nothing changes).
         """
+        self._ensure_writable("rotate the audit key")
         if self._keyring_path is None:
             raise KeyConfigurationError(
                 "In-memory databases have no durable key registry, so their audit key cannot be rotated."

@@ -48,7 +48,15 @@ from .rotation_audit import (
     RotationLedgerTruncatedError,
     load_checkpoint,
 )
-from .database import AuditKeyUnavailableError, AuditTamperError, ERPDatabase, FinancialIntegrityError
+from .database import (
+    AUDIT_KEY_ENV,
+    AUDIT_KEYRING_SUFFIX,
+    AUDIT_KEY_SUFFIX,
+    AuditKeyUnavailableError,
+    AuditTamperError,
+    ERPDatabase,
+    FinancialIntegrityError,
+)
 
 
 def _emit(payload: Dict[str, Any]) -> None:
@@ -162,6 +170,24 @@ def _require_existing_database(path: str) -> None:
             f"Database file {candidate} is not an initialized ERP database; missing required "
             f"tables: {', '.join(missing)}. Refusing to create schema or audit key material "
             "from a read-only command."
+        )
+
+    # The regular ERPDatabase constructor can legitimately create the initial
+    # audit key for a fresh store. That is unacceptable on a read-only path:
+    # even a schema-valid, empty database with a missing key must not be silently
+    # initialized by status/monitoring.
+    legacy_key = candidate.with_name(candidate.name + AUDIT_KEY_SUFFIX)
+    key_registry = candidate.with_name(candidate.name + AUDIT_KEYRING_SUFFIX)
+    if not (
+        os.environ.get(AUDIT_KEY_ENV)
+        or legacy_key.is_file()
+        or key_registry.is_file()
+    ):
+        raise DatabaseNotConfiguredError(
+            f"The audit key source is missing for existing database {candidate}: expected "
+            f"{legacy_key.name}, {key_registry.name}, or {AUDIT_KEY_ENV}. Refusing to generate "
+            "replacement key material from a read-only status/monitor command.",
+            reason="AUDIT_KEY_UNAVAILABLE",
         )
 
 DEFAULT_MAX_KEY_AGE_DAYS = 365

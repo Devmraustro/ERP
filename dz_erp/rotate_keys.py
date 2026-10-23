@@ -172,6 +172,55 @@ def _require_existing_database(path: str) -> None:
             "from a read-only command."
         )
 
+    # Read-only inspection deliberately does not run the application's schema
+    # migrations. Verify the columns that the audit verifier must read and
+    # refuse an older/incomplete schema with a diagnostic instead of silently
+    # upgrading the file during a status or monitor request.
+    required_columns = {
+        "companies": {"id"},
+        "users": {"id", "company_id"},
+        "audit_events": {
+            "id",
+            "company_id",
+            "occurred_at",
+            "actor_user_id",
+            "action_type",
+            "target_model",
+            "target_id",
+            "before_json",
+            "after_json",
+            "hmac_key_version",
+            "prev_hash",
+            "event_hash",
+        },
+    }
+    missing_columns = {}
+    try:
+        for table, expected in required_columns.items():
+            actual = {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            absent = sorted(expected - actual)
+            if absent:
+                missing_columns[table] = absent
+    except sqlite3.Error as exc:
+        raise DatabaseNotConfiguredError(
+            f"Cannot safely inspect schema in {candidate}: {exc}. Refusing to migrate it "
+            "from a read-only command.",
+            reason="DB_SCHEMA_INCOMPATIBLE",
+        ) from exc
+    if missing_columns:
+        detail = "; ".join(
+            f"{table}: {', '.join(columns)}" for table, columns in sorted(missing_columns.items())
+        )
+        raise DatabaseNotConfiguredError(
+            f"Database schema at {candidate} is not ready for read-only verification "
+            f"({detail}). Run the reviewed database migration procedure separately; "
+            "status/monitor will not alter the schema.",
+            reason="DB_SCHEMA_INCOMPATIBLE",
+        )
+
     # The regular ERPDatabase constructor can legitimately create the initial
     # audit key for a fresh store. That is unacceptable on a read-only path:
     # even a schema-valid, empty database with a missing key must not be silently

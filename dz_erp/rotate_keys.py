@@ -195,11 +195,13 @@ def _require_existing_database(path: str) -> None:
         },
     }
     missing_columns = {}
+    schema_connection = None
     try:
+        schema_connection = sqlite3.connect(candidate.resolve().as_uri() + "?mode=ro", uri=True)
         for table, expected in required_columns.items():
             actual = {
                 str(row[1])
-                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+                for row in schema_connection.execute(f"PRAGMA table_info({table})").fetchall()
             }
             absent = sorted(expected - actual)
             if absent:
@@ -210,6 +212,9 @@ def _require_existing_database(path: str) -> None:
             "from a read-only command.",
             reason="DB_SCHEMA_INCOMPATIBLE",
         ) from exc
+    finally:
+        if schema_connection is not None:
+            schema_connection.close()
     if missing_columns:
         detail = "; ".join(
             f"{table}: {', '.join(columns)}" for table, columns in sorted(missing_columns.items())

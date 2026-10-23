@@ -614,6 +614,27 @@ def test_monitor_refuses_missing_or_uninitialised_database_without_writing(tmp_p
     assert not Path(str(empty) + ".audit.keys.json").exists()
 
 
+def test_monitor_does_not_regenerate_a_missing_audit_key_for_an_empty_database(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """An empty DB with a lost key is not permission for a read-only command to mint one."""
+    monkeypatch.delenv("ERP_AUDIT_HMAC_SECRET", raising=False)
+    db_path = tmp_path / "erp.sqlite3"
+    ERPDatabase(str(db_path))
+    key_path = Path(str(db_path) + ".audit.key")
+    assert key_path.exists()
+    key_path.unlink()
+
+    code = main(["monitor", "--db", str(db_path)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert report["healthy"] is False
+    assert report["audit"]["configured"] is False
+    assert report["audit"]["reason"] == "AUDIT_KEY_UNAVAILABLE"
+    assert not key_path.exists(), "monitoring recreated a missing audit key"
+
+
 def test_status_refuses_a_missing_database_without_initializing_it(tmp_path: Path, capsys) -> None:
     missing = tmp_path / "typo" / "erp.sqlite3"
 

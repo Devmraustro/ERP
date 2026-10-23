@@ -627,6 +627,19 @@ def test_status_and_monitor_leave_database_bytes_unchanged(tmp_path: Path, capsy
             conn.execute("CREATE TABLE must_not_be_created (id INTEGER)")
     assert db_path.read_bytes() == before, "SQLite accepted a schema write in read-only mode"
 
+    key_before = Path(str(db_path) + ".audit.key").read_bytes()
+    with pytest.raises(PermissionError, match="read-only inspection mode"):
+        readonly_db.rotate_audit_key()
+    with pytest.raises(PermissionError, match="read-only inspection mode"):
+        readonly_db.set_active_audit_key_version(1)
+    with pytest.raises(PermissionError, match="read-only inspection mode"):
+        readonly_db.remove_audit_key_version(1, confirm_retained_copies=True)
+    assert Path(str(db_path) + ".audit.key").read_bytes() == key_before
+    assert not Path(str(db_path) + ".audit.rotation.jsonl").exists()
+    assert not Path(str(db_path) + ".audit.rotation.lock").exists()
+    assert not Path(str(db_path) + ".rotation-ledger.jsonl").exists()
+    assert db_path.read_bytes() == before, "read-only key operations changed persistent state"
+
     code = main(["monitor", "--db", str(db_path)])
     monitor_report = json.loads(capsys.readouterr().out)
     assert code == 0

@@ -635,6 +635,62 @@ def test_monitor_does_not_regenerate_a_missing_audit_key_for_an_empty_database(
     assert not key_path.exists(), "monitoring recreated a missing audit key"
 
 
+@pytest.mark.parametrize(
+    "operation_args",
+    [
+        ["vault-rotate", "--dry-run"],
+        ["vault-rollback", "--version", "1"],
+        ["vault-remove", "--version", "1", "--i-have-verified-retained-copies"],
+    ],
+)
+def test_vault_key_operations_refuse_missing_store_without_initializing(
+    tmp_path: Path, capsys, monkeypatch, operation_args: list[str]
+) -> None:
+    """Even dry-run/rollback/removal must not turn a typo into a new vault."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("ERP_VAULT_KEY", Fernet.generate_key().decode("ascii"))
+    missing = tmp_path / "typo" / "vault"
+    command = [operation_args[0], "--vault", str(missing), *operation_args[1:]]
+
+    code = main(command)
+    captured = capsys.readouterr()
+
+    assert code == 3
+    assert "VAULT:" in captured.err
+    assert not missing.exists()
+    assert not missing.parent.exists()
+    assert not list(tmp_path.rglob("*.vault.key"))
+    assert not list(tmp_path.rglob("*.vault.keys.json"))
+
+
+@pytest.mark.parametrize(
+    "operation_args",
+    [
+        ["audit-rotate", "--dry-run"],
+        ["audit-rollback", "--version", "1"],
+        ["audit-remove", "--version", "1", "--i-have-verified-retained-copies"],
+    ],
+)
+def test_audit_key_operations_refuse_missing_store_without_initializing(
+    tmp_path: Path, capsys, monkeypatch, operation_args: list[str]
+) -> None:
+    """Key commands must not create a database/schema/key after a path typo."""
+    monkeypatch.delenv("ERP_AUDIT_HMAC_SECRET", raising=False)
+    missing = tmp_path / "typo" / "erp.sqlite3"
+    command = [operation_args[0], "--db", str(missing), *operation_args[1:]]
+
+    code = main(command)
+    captured = capsys.readouterr()
+
+    assert code == 3
+    assert "DB:" in captured.err
+    assert not missing.exists()
+    assert not missing.parent.exists()
+    assert not Path(str(missing) + ".audit.key").exists()
+    assert not Path(str(missing) + ".audit.keys.json").exists()
+
+
 def test_status_refuses_a_missing_database_without_initializing_it(tmp_path: Path, capsys) -> None:
     missing = tmp_path / "typo" / "erp.sqlite3"
 

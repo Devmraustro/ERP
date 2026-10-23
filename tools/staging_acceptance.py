@@ -555,7 +555,13 @@ def _fresh_process_verification(state: Path) -> bool:
 
 
 def _no_secrets(state: Path, db, vault) -> bool:
-    artefacts = [state / "security.jsonl", *state.parent.glob(f"{state.name}/**/*rotation.jsonl")]
+    artefacts = [
+        state / "security.jsonl",
+        *state.parent.glob(f"{state.name}/**/*rotation.jsonl"),
+        # The privileged-operation ledger is a separate artefact with its own
+        # key; it must be scanned for material like every other log.
+        *state.parent.glob(f"{state.name}/**/*rotation-ledger.jsonl"),
+    ]
     text = "\n".join(p.read_text(errors="ignore") for p in artefacts if p.exists())
     for version in vault.keyring.versions:
         material = vault.keyring.material_for(version)

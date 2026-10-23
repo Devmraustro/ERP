@@ -28,7 +28,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .key_rotation import KeyConfigurationError, KeyRingError
+from .key_rotation import (
+    KeyConfigurationError,
+    KeyRingError,
+    check_key_file_custody,
+    describe_key_protection,
+)
+from .rotation_audit import RotationLedger, RotationLedgerError
 from .database import AuditKeyUnavailableError, AuditTamperError, ERPDatabase, FinancialIntegrityError
 
 
@@ -40,6 +46,149 @@ def _vault(path: str):
     from .intake_ocr import PrivateDocumentVault
 
     return PrivateDocumentVault(Path(path))
+
+
+DEFAULT_MAX_KEY_AGE_DAYS = 365
+
+
+def build_monitoring_report(
+    *,
+    db_path: Optional[str] = None,
+    vault_path: Optional[str] = None,
+    max_key_age_days: int = DEFAULT_MAX_KEY_AGE_DAYS,
+    require_external_provider: bool = False,
+) -> Dict[str, Any]:
+    """Machine-readable health report for alerting on key management.
+
+    Design intent: an operator must be able to answer "is anything overdue, is
+    anything unfinished, is the audit trail of rotations intact, are the key files
+    actually protected?" from a single JSON document - and a monitor must be able
+    to alert on ``healthy`` without parsing prose.
+
+    The report contains version numbers, ages, counts and custody verdicts. It
+    never contains key material, plaintext, or customer identifiers.
+    """
+    report: Dict[str, Any] = {
+        "generated_at": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat(),
+        "max_key_age_days": max_key_age_days,
+        "custody": describe_key_protection(),
+        "key_provider": {
+            # This build reads key material from files only. There is no KMS/HSM
+            # integration, and pretending otherwise would be the exact kind of
+            # unsupported claim this report exists to avoid.
+            "mode": "file",
+            "external_provider_configured": False,
+            "satisfies_requirement": not require_external_provider,
+        },
+        "blocking_notes": [],
+    }
+    healthy = True
+
+    if require_external_provider:
+        healthy = False
+        report["blocking_notes"].append(
+            "An external key provider (KMS/HSM) was required, but this deployment uses file-based "
+            "keys. Implement the provider integration before relying on this control."
+        )
+
+    if vault_path:
+        vault = _vault(vault_path)
+        ring = vault.keyring
+        overdue = [
+            {"version": v, "age_days": round(age, 3)}
+            for v in ring.versions
+            if (age := ring.age_days(v)) is not None and age > max_key_age_days
+        ]
+        verification = vault.verify_blobs()
+        ledger = RotationLedger.open(
+            Path(vault.vault_root).parent / (Path(vault.vault_root).name + ".rotation-ledger.jsonl")
+        )
+        ledger_state = ledger.verify()
+        custody_checks = [
+            check_key_file_custody(p)
+            for p in (vault.vault_key_path, vault.keyring_path)
+            if p.exists()
+        ]
+        report["vault"] = {
+            "root": str(vault.vault_root),
+            "active_version": ring.active_version,
+            "versions": [{"version": v, "status": ring.entries[v].status} for v in ring.versions],
+            "blobs_by_version": vault.scan_blob_versions(),
+            "verification": verification,
+            "keys_overdue": overdue,
+            "unfinished_operations": ledger_state.get("open_operations", []),
+            "key_files": custody_checks,
+        }
+        if verification["failed"]:
+            healthy = False
+            report["blocking_notes"].append(
+                f"{verification['failed']} vault blob(s) do not decrypt; documents may be lost or corrupt."
+            )
+        if overdue:
+            healthy = False
+            report["blocking_notes"].append(
+                f"{len(overdue)} vault key version(s) exceed the {max_key_age_days}-day rotation age."
+            )
+        if ledger_state.get("open_operations"):
+            healthy = False
+            report["blocking_notes"].append(
+                "A rotation started and never finished; re-run it to complete or record the interruption."
+            )
+        if any(check.get("ok") is False for check in custody_checks):
+            healthy = False
+            report["blocking_notes"].append(
+                "A key file is readable beyond its owner; restrict its permissions (chmod 600)."
+            )
+        if not ledger_state.get("valid"):
+            healthy = False
+            report["blocking_notes"].append(
+                f"The rotation ledger does not verify ({ledger_state.get('reason')}); treat as tampering."
+            )
+        report["ledger"] = ledger_state
+
+    if db_path:
+        db = ERPDatabase(db_path)
+        ring = db.audit_keyring
+        overdue = [
+            {"version": v, "age_days": round(age, 3)}
+            for v in ring.versions
+            if (age := ring.age_days(v)) is not None and age > max_key_age_days
+        ]
+        chains = db.verify_all_audit_chains()
+        ledger_path = Path(db.db_path).with_name(Path(db.db_path).name + ".rotation-ledger.jsonl")
+        ledger_state = (
+            RotationLedger.open(ledger_path).verify() if ledger_path.exists() else {"valid": True, "open_operations": []}
+        )
+        report["audit"] = {
+            "db_path": db.db_path,
+            "active_version": ring.active_version,
+            "versions": [{"version": v, "status": ring.entries[v].status} for v in ring.versions],
+            "events_by_version": db.audit_events_by_key_version(),
+            "chain_valid": chains["valid"],
+            "chains": chains,
+            "keys_overdue": overdue,
+            "unfinished_operations": ledger_state.get("open_operations", []),
+        }
+        if not chains["valid"]:
+            healthy = False
+            report["blocking_notes"].append(
+                "An audit chain does not verify "
+                f"({sorted({r.get('reason') for r in chains['companies'].values() if not r['valid']})}); "
+                "investigate before rotating."
+            )
+        if overdue:
+            healthy = False
+            report["blocking_notes"].append(
+                f"{len(overdue)} audit key version(s) exceed the {max_key_age_days}-day rotation age."
+            )
+        if not ledger_state.get("valid", True):
+            healthy = False
+            report["blocking_notes"].append(f"The audit rotation ledger does not verify ({ledger_state.get('reason')}).")
+
+    report["healthy"] = healthy
+    return report
 
 
 def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]:
@@ -70,6 +219,17 @@ def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dz_erp.rotate_keys", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+
+    monitor = sub.add_parser("monitor", help="Machine-readable key-management health report (for alerting).")
+    monitor.add_argument("--db")
+    monitor.add_argument("--vault")
+    monitor.add_argument("--max-key-age-days", type=int, default=DEFAULT_MAX_KEY_AGE_DAYS)
+    monitor.add_argument(
+        "--require-external-provider",
+        action="store_true",
+        help="Treat file-based keys as unhealthy (use where an external KMS/HSM is required).",
+    )
+    monitor.add_argument("--checkpoint-export", help="Write a head-hash checkpoint to this path.")
 
     status = sub.add_parser("status", help="Report key versions, data distribution and verification.")
     status.add_argument("--db")
@@ -107,6 +267,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "monitor":
+            if not args.db and not args.vault:
+                parser.error("monitor requires --db and/or --vault")
+            report = build_monitoring_report(
+                db_path=args.db,
+                vault_path=args.vault,
+                max_key_age_days=args.max_key_age_days,
+                require_external_provider=args.require_external_provider,
+            )
+            if args.checkpoint_export and args.vault:
+                vault = _vault(args.vault)
+                ledger = RotationLedger.open(
+                    Path(vault.vault_root).parent / (Path(vault.vault_root).name + ".rotation-ledger.jsonl")
+                )
+                report["checkpoint"] = ledger.export_checkpoint(Path(args.checkpoint_export))
+            _emit(report)
+            # Exit non-zero when unhealthy so a scheduler or probe notices.
+            return 0 if report["healthy"] else 3
+
         if args.command == "status":
             if not args.db and not args.vault:
                 parser.error("status requires --db and/or --vault")
@@ -182,6 +361,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     except (AuditTamperError, FinancialIntegrityError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+    except (RotationLedgerError,) as exc:
+        print(f"LEDGER: {exc}", file=sys.stderr)
         return 1
     except (KeyConfigurationError, KeyRingError, AuditKeyUnavailableError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

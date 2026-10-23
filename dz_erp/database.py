@@ -13,8 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
+from .rotation_audit import RecordedOperation, RotationLedger
 from .key_rotation import (
     LEGACY_KEY_VERSION,
+    require_key_file_custody,
     MIN_HMAC_KEY_BYTES,
     KeyConfigurationError,
     KeyRing,
@@ -610,6 +612,7 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
     if db_path != ":memory:":
         key_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEY_SUFFIX)
         if key_path.exists():
+            require_key_file_custody(key_path)
             return key_path.read_bytes().strip()
 
         # The key file is gone but the database may already hold audit events.
@@ -633,6 +636,7 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
             # loser adopts the winner's key rather than replacing it.
             fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
+            require_key_file_custody(key_path)
             return key_path.read_bytes().strip()
         with os.fdopen(fd, "wb") as handle:
             handle.write(secret)
@@ -1067,6 +1071,7 @@ class ERPDatabase:
         new_key: Optional[bytes] = None,
         *,
         new_version: Optional[int] = None,
+        ledger: Optional[RotationLedger] = None,
     ) -> Dict[str, Any]:
         """Activate a new audit signing key; historical events keep their key.
 
@@ -1094,7 +1099,16 @@ class ERPDatabase:
             Path(self.db_path).with_name(Path(self.db_path).name + AUDIT_ROTATION_JOURNAL_SUFFIX)
         )
         lock_path = Path(self.db_path).with_name(Path(self.db_path).name + ".audit.rotation.lock")
-        with rotation_lock(lock_path):
+        # Recorded in the independent rotation ledger, NOT in audit_events: the
+        # ledger has its own key, so losing or rotating the audit key cannot
+        # erase the history of operations performed on it.
+        ledger = ledger or RotationLedger.for_store(Path(self.db_path))
+        with RecordedOperation(
+            ledger,
+            operation="AUDIT_KEY_ROTATION",
+            store=f"audit:{self.db_path}",
+            from_version=self._audit_keyring.active_version,
+        ) as recorded, rotation_lock(lock_path):
             before = self._require_verifiable_chain("rotate the audit signing key")
 
             working = KeyRing.from_dict(self._audit_keyring.to_dict())
@@ -1109,6 +1123,7 @@ class ERPDatabase:
                 target_version = working.add_version(new_key, version=new_version, min_bytes=MIN_HMAC_KEY_BYTES)
                 resume = False
 
+            recorded.note_target_version(target_version)
             journal.record(
                 event="rotation_started",
                 previous_version=previous_version,
@@ -1123,6 +1138,31 @@ class ERPDatabase:
                 chain_valid=after["valid"],
             )
 
+            # The chain must verify after the change for the rotation to count
+            # as successful; an unverified outcome is recorded as such.
+            status = "COMPLETED_VERIFIED" if after["valid"] else "COMPLETED_UNVERIFIED"
+            event_counts = self.audit_events_by_key_version()
+            recorded.record_summary(
+                counts={
+                    "events_before": sum(before["companies"][c]["event_count"] for c in before["companies"]),
+                    "events_after": sum(event_counts.values()),
+                    "events_rekeyed": 0,
+                },
+                integrity={
+                    "verified": after["valid"],
+                    "checked": sum(
+                        after["companies"][c]["checked_count"] for c in after["companies"]
+                    ),
+                    "failures": 0 if after["valid"] else 1,
+                },
+                retained_versions=list(self._audit_keyring.versions),
+                detail={
+                    "resumed": resume,
+                    "journal": str(journal.path),
+                    "history_rewritten": False,
+                },
+            )
+
             return {
                 "db_path": self.db_path,
                 "keyring_path": str(self._keyring_path),
@@ -1130,10 +1170,12 @@ class ERPDatabase:
                 "previous_version": previous_version,
                 "active_version": target_version,
                 "resumed": resume,
-                "events_by_version": self.audit_events_by_key_version(),
+                "events_by_version": event_counts,
                 "chain_valid_before": before["valid"],
                 "chain_valid_after": after["valid"],
                 "retained_versions": list(self._audit_keyring.versions),
+                "status": status,
+                "ledger": {"path": str(ledger.path), "operation_id": recorded.operation_id},
             }
 
     def set_active_audit_key_version(self, version: int) -> Dict[str, Any]:

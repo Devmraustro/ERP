@@ -17,6 +17,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import tarfile
 from pathlib import Path
@@ -87,8 +88,16 @@ def _build_legacy_deployment(root: Path) -> dict:
         conn.commit()
     finally:
         conn.close()
-    (root / ("erp.sqlite3" + AUDIT_KEY_SUFFIX)).write_bytes(audit_key)
-    (root / ("vault" + ".vault.key")).write_bytes(legacy_vault_key)
+    # The pre-versioning code created both files via os.open(..., 0o600); a real
+    # legacy deployment therefore has owner-only keys, and the fixture must
+    # reproduce that rather than a laxer state that never shipped.
+    for name, material in (
+        (("erp.sqlite3" + AUDIT_KEY_SUFFIX), audit_key),
+        (("vault" + ".vault.key"), legacy_vault_key),
+    ):
+        fd = os.open(str(root / name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(material)
 
     assert not (root / ("erp.sqlite3" + AUDIT_KEYRING_SUFFIX)).exists()
     assert not (root / ("vault" + VAULT_KEYRING_SUFFIX)).exists()

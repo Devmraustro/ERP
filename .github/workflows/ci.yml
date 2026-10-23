@@ -133,3 +133,75 @@ jobs:
             junit.xml
             coverage.xml
             htmlcov/**
+
+  # ---------------------------------------------------------------------------
+  # Windows verification
+  # ---------------------------------------------------------------------------
+  # The Linux job above cannot prove anything about Windows: file permissions
+  # are ACLs rather than mode bits, `os.fchmod` does not exist, `os.replace`
+  # fails while a reader holds the destination, and O_APPEND is not atomic.
+  # A defect of that class was found in this repository's key-rotation code
+  # precisely by asking this question, so the platform is tested rather than
+  # assumed.
+  #
+  # Scope is deliberately the platform-sensitive surface - key rotation,
+  # migration, backup/restore, permissions, durable logging, process-boundary
+  # recovery - not the whole suite, which the Linux matrix already covers at
+  # two Python versions.
+  verify-windows:
+    name: Key rotation, backup and recovery on Windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+
+      - name: Report the resolved toolchain
+        run: |
+          python --version
+          python -m pip --version
+
+      - name: Install the declared dependency set
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps -r requirements.lock.txt
+
+      - name: Validate the dependency graph explicitly
+        run: python tools/verify_dependency_graph.py
+
+      - name: Static check (ruff)
+        run: python -m ruff check dz_erp tests tools
+
+      - name: Byte-compile all sources
+        run: python -m compileall -q dz_erp tests tools
+
+      - name: Key rotation, migration, backup/restore, logging and recovery tests
+        run: |
+          python -m pytest `
+            tests/test_phase5_security_audit_backup.py `
+            tests/test_phase9_durable_security_log.py `
+            tests/test_phase9_process_boundary.py `
+            tests/test_phase10_vault_key_rotation.py `
+            tests/test_phase11_audit_key_rotation.py `
+            tests/test_phase12_key_migration_and_backup.py `
+            tests/test_phase13_key_rotation_regression.py `
+            --junitxml=junit-windows.xml -ra
+
+      - name: Upload Windows test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-windows
+          retention-days: 14
+          if-no-files-found: warn
+          path: junit-windows.xml

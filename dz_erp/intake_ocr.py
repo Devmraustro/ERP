@@ -23,8 +23,10 @@ from rapidocr_onnxruntime import RapidOCR
 
 from .database import ERPDatabase, TenantIsolationError
 from .decimal_utils import format_dzd
+from .rotation_audit import RecordedOperation, RotationLedger
 from .key_rotation import (
     BLOB_MAGIC,
+    require_key_file_custody,
     LEGACY_KEY_VERSION,
     BlobFormatError,
     KeyConfigurationError,
@@ -160,6 +162,9 @@ def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
     root = Path(vault_root)
     key_path = root.parent / (root.name + VAULT_KEY_SUFFIX)
     if key_path.exists():
+        # Enforced, not assumed: a key readable by another local account is a
+        # missing control, and the deployment must learn that at start-up.
+        require_key_file_custody(key_path)
         return key_path.read_bytes().strip()
 
     # The key file is gone but the vault may still hold blobs.  Generating a
@@ -183,6 +188,7 @@ def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
         # than replacing it and orphaning the vault.
         fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
+        require_key_file_custody(key_path)
         return key_path.read_bytes().strip()
     with os.fdopen(fd, "wb") as handle:
         handle.write(secret)
@@ -418,6 +424,7 @@ class PrivateDocumentVault:
         new_version: Optional[int] = None,
         journal_path: Optional[Path] = None,
         max_retries: int = 2,
+        ledger: Optional[RotationLedger] = None,
     ) -> Dict[str, Any]:
         """Re-encrypt every blob with a new active key, safely and resumably.
 
@@ -441,7 +448,22 @@ class PrivateDocumentVault:
             new_key = Fernet.generate_key()
             resume_version = None
 
-        with rotation_lock(self.rotation_lock_path):
+        # The rotation is recorded in a ledger that has its OWN key material, so
+        # the record of rotating this vault cannot become unreadable as a result
+        # of rotating this vault. See dz_erp/rotation_audit.py.
+        ledger = ledger or RotationLedger.for_store(self.vault_root)
+
+        # The record is opened before the rotation lock is taken so that a
+        # refused attempt (lock contention, unreadable ciphertext) is itself
+        # recorded. A privileged operation that was attempted and denied is
+        # audit evidence, not noise.
+        with RecordedOperation(
+            ledger,
+            operation="VAULT_KEY_ROTATION",
+            store=f"vault:{self.vault_root}",
+            from_version=ring.active_version,
+            detail={"resumed": resume_version is not None},
+        ) as recorded, rotation_lock(self.rotation_lock_path):
             journal = RotationJournal(journal_path or self.rotation_journal_path)
             referenced = self.scan_blob_versions()
             missing = sorted(set(referenced) - set(ring.versions))
@@ -467,6 +489,7 @@ class PrivateDocumentVault:
             self._keyring = working
             self._keyring_persisted = True
             self._refresh_active_key()
+            recorded.note_target_version(target_version)
 
             journal.record(
                 event="rotation_started",
@@ -499,6 +522,10 @@ class PrivateDocumentVault:
             verification = self.verify_blobs()
             report["verification"] = verification
             report["verified_ok"] = verification["failed"] == 0
+            # A rotation is only reported as successful when the data it moved
+            # still decrypts. Anything else is an unverified outcome, and the
+            # ledger records it as such.
+            report["status"] = "COMPLETED_VERIFIED" if report["verified_ok"] else "COMPLETED_UNVERIFIED"
             journal.record(
                 event="rotation_finished",
                 target_version=target_version,
@@ -507,6 +534,25 @@ class PrivateDocumentVault:
                 failed=report["failed"],
                 verification_failures=verification["failed"],
             )
+            recorded.record_summary(
+                counts={
+                    "attempted": report["attempted"],
+                    "completed": report["completed"],
+                    "skipped": report["skipped_already_current"] + report["skipped_concurrent"],
+                    "failed": report["failed"],
+                },
+                integrity={
+                    "verified": report["verified_ok"],
+                    "checked": verification["checked"],
+                    "failures": verification["failed"],
+                },
+                retained_versions=list(self._keyring.versions),
+                detail={"resumed": report["resumed"], "journal": str(journal.path)},
+            )
+            report["ledger"] = {
+                "path": str(ledger.path),
+                "operation_id": recorded.operation_id,
+            }
             return report
 
     def _rotate_one(

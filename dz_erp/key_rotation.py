@@ -63,6 +63,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -143,6 +144,15 @@ class RotationInProgressError(KeyRingError):
     """Another rotation already holds the exclusive rotation lock."""
 
 
+class KeyCustodyError(KeyRingError):
+    """A key file is readable beyond its owner.
+
+    Raised instead of using the key. A key that any local account can read is
+    not protected, and silently using it would leave the deployment believing it
+    had a control it does not have.
+    """
+
+
 class BlobFormatError(KeyRingError):
     """A stored ciphertext blob is structurally invalid (truncated or zero-version).
 
@@ -211,6 +221,9 @@ class KeyRing:
             raise KeyConfigurationError(
                 f"Key ring file {path} could not be parsed as JSON ({type(exc).__name__})."
             ) from exc
+        # A registry file holds every key version in the clear (mode 0600), so it
+        # is a key file in its own right.
+        require_key_file_custody(path)
         ring = cls.from_dict(raw)
         if ring.kind != kind:
             raise KeyConfigurationError(
@@ -305,6 +318,22 @@ class KeyRing:
                 return version
         return None
 
+    def age_days(self, version: Optional[int] = None) -> Optional[float]:
+        """Age of a key version in days, from its recorded creation time.
+
+        Used to detect an overdue rotation. Returns ``None`` when the timestamp
+        cannot be parsed (an old or hand-edited registry), rather than inventing
+        an age that would either mask an overdue key or raise a false alarm.
+        """
+        try:
+            entry = self.entry(self._current_version if version is None else version)
+            created = datetime.fromisoformat(entry.created_at)
+        except (KeyVersionUnavailableError, ValueError, TypeError):
+            return None
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - created).total_seconds() / 86400.0
+
     def summary(self) -> Dict[str, Any]:
         """Return version numbers and statuses only - never key material.
 
@@ -316,7 +345,12 @@ class KeyRing:
             "kind": self.kind,
             "active_version": self._current_version,
             "versions": [
-                {"version": v, "status": self._entries[v].status, "created_at": self._entries[v].created_at}
+                {
+                    "version": v,
+                    "status": self._entries[v].status,
+                    "created_at": self._entries[v].created_at,
+                    "age_days": round(self.age_days(v) or 0.0, 3),
+                }
                 for v in self.versions
             ],
         }
@@ -584,6 +618,67 @@ def _set_mode_on_fd(fd: int, path: Path, mode: int) -> None:
         return
     with contextlib.suppress(OSError):  # pragma: no cover - Windows
         os.chmod(path, mode)
+
+
+def describe_key_protection() -> Dict[str, Any]:
+    """What the current platform's file permissions actually mean.
+
+    This is deliberately blunt. On POSIX a ``0600`` key is unreadable by other
+    accounts. On Windows the mode bits are a read-only flag and access is decided
+    by NTFS ACLs inherited from the directory, which this code cannot verify - so
+    the honest answer is "not verified", not "protected".
+    """
+    if os.name == "posix":
+        return {
+            "platform": "posix",
+            "mechanism": "file mode bits",
+            "enforced": True,
+            "expects": "0600 (owner read/write only)",
+            "equivalent_to_hsm": False,
+        }
+    return {  # pragma: no cover - Windows
+        "platform": "windows",
+        "mechanism": "NTFS ACLs (inherited from the parent directory)",
+        "enforced": False,
+        "expects": "mode bits are not verified on this platform; restrict the directory ACL instead",
+        "equivalent_to_hsm": False,
+    }
+
+
+def check_key_file_custody(path: Path) -> Dict[str, Any]:
+    """Verify that a key file is not readable beyond its owner.
+
+    POSIX only, because that is where the check is meaningful: the comparison is
+    over mode bits, and a key that another local account can read provides no
+    confidentiality. Returns a description rather than raising when the file is
+    legitimate; callers decide whether to fail (see ``require_key_file_custody``).
+    """
+    path = Path(path)
+    if os.name != "posix":  # pragma: no cover - Windows
+        return {**describe_key_protection(), "path": str(path), "ok": None, "reason": "not verifiable here"}
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        return {"path": str(path), "ok": False, "reason": f"cannot stat: {exc}"}
+    group_or_other = mode & 0o077
+    return {
+        "path": str(path),
+        "ok": group_or_other == 0,
+        "mode": oct(mode),
+        "reason": None if group_or_other == 0 else f"mode {oct(mode)} grants access beyond the owner",
+    }
+
+
+def require_key_file_custody(path: Path) -> None:
+    """Refuse to use a key file that other local accounts can read."""
+    result = check_key_file_custody(path)
+    if result.get("ok") is False:
+        raise KeyCustodyError(
+            f"Refusing to use the key file {path}: {result['reason']}. "
+            f"Restrict it with `chmod 600 {path}` (and check the directory's permissions). "
+            "A key readable by another local account provides no confidentiality, so the "
+            "deployment would be relying on a control that is not in place."
+        )
 
 
 def _atomic_replace(src: Path, dst: Path) -> None:

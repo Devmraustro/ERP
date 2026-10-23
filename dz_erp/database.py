@@ -746,6 +746,13 @@ class ERPDatabase:
     def audit_keyring(self) -> KeyRing:
         return self._audit_keyring
 
+    def _ensure_writable(self, operation: str) -> None:
+        """Prevent non-SQL side effects when the database is opened for inspection."""
+        if self._read_only:
+            raise PermissionError(
+                f"ERPDatabase is in read-only inspection mode; refusing to {operation}."
+            )
+
     @property
     def audit_keyring_path(self) -> Optional[Path]:
         return self._keyring_path
@@ -1230,6 +1237,7 @@ class ERPDatabase:
         keys, so a crash can never leave events signed with a key the registry
         does not know about.
         """
+        self._ensure_writable("persist audit key material")
         if self._keyring_path is None:
             raise KeyConfigurationError(
                 "This database has no durable key registry (in-memory databases cannot be rotated)."
@@ -1245,6 +1253,7 @@ class ERPDatabase:
         new_version: Optional[int] = None,
         ledger: Optional[RotationLedger] = None,
     ) -> Dict[str, Any]:
+        self._ensure_writable("rotate the audit key")
         """Activate a new audit signing key; historical events keep their key.
 
         Unlike the vault there is nothing to re-encrypt: a MAC cannot be
@@ -1352,6 +1361,7 @@ class ERPDatabase:
 
     def set_active_audit_key_version(self, version: int) -> Dict[str, Any]:
         """Documented rollback: sign new events with an existing version again."""
+        self._ensure_writable("change the active audit key version")
         if self._keyring_path is None:
             raise KeyConfigurationError("This database has no durable key registry.")
         working = KeyRing.from_dict(self._audit_keyring.to_dict())
@@ -1367,6 +1377,7 @@ class ERPDatabase:
         self, version: int, *, confirm_retained_copies: bool = False
     ) -> Dict[str, Any]:
         """Delete a key version - refused while any event still depends on it."""
+        self._ensure_writable("remove an audit key version")
         if self._keyring_path is None:
             raise KeyConfigurationError("This database has no durable key registry.")
         version = int(version)

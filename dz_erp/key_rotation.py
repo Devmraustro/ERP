@@ -65,6 +65,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,11 @@ BLOB_MAGIC = b"DZKV"
 MIN_HMAC_KEY_BYTES = 32
 
 _MAX_VERSION = 255  # the version travels in a single header byte
+
+# Windows-only: os.replace can transiently fail while another process holds the
+# destination open. See _atomic_replace.
+_REPLACE_ATTEMPTS = 10
+_REPLACE_RETRY_SECONDS = 0.05
 
 
 class KeyRingError(RuntimeError):
@@ -541,20 +547,64 @@ def atomic_write_bytes(path: Path, payload: bytes, *, mode: int = 0o600) -> None
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp already creates the file 0600 on every platform, so the explicit
+    # mode below is a belt-and-braces measure rather than the only protection.
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_name)
     try:
-        os.fchmod(fd, mode)
+        _set_mode_on_fd(fd, tmp, mode)
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        _atomic_replace(tmp, path)
         _fsync_dir(path.parent)
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
+
+
+def _set_mode_on_fd(fd: int, path: Path, mode: int) -> None:
+    """Apply an owner-only mode to an open descriptor, portably.
+
+    ``os.fchmod`` is **Unix-only** - it does not exist on Windows, where calling
+    it raises ``AttributeError``. This module is on the write path for every
+    vault document and every key registry, so an unguarded call here broke every
+    rotation and every document write on Windows.
+
+    On Windows the closest portable equivalent is ``os.chmod`` on the path, which
+    only toggles the read-only attribute; NTFS ACLs, not POSIX mode bits, are the
+    real access control there. That limitation is why the key-custody assessment
+    does not treat file permissions as protection equivalent to an HSM.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is not None:  # pragma: no branch - platform branch
+        fchmod(fd, mode)
+        return
+    with contextlib.suppress(OSError):  # pragma: no cover - Windows
+        os.chmod(path, mode)
+
+
+def _atomic_replace(src: Path, dst: Path) -> None:
+    """``os.replace`` with a bounded retry for Windows sharing violations.
+
+    On POSIX ``os.replace`` cannot fail because another process has the
+    destination open. On Windows it raises ``PermissionError`` while a reader
+    holds the file without ``FILE_SHARE_DELETE``. Retrying briefly converts that
+    transient condition into a short wait instead of a failed rotation; if the
+    file stays open the error still propagates, so a genuine conflict is never
+    hidden behind a silent success.
+    """
+    attempts = _REPLACE_ATTEMPTS if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:  # pragma: no cover - Windows only
+            if attempt == attempts - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_SECONDS)
 
 
 def _fsync_dir(directory: Path) -> None:

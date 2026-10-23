@@ -32,6 +32,7 @@ from .key_rotation import (
     KeyVersionInUseError,
     KeyVersionUnavailableError,
     RotationJournal,
+    _atomic_replace,
     atomic_write_bytes,
     encode_versioned_blob,
     rotation_lock,
@@ -580,6 +581,9 @@ class PrivateDocumentVault:
         except FileNotFoundError:
             tmp.unlink(missing_ok=True)
             return False
+        # st_ino is meaningful on POSIX; on NTFS Python fills it from the file
+        # index, but the comparison never *relies* on it alone - mtime_ns and
+        # size are checked too, so a zero inode cannot mask a concurrent write.
         unchanged = (current.st_ino, current.st_mtime_ns, current.st_size) == (
             before.st_ino,
             before.st_mtime_ns,
@@ -589,7 +593,9 @@ class PrivateDocumentVault:
             tmp.unlink(missing_ok=True)
             return False
         try:
-            os.replace(tmp, path)
+            # Bounded retry: on Windows os.replace fails while a reader holds
+            # the destination without FILE_SHARE_DELETE.
+            _atomic_replace(tmp, path)
         except OSError:
             tmp.unlink(missing_ok=True)
             raise

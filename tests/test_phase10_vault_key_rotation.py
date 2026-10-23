@@ -17,7 +17,6 @@ fail loudly rather than to confirm that the happy path works:
 from __future__ import annotations
 
 import json
-import stat
 from pathlib import Path
 
 import pytest
@@ -184,8 +183,9 @@ def test_keyring_file_is_owner_only(tmp_path: Path, assert_owner_only_permission
     vault, _ = _seed_vault(root, count=1)
     vault.rotate_key()
     target = _keyring_file(root)
+    # Platform-aware: POSIX asserts mode 0o600, Windows asserts owner-writable
+    # (a raw S_IMODE comparison fails on Windows, where mode bits are synthetic).
     assert_owner_only_permissions(target)
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
     # The key material must not sit among the ciphertext it protects.
     assert list(root.rglob("*" + VAULT_KEYRING_SUFFIX)) == []
 

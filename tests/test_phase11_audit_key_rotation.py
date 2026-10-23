@@ -13,6 +13,7 @@ or an intact chain look tampered.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -565,7 +566,12 @@ def test_chain_verifies_in_a_separate_operating_system_process(tmp_path: Path) -
         capture_output=True,
         text=True,
         timeout=300,
-        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(REPO_ROOT)},
+        # Inherit the real environment minus every ERP_* override, so the child
+        # resolves keys from disk exactly as a restarted service would. A
+        # hardcoded POSIX PATH would be an invalid environment on Windows
+        # (missing SYSTEMROOT breaks sockets/imports there).
+        env={**{k: v for k, v in os.environ.items() if not k.startswith("ERP_")},
+             "PYTHONPATH": str(REPO_ROOT)},
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip().splitlines()[-1])

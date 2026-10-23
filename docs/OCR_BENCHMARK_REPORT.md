@@ -19,9 +19,17 @@ All metrics in this report were produced by executing `dz_erp/benchmark.py` (`ru
 | **Overall Character Error Rate (`CER`)** | **`11.13%`** |
 | **Table Line-Item Association Accuracy** | **`100.00%`** (`18 / 18` documents matched SKU and Line HT exactly) |
 | **Expected Calibration Error (`ECE`, 5 bins)** | **`0.79%`** (`0.0079`) |
-| **Latency Mean (`ms / document`)** | **`756.79 ms`** |
-| **Latency Median / `p50` (`ms / document`)** | **`675.17 ms`** |
-| **Latency Max (`ms / document`)** | **`1,599.22 ms`** |
+| **Latency Mean (`ms / document`)** | **`1 337.55 ms`** |
+| **Latency Median / `p50` (`ms / document`)** | **`1 105.45 ms`** |
+| **Latency Max (`ms / document`)** | **`3,150.02 ms`** |
+
+> **Latency is host-dependent and must not be quoted as a fixed property.** These figures are the
+> committed artefact (`benchmarks/results/ground_truth_and_results.json`), reproduced from one
+> machine. Repeated runs of the same code have differed by more than 2x in mean OCR latency
+> (ONNX Runtime/OpenCV kernel dispatch and page-cache state), so any latency claim needs its host
+> and run recorded beside it. Field accuracy is the stable, checkable metric; latency is capacity
+> data. The test now writes its output to a temporary directory, so a test run can no longer
+> overwrite this artefact with a machine's own timings.
 
 ---
 
@@ -44,12 +52,12 @@ All metrics in this report were produced by executing `dz_erp/benchmark.py` (`ru
 
 | Stratum | Document Count | Engine Used | Field Exact-Match Accuracy | Mean Latency (`ms`) |
 | :--- | :---: | :--- | :---: | :---: |
-| `S1_FRENCH_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `31.11 ms` |
-| `S2_BILINGUAL_FR_AR_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `30.33 ms` |
-| `S3_CASH_TIMBRE_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `29.10 ms` |
-| `S4_CLEAN_RASTER_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`70.83%`** | `1,558.52 ms` |
-| `S5_STAMPED_SKEWED_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`100.00%`** | `1,497.07 ms` |
-| `S6_THERMAL_CASH_RECEIPT_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`75.00%`** | `1,394.63 ms` |
+| `S1_FRENCH_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `40.25 ms` |
+| `S2_BILINGUAL_FR_AR_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `50.98 ms` |
+| `S3_CASH_TIMBRE_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `51.13 ms` |
+| `S4_CLEAN_RASTER_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`70.83%`** | `2,833.61 ms` |
+| `S5_STAMPED_SKEWED_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`100.00%`** | `2,762.47 ms` |
+| `S6_THERMAL_CASH_RECEIPT_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`75.00%`** | `2,286.88 ms` |
 
 ---
 

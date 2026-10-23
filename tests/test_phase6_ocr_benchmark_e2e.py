@@ -31,7 +31,13 @@ def test_empirical_ocr_benchmark_across_6_algerian_invoice_strata(tmp_path: Path
     # absolute path: the previous hardcoded path only existed on the machine the
     # benchmark was authored on, so the test failed with PermissionError on any
     # other host.
-    bench_dir = Path(__file__).resolve().parent.parent / "benchmarks" / "results"
+    # Write to the test's own directory, never to the tracked `benchmarks/results`.
+    # The benchmark records wall-clock latencies, which vary by host; running it
+    # in place rewrote the committed evidence (PDFs and the results JSON) on every
+    # test run, so a developer could commit their machine's timings as if they were
+    # the recorded run. The committed artefact stays the reference; this test
+    # asserts the metrics, not the timings.
+    bench_dir = tmp_path / "benchmarks" / "results"
     report = run_empirical_ocr_benchmark(bench_dir)
 
     assert report["dataset_size_documents"] == 18

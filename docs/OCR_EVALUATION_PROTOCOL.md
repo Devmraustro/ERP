@@ -196,7 +196,7 @@ A change is accepted only if **all** of the following hold, measured on the §4.
 | Field exact-match, identifiers (NIF/RC/AI) | ≥ current + 5 points, lower bound > current point estimate |
 | False-accept rate at the chosen threshold | ≤ 0.5 % for monetary fields |
 | Arabic-only scanned stratum (S4) | measured and reported; no regression, improvement required if an Arabic head is claimed |
-| Latency p95, OCR path | ≤ 2× current (1 800 ms at current 1.6 s max) |
+| Latency p95, OCR path | ≤ 2× the recorded baseline on the **same host** (recorded max 3 150 ms/document, but host-dependent - see `docs/OCR_BENCHMARK_REPORT.md`) |
 | Licence | Apache-2.0/MIT/BSD-compatible; no copyleft in the runtime path |
 | Dependency graph | conflict-free, or a documented allow-list entry with a mitigation |
 | Reproducibility | the evaluation script and pinned versions are committed; results regenerate |
@@ -223,7 +223,7 @@ is not closed by the new engine alone".
 |---|---|---|
 | Synthetic documents | No scanner noise, skew or compression | Never used for the accuracy claim; §4.3 |
 | Small sample | Intervals wide (18/18 → 82–100 %) | §4.2 sample sizes |
-| Single machine / CI variance | `extract_document_ocr` records 0.9097 on one machine vs 0.8958 on a CI runner for the same set | Report both; set the threshold against the lower run |
+| Single machine / CI variance | `extract_document_ocr` records 0.9097 on one machine vs 0.8958 on a CI runner for the same set; latency varies by >2× across runs | Report both; set thresholds against the lower run; never quote latency without the host |
 | Constant `0.995` confidence | Inflates apparent calibration | P0 in §3 |
 | Extractor prioritises precision | Recall low on `RC`/`AI` (12/18) | Report abstention separately; the gap is the review load |
 | Arabic missing entirely | Any aggregate hides it | Strata are reported separately; §7 |

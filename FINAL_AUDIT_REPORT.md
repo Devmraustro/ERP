@@ -312,14 +312,14 @@ test, no third-party penetration test, no real-scale backup/restore drill.
 | # | Issue | Evidence | Risk | Required action | Blocks staging? | Blocks production? |
 |---|---|---|---|---|---|---|
 | 1 | Key material protected by filesystem permissions only (no HSM/KMS, no split custody) | `key_rotation.py` stores keys as `0600` files; §5 | High | Select and document key custody (KMS/HSM or equivalent operational control) | No | **Yes** |
-| 2 | Rotation is operator-invoked; no scheduler, no rotation policy, no alerting on failed rotation | `dz_erp/rotate_keys.py` is manual; journal is not monitored | Medium | Define a rotation schedule, monitoring and an on-call procedure; decide whether rotation must also be recorded in a global audit stream | No | **Yes** |
-| 3 | Rotation is not an event in the tamper-evident audit chain | §5, design §5.2 | Medium | Design a global (non-tenant) audit stream or an approved compensating control | No | **Yes** |
+| 2 | Rotation is operator-invoked; no scheduler | `dz_erp/rotate_keys.py` is manual. **Alerting now exists**: `monitor` reports overdue keys, unfinished operations, ledger validity and custody drift, exiting 3 when unhealthy | Medium | Schedule `monitor` and alert on its exit code; define the rotation cadence | No | **Yes** (cadence is procedural) |
+| 3 | Rotation is not an event in the tenant audit chain | §5, design §5.2 | Medium | Rotation is now recorded in a **separate tamper-evident ledger** (`dz_erp/rotation_audit.py`, own key, HMAC chain, off-host checkpoints) because `audit_events.company_id` is `NOT NULL` and a global operation has no honest tenant. Not integrated into the tenant chain, by design. Residual: the ledger key sits beside the ledger (§11.3) | No | No, provided checkpoints are exported off-host |
 | 4 | Algerian accounting/tax treatment unvalidated | `docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md` — every gate open | High | Qualified review of SCF mapping, **380 vs 408**, VAT, **stamp duty**, **G50**, invoicing; signed sign-off block | No | **Yes** |
 | 5 | Law 18-07 / ANPDP obligations unaddressed in software and process | No processing register, no data-subject-rights workflow, no filing evidence, no cross-border decision | **High** | DPO/legal: register, rights procedure, ANPDP formalities, hosting decision | No | **Yes** |
 | 6 | `pip check` exits 1 on the documented OpenCV substitution | §6 row 2; PyPI metadata evidence | Low | Accept-and-document (current), or migrate to `rapidocr` 3.x in a dedicated change | No | No (documented) |
 | 7 | OCR accuracy not statistically established (18 synthetic documents) | `docs/OCR_BENCHMARK_REPORT.md` | High *for unattended posting* | Keep human review mandatory; build a powered benchmark on real, consented data | No | No, while human review is enforced |
 | 8 | Optimistic concurrency only during vault rotation | design §2.5 | Low | Run rotation in a maintenance window; document the window | No | No (procedure) |
-| 9 | No real-scale restore/rotation drill (large database, many blobs, real backup media) | Only synthetic fixtures this session | Medium | Execute one drill on a copy of production-scale data before go-live | No | **Yes** |
+| 9 | No drill on production-scale data, real backup media or real scanner output | A reproducible synthetic drill now exists (`tools/rotation_scale_drill.py`, results in `docs/KEY_ROTATION_SCALE_AND_DRILL_RESULTS.md`); it is 1 000 documents on local storage, not production data | Medium | Execute one drill on a copy of production-scale data before go-live | No | **Yes** |
 
 **What is *not* a blocker any more:** vault key rotation, audit HMAC rotation, historical
 verification, interruption recovery, backup/restore of versioned keys, API docs exposure, security
@@ -335,13 +335,17 @@ backup with all key versions; restore with verification; failure classification;
 financial invariants across rotation; API surface unchanged; docs disabled by default; security-log
 redaction.
 
-**Implemented, incompletely tested:** Windows-specific branches of the rotation lock and directory
-`fsync` (present, not exercised in this session); very large vaults (resumability is tested
-functionally, not at scale); CLI on Windows.
+**Implemented, incompletely tested:** very large vaults (resumability is tested functionally and on
+synthetic data, not on production data); Windows `fsync` semantics under power loss (the rotation
+suite runs on `windows-latest` in CI, but a crash-consistency test on real hardware is out of
+scope).
 
-**Designed but not implemented:** global audit stream for rotation events; automated/scheduled
-rotation; HSM/KMS key custody; Law 18-07 register and rights workflows; business-record retention
-and erasure policy.
+**Implemented in this round (previously "designed but not implemented"):** a tamper-evident record
+of rotation events (separate ledger with an independent key, §11.2); enforced key custody at read
+time with symlink refusal (§11.3); machine-readable rotation health monitoring (§11.1).
+
+**Designed but not implemented:** automated/scheduled rotation; HSM/KMS key custody; Law 18-07
+register and rights workflows; business-record retention and erasure policy.
 
 **Blocked by missing credentials/infrastructure/approvals:** production-scale drill (needs
 production-like data and storage); HSM/KMS (infrastructure + budget); ANPDP filing (external
@@ -360,7 +364,8 @@ Conditions met for staging: keys are supplied through files/environment with no 
 API docs are disabled by default; rotation and restore are verified; synthetic data only; dedicated
 database and vault; the security log has a durable path and rotation policy.
 
-Conditions **not** met for production: §7 items 1–5 and 9.
+Conditions **not** met for production: §7 items 1, 2, 4, 5 and 9 (item 3 was closed by
+the rotation ledger, §11.2).
 
 ---
 
@@ -372,20 +377,106 @@ Conditions **not** met for production: §7 items 1–5 and 9.
 2. **Data protection:** produce the Law 18-07 processing register, data-subject-rights procedure and
    ANPDP filing plan; decide hosting (cross-border implications).
 3. **Key custody:** select KMS/HSM-backed custody or an equivalent documented control, and define
-   the rotation schedule with monitoring of the rotation journal and `AUDIT_KEY_UNAVAILABLE`.
-4. **Audit completeness:** design a global, non-tenant audit stream so rotation operations are
-   themselves tamper-evident.
+   the rotation schedule with monitoring. *Progress:* custody is now enforced at read time, symlinked
+   keys are refused, and `monitor` reports custody drift and overdue keys
+   (`docs/KEY_CUSTODY_THREAT_MODEL.md`). The KMS/HSM decision itself is still external.
+4. ~~**Audit completeness:** design a global, non-tenant audit stream so rotation operations are
+   themselves tamper-evident.~~ **Done** as a separate rotation ledger with an independent key, and
+   it records refusals and interruptions, not just successes (§11.2).
 5. **Operational drill:** run one rotation + backup + restore on a production-scale copy, timing
    each phase and confirming `verified_ok` and `chain_valid_after`.
 6. **Dependency follow-up:** evaluate `rapidocr` 3.x (already headless) as a planned major-version
    migration; until then keep the documented substitution and the graph validator.
-7. **Scale testing:** benchmark rotation over a realistically sized vault; confirm the resume path
-   under a forced kill.
-8. **Windows verification:** run the rotation paths on Windows (CI matrix covers Linux only for this
-   change).
+7. ~~**Scale testing:** benchmark rotation over a realistically sized vault; confirm the resume path
+   under a forced kill.~~ **Done for synthetic data** (§11.4); production-scale data remains item 9.
+8. ~~**Windows verification:** run the rotation paths on Windows.~~ **Done** — a `verify-windows` CI
+   job runs the rotation/backup suite on `windows-latest`, and it found a real defect (`os.fchmod`,
+   POSIX-only, which broke every key write on Windows).
 
 ---
 
-*Every number in this report comes from a command executed in this session against commit
+## 11. Post-implementation risk-closure round
+
+The sections above describe the implementation as first delivered. This round attacked the
+risks that deliverable left open — not by describing them again, but by changing what the code
+does and measuring the result. Every claim below has an executable artefact.
+
+### 11.1 What changed
+
+| Area | Change | Why it was needed |
+|---|---|---|
+| Windows correctness | `os.fchmod` (POSIX-only) removed from the key write path; `_set_mode_on_fd` falls back to `chmod`; `os.replace` retried only on Windows `PermissionError` | Key rotation raised `AttributeError` on Windows — every key write failed there. CI now proves it on `windows-latest` |
+| Rotation history | `dz_erp/rotation_audit.py`: append-only HMAC-SHA256 ledger with its own key ring, recording operation, phase, actor, key versions, counts, integrity outcome and interruption/recovery | Rotation was recorded only in a per-store journal; a privileged operation left no tamper-evident trace, and a refusal could not be recorded at all |
+| Key custody | `dz_erp/key_provider.py`: `O_NOFOLLOW` reads, mode verified on the open descriptor, `0700` key directory, symlinks refused, KMS provider honestly unimplemented | Key reads were eight independent `read_bytes()` calls; a symlinked key was followed silently |
+| Rotation convergence | Writes re-checked against the active key version; rotation converges on observed version headers; `COMPLETED_VERIFIED` requires convergence | A rotation could report success while documents still needed the retired key — silent data loss on the next key retirement |
+| Monitoring | `rotate_keys monitor` emits health JSON (overdue keys, unfinished rotations, ledger validity, custody verdicts, provider mode) and exits 3 when unhealthy | "Rotate on a schedule" had no detection mechanism; there was nothing to alert on |
+
+### 11.2 The rotation ledger, and why it is not the audit chain
+
+`audit_events.company_id` is `NOT NULL` and every read is tenant-scoped, while rotation is a
+deployment-global operation with no honest tenant to attribute it to. Worse, recording the
+rotation of the audit key *inside* the audit chain makes the record depend on the key being
+rotated: lose that key and the record of its own rotation becomes unreadable, and a rotation
+refused *because* the chain is broken could not be recorded anywhere.
+
+The ledger therefore has independent key material, its own chain (`dz-erp-rotation-ledger` v1,
+genesis `"0"*64`, MAC over canonical JSON), and these properties, each asserted in
+`tests/test_phase14_rotation_audit_ledger.py` (23 tests):
+
+* a refused or failed rotation is recorded (`REFUSED` / `FAILED`), with the exception classified
+  rather than string-matched;
+* an interrupted operation is a `STARTED` with no terminal record; the next run emits
+  `RECOVERED` + `RECOVERY`, so the signal cannot become permanent noise;
+* modification, deletion, reordering and insertion are all detected;
+* **tail truncation is undetectable by the chain alone** — only an off-host checkpoint
+  (`export_checkpoint` / `verify_against_checkpoint`) catches it. The test asserts this
+  limitation instead of claiming full tamper-proofness;
+* a missing ledger key yields `LEDGER_KEY_UNAVAILABLE`, never "valid".
+
+### 11.3 Custody: what is enforced, what is only claimed
+
+Enforced at read time for the vault key, the audit key, both registries and the ledger key:
+owner-only mode (checked on the descriptor actually read), no symlinks, `0700` directories.
+
+Not claimed: `describe_key_protection()` reports `equivalent_to_hsm: False`, and
+`KmsKeyProvider.read()` raises rather than returning a locally generated key. The residual risk
+— exportable keys, the running process holding them, no split custody — is stated in
+`docs/KEY_CUSTODY_THREAT_MODEL.md` rather than implied away.
+
+### 11.4 Measured behaviour
+
+`tools/rotation_scale_drill.py` produces the numbers in
+`docs/KEY_ROTATION_SCALE_AND_DRILL_RESULTS.md`. On a 2-vCPU container, 1 000 documents and
+10 000 audit events:
+
+* rotation 1.45 s (≈690 documents/s, flat from 200 to 1 000 documents), audit rotation 0.18 s;
+* chain verification 0.09 s; backup 0.41 s; restore 0.28 s with manifest hashes, audit chains
+  and a balanced trial balance (10 020.00 / 10 020.00) verified;
+* the rotator killed with `os._exit(137)` at 10 %, 50 % and 90 %: documents readable throughout,
+  the ledger showed the orphan, and resume converged in 0.28–1.40 s;
+* 2 031 documents written by four threads during a rotation: all readable, zero strays;
+* peak RSS grew ~6 MB across a 5× data increase, so rotation does not buffer the corpus.
+
+**The drill found a real defect** (§11.1, convergence): three documents stayed on the old key
+after a rotation reported `COMPLETED_VERIFIED`. Unit tests had not caught it because "every blob
+decrypts" is true for a blob on the old key. That is the argument for a reproducible drill
+rather than a one-off benchmark.
+
+### 11.5 What this round did not fix
+
+* No HSM/KMS; no split custody or two-person rule (infrastructure and budget).
+* No scheduler: `monitor` detects an overdue key, nothing rotates it.
+* Arabic-only scanned documents still cannot be recognised by the default model head
+  (`docs/OCR_EVALUATION_PROTOCOL.md` §7); digital-born Arabic is unaffected.
+* Field confidence is still the line score (constant `0.995` for digital PDFs), so no auto-accept
+  threshold can be honestly calibrated yet (protocol §3, prerequisite P0).
+* No production-scale drill, no third-party penetration test, no real-data benchmark.
+
+The consolidated view of all of the above, with severity, evidence, owner and action per item, is
+`docs/RISK_REGISTER.md`; the reviewer-facing index is `docs/COMPLIANCE_REVIEW_PACKAGE.md`.
+
+---
+
+*Every number in this report comes from a command executed against commit
 `d823b83f79…`; the CI result is the run for that exact SHA. Nothing in this report is inferred from
 the previous audit.*

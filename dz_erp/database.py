@@ -226,7 +226,13 @@ CREATE TABLE IF NOT EXISTS source_documents (
     uploaded_at         TEXT NOT NULL,
     ocr_Engine          TEXT,
     ocr_model_version   TEXT,
-    ocr_latency_ms      REAL
+    ocr_latency_ms      REAL,
+    extraction_route    TEXT CHECK (extraction_route IS NULL
+                            OR extraction_route IN ('standard_review', 'manual_transcription')),
+    route_reason        TEXT,
+    declared_language   TEXT,
+    script_arabic_letters INTEGER,
+    script_latin_letters  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS ocr_extracted_fields (
@@ -238,7 +244,14 @@ CREATE TABLE IF NOT EXISTS ocr_extracted_fields (
     field_name              TEXT NOT NULL,
     raw_text                TEXT NOT NULL,
     normalized_value        TEXT,
-    confidence              REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    -- Nullable on purpose: native PDF extraction measures no confidence, and
+    -- storing a constant there would present fabricated certainty as data.
+    confidence              REAL CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+    confidence_kind         TEXT NOT NULL DEFAULT 'engine_line'
+                                CHECK (confidence_kind IN ('engine_line', 'not_measured', 'legacy_line_score')),
+    confidence_scope        TEXT NOT NULL DEFAULT 'line'
+                                CHECK (confidence_scope IN ('line', 'unavailable')),
+    confidence_calibrated   INTEGER NOT NULL DEFAULT 0 CHECK (confidence_calibrated IN (0, 1)),
     bbox_json               TEXT NOT NULL,
     ocr_model_version       TEXT NOT NULL,
     human_override_value    TEXT,
@@ -252,10 +265,14 @@ CREATE TRIGGER IF NOT EXISTS trg_ocr_field_preserve_raw
 BEFORE UPDATE ON ocr_extracted_fields
 FOR EACH ROW
 WHEN OLD.raw_text != NEW.raw_text
-  OR OLD.confidence != NEW.confidence
+  -- IS NOT, not !=, so that NULL (not measured) is compared correctly.
+  OR OLD.confidence IS NOT NEW.confidence
+  OR OLD.confidence_kind != NEW.confidence_kind
+  OR OLD.confidence_scope != NEW.confidence_scope
+  OR OLD.confidence_calibrated != NEW.confidence_calibrated
   OR OLD.ocr_model_version != NEW.ocr_model_version
 BEGIN
-    SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, and ocr_model_version cannot be overwritten.');
+    SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, its provenance and ocr_model_version cannot be overwritten.');
 END;
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -789,6 +806,135 @@ class ERPDatabase:
             conn.execute(
                 "ALTER TABLE audit_events ADD COLUMN hmac_key_version INTEGER NOT NULL DEFAULT 1"
             )
+
+        self._migrate_ocr_confidence(conn)
+        self._migrate_document_routing(conn)
+
+    def _migrate_document_routing(self, conn: sqlite3.Connection) -> None:
+        """Add the review-routing columns to `source_documents`, leaving old rows NULL.
+
+        Existing documents keep `NULL` rather than a default of `standard_review`:
+        they were extracted before routing existed, and claiming they were routed
+        normally would assert a decision that was never made. A reader that sees
+        `NULL` knows to treat the route as unknown.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(source_documents)").fetchall()}
+        if not cols:
+            return
+        additions = {
+            "extraction_route": (
+                "TEXT CHECK (extraction_route IS NULL OR extraction_route IN "
+                "('standard_review', 'manual_transcription'))"
+            ),
+            "route_reason": "TEXT",
+            "declared_language": "TEXT",
+            "script_arabic_letters": "INTEGER",
+            "script_latin_letters": "INTEGER",
+        }
+        for column, definition in additions.items():
+            if column not in cols:
+                conn.execute(f"ALTER TABLE source_documents ADD COLUMN {column} {definition}")
+
+    def _migrate_ocr_confidence(self, conn: sqlite3.Connection) -> None:
+        """Bring `ocr_extracted_fields` forward to nullable, provenance-bearing confidence.
+
+        Two things cannot be done with `ALTER TABLE` in SQLite (adding a NOT NULL
+        default and dropping a NOT NULL constraint), so the table is rebuilt. The
+        backfill is factual rather than cosmetic:
+
+        * rows belonging to documents extracted by `pdfplumber` came from native
+          text extraction, which measures no confidence. Their stored value was a
+          constant, so it is set to NULL and marked `not_measured`.
+        * rows from the OCR engine keep their value and are marked
+          `legacy_line_score` / scope `line`: the number was real, but it is a
+          line score recorded before the distinction existed, so calling it
+          `engine_line` would claim more than we can verify.
+
+        Nothing else in a row changes: raw text, bbox, model version and human
+        overrides are copied verbatim, and the raw-immutability trigger is
+        recreated afterwards.
+        """
+        cols = conn.execute("PRAGMA table_info(ocr_extracted_fields)").fetchall()
+        if not cols:
+            return
+        by_name = {row["name"]: row for row in cols}
+        already_migrated = (
+            "confidence_kind" in by_name
+            and "confidence_scope" in by_name
+            and not by_name["confidence"]["notnull"]
+        )
+        if already_migrated:
+            return
+
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS trg_ocr_field_preserve_raw")
+            conn.execute("ALTER TABLE ocr_extracted_fields RENAME TO ocr_extracted_fields_legacy")
+            conn.executescript(
+                """
+                CREATE TABLE ocr_extracted_fields (
+                    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company_id              INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+                    document_id             TEXT NOT NULL REFERENCES source_documents(id) ON DELETE RESTRICT,
+                    page_number             INTEGER NOT NULL DEFAULT 1,
+                    line_index              INTEGER,
+                    field_name              TEXT NOT NULL,
+                    raw_text                TEXT NOT NULL,
+                    normalized_value        TEXT,
+                    confidence              REAL CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+                    confidence_kind         TEXT NOT NULL DEFAULT 'engine_line'
+                                                CHECK (confidence_kind IN ('engine_line', 'not_measured', 'legacy_line_score')),
+                    confidence_scope        TEXT NOT NULL DEFAULT 'line'
+                                                CHECK (confidence_scope IN ('line', 'unavailable')),
+                    confidence_calibrated   INTEGER NOT NULL DEFAULT 0 CHECK (confidence_calibrated IN (0, 1)),
+                    bbox_json               TEXT NOT NULL,
+                    ocr_model_version       TEXT NOT NULL,
+                    human_override_value    TEXT,
+                    edited_by_id            INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+                    edited_at               TEXT,
+                    created_at              TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO ocr_extracted_fields (
+                    id, company_id, document_id, page_number, line_index, field_name,
+                    raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
+                    confidence_calibrated, bbox_json, ocr_model_version, human_override_value,
+                    edited_by_id, edited_at, created_at
+                )
+                SELECT
+                    l.id, l.company_id, l.document_id, l.page_number, l.line_index, l.field_name,
+                    l.raw_text, l.normalized_value,
+                    CASE WHEN d.ocr_engine = 'pdfplumber' THEN NULL ELSE l.confidence END,
+                    CASE WHEN d.ocr_engine = 'pdfplumber' THEN 'not_measured' ELSE 'legacy_line_score' END,
+                    CASE WHEN d.ocr_engine = 'pdfplumber' THEN 'unavailable' ELSE 'line' END,
+                    0, l.bbox_json, l.ocr_model_version, l.human_override_value,
+                    l.edited_by_id, l.edited_at, l.created_at
+                FROM ocr_extracted_fields_legacy l
+                LEFT JOIN source_documents d ON d.id = l.document_id
+                """
+            )
+            conn.execute("DROP TABLE ocr_extracted_fields_legacy")
+            conn.executescript(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_ocr_field_preserve_raw
+                BEFORE UPDATE ON ocr_extracted_fields
+                FOR EACH ROW
+                WHEN OLD.raw_text != NEW.raw_text
+                  OR OLD.confidence IS NOT NEW.confidence
+                  OR OLD.confidence_kind != NEW.confidence_kind
+                  OR OLD.confidence_scope != NEW.confidence_scope
+                  OR OLD.confidence_calibrated != NEW.confidence_calibrated
+                  OR OLD.ocr_model_version != NEW.ocr_model_version
+                BEGIN
+                    SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, its provenance and ocr_model_version cannot be overwritten.');
+                END;
+                """
+            )
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

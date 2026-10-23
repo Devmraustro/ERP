@@ -46,7 +46,7 @@ import importlib.metadata as importlib_metadata
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 try:
     from packaging.requirements import Requirement
@@ -81,12 +81,49 @@ OPENCV_HEADLESS_PAYLOAD_DIR = "opencv_python_headless.libs"
 OPENCV_GUI_PAYLOAD_DIR = "opencv_python.libs"
 
 
-def _failures() -> List[str]:
+class DistributionRecord(NamedTuple):
+    """The minimum a requirement check needs from an installed distribution.
+
+    Exists so the validation rules can be exercised against synthetic
+    environments. A validator that can only run against whatever happens to be
+    installed cannot demonstrate that it *fails* when it should - which is the
+    property that matters for a supply-chain control.
+    """
+
+    name: str
+    version: str
+    requires: Tuple[str, ...] = ()
+
+
+def _live_distributions() -> List[DistributionRecord]:
+    records: List[DistributionRecord] = []
+    for dist in importlib_metadata.distributions():
+        name = dist.metadata["Name"]
+        if name:
+            records.append(DistributionRecord(name, dist.version, tuple(dist.requires or ())))
+    return records
+
+
+def _failures(
+    *,
+    declared: Optional[Dict[str, str]] = None,
+    distributions: Optional[List[DistributionRecord]] = None,
+    check_payload: bool = True,
+    check_imports: bool = True,
+) -> List[str]:
+    """Return every way the environment deviates from the declared graph.
+
+    All environment access is injectable so the rules can be tested against
+    synthetic environments (`tests/test_phase19_dependency_integrity.py`).
+    """
     problems: List[str] = []
 
     # --- 1. project-declared runtime dependencies -------------------------
-    declared = _declared_dependencies()
-    installed = _installed_versions()
+    if declared is None:
+        declared = _declared_dependencies()
+    if distributions is None:
+        distributions = _live_distributions()
+    installed = {_canonical(d.name): d.version for d in distributions}
     for name, spec in declared.items():
         if name not in installed:
             problems.append(f"declared dependency {name}=={spec} is not installed")
@@ -95,11 +132,9 @@ def _failures() -> List[str]:
             problems.append(f"declared dependency {name}=={spec} but {name}=={installed[name]} is installed")
 
     # --- 2. every installed distribution's requirements -------------------
-    for dist in importlib_metadata.distributions():
-        dist_name = dist.metadata["Name"]
-        if dist_name is None:
-            continue
-        for requirement in dist.requires or []:
+    for dist in distributions:
+        dist_name = dist.name
+        for requirement in dist.requires:
             try:
                 req = Requirement(requirement)
             except Exception:  # pragma: no cover - malformed upstream metadata
@@ -128,7 +163,7 @@ def _failures() -> List[str]:
             problems.append(f"{dist_name} requires {requirement}, which is not installed")
 
     # --- 3. the headless build must be the one that owns cv2 --------------
-    site_packages = _site_packages()
+    site_packages = _site_packages() if check_payload else None
     if site_packages is not None:
         # The headless wheel creates a `.libs` payload directory on POSIX
         # (manylinux/musllinux wheels bundle OpenCV shared libs there).  On
@@ -151,7 +186,7 @@ def _failures() -> List[str]:
             )
 
     # --- 4. imports --------------------------------------------------------
-    for module_name, attribute in REQUIRED_IMPORTS:
+    for module_name, attribute in (REQUIRED_IMPORTS if check_imports else ()):
         try:
             module = importlib.import_module(module_name)
         except Exception as exc:

@@ -70,6 +70,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import re
 import socket
 import threading
 import uuid
@@ -106,6 +107,16 @@ class RotationLedgerError(RuntimeError):
 
 class RotationLedgerTamperError(RotationLedgerError):
     """The ledger failed integrity verification."""
+
+
+class RotationLedgerCheckpointError(RotationLedgerError):
+    """A checkpoint document is missing, malformed, or from an incompatible version.
+
+    Distinct from truncation and from tampering: this is an *artifact* problem.
+    An unreadable or empty checkpoint file used to be treated as "nothing to
+    compare", which reported success - the operator believed truncation detection
+    was in force when it was not.
+    """
 
 
 class RotationLedgerTruncatedError(RotationLedgerError):
@@ -193,6 +204,89 @@ class LedgerRecord:
         body = self.body()
         body["record_hash"] = self.record_hash
         return body
+
+
+CHECKPOINT_REQUIRED_FIELDS = ("format", "schema", "record_count", "head_hash")
+
+
+def validate_checkpoint(checkpoint: Any) -> Dict[str, Any]:
+    """Validate a checkpoint document, or raise ``RotationLedgerCheckpointError``.
+
+    Fail-closed on purpose. Every one of these states previously passed silently:
+
+    * an empty or missing document (nothing to compare -> "valid");
+    * a document from a different ledger format or a newer schema;
+    * a non-integer or negative record count (which crashed with ValueError or
+      IndexError instead of saying what was wrong);
+    * a head hash that is not a 64-hex digest.
+
+    A checkpoint exists to be trustworthy evidence of a past state, so an
+    untrustworthy one must stop the verification rather than be skipped.
+    """
+    if not isinstance(checkpoint, dict) or not checkpoint:
+        raise RotationLedgerCheckpointError("The checkpoint document is empty or not a mapping.")
+
+    missing = [field for field in CHECKPOINT_REQUIRED_FIELDS if checkpoint.get(field) in (None, "")]
+    if missing:
+        raise RotationLedgerCheckpointError(
+            f"The checkpoint is missing required field(s): {', '.join(missing)}. "
+            "An incomplete checkpoint cannot prove anything about the ledger's past state."
+        )
+
+    if checkpoint["format"] != LEDGER_FORMAT:
+        raise RotationLedgerCheckpointError(
+            f"The checkpoint format is {checkpoint['format']!r}, expected {LEDGER_FORMAT!r}. "
+            "It was produced by a different ledger and must not be compared with this one."
+        )
+
+    schema = checkpoint["schema"]
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        raise RotationLedgerCheckpointError(f"The checkpoint schema {schema!r} is not an integer.")
+    if schema != LEDGER_SCHEMA_VERSION:
+        raise RotationLedgerCheckpointError(
+            f"The checkpoint schema is {schema}, but this build reads schema {LEDGER_SCHEMA_VERSION}. "
+            "Re-export the checkpoint with the current version rather than guessing at compatibility."
+        )
+
+    count = checkpoint["record_count"]
+    if not isinstance(count, int) or isinstance(count, bool):
+        raise RotationLedgerCheckpointError(f"The checkpoint record_count {count!r} is not an integer.")
+    if count < 0:
+        raise RotationLedgerCheckpointError(f"The checkpoint record_count {count} is negative.")
+
+    head = checkpoint["head_hash"]
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{64}", head):
+        raise RotationLedgerCheckpointError(
+            "The checkpoint head_hash is not a 64-character lowercase hex digest."
+        )
+    if count == 0 and head != LEDGER_GENESIS_HASH:
+        raise RotationLedgerCheckpointError(
+            "A checkpoint with zero records must carry the genesis hash."
+        )
+    return checkpoint
+
+
+def load_checkpoint(path: Path) -> Dict[str, Any]:
+    """Read and validate a checkpoint file. Never returns an unvalidated document."""
+    path = Path(path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RotationLedgerCheckpointError(
+            f"The checkpoint {path} does not exist. Without it, removal of trailing ledger "
+            "records cannot be detected."
+        ) from exc
+    except OSError as exc:
+        raise RotationLedgerCheckpointError(f"The checkpoint {path} cannot be read: {exc}") from exc
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RotationLedgerCheckpointError(
+            f"The checkpoint {path} is not valid JSON: {exc.msg} at line {exc.lineno}."
+        ) from exc
+    validate_checkpoint(document)
+    document.setdefault("path", str(path))
+    return document
 
 
 class RotationLedger:
@@ -386,6 +480,14 @@ class RotationLedger:
         """
         result = self.verify()
         if not result.get("valid"):
+            # A missing key means the ledger cannot be *checked*, which is not the
+            # same as it being wrong; keep the two distinguishable for an operator.
+            if result.get("key_unavailable"):
+                raise RotationLedgerError(
+                    "Refusing to checkpoint: the ledger key version "
+                    f"{result.get('missing_key_version')} is unavailable, so the ledger cannot be "
+                    "verified. Restore the key before exporting a checkpoint."
+                )
             raise RotationLedgerTamperError(
                 f"Refusing to checkpoint a ledger that does not verify: {result.get('reason')}"
             )
@@ -410,11 +512,12 @@ class RotationLedger:
         checkpoint's head position, is reported as truncation/tampering. A longer
         ledger is expected and correct: new operations append.
         """
+        validate_checkpoint(checkpoint)
         result = self.verify()
         if not result.get("valid"):
             return result
-        expected_count = int(checkpoint.get("record_count", 0))
-        expected_head = checkpoint.get("head_hash")
+        expected_count = int(checkpoint["record_count"])
+        expected_head = checkpoint["head_hash"]
         rows = self.records()
         if len(rows) < expected_count:
             raise RotationLedgerTruncatedError(
@@ -430,7 +533,16 @@ class RotationLedger:
                 "reason": "CHECKPOINT_MISMATCH",
                 "detail": "The record at the checkpointed position no longer matches the retained head hash.",
             }
-        return {**result, "checkpoint_matched": True, "checkpoint_record_count": expected_count}
+        appended_since = len(rows) - expected_count
+        return {
+            **result,
+            "checkpoint_matched": True,
+            "checkpoint_record_count": expected_count,
+            "checkpoint_exported_at": checkpoint.get("exported_at"),
+            # Growth is normal; a large number means the off-host checkpoint is
+            # stale and the truncation-detection window is wider than intended.
+            "records_appended_since_checkpoint": appended_since,
+        }
 
     # ------------------------------------------------------------------
     # Appending

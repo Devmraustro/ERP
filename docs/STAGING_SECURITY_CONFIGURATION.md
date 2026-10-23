@@ -271,6 +271,32 @@ The workflow itself enforces separation of duties, verified at runtime:
 
 ---
 
+## 7.1 Supply-chain integrity of the installed software
+
+Staging runs whatever the installation step produced, so the integrity of that step is part of
+the security configuration rather than an implementation detail.
+
+* **Install only from the hash lockfile.** Both CI jobs run
+  `pip install --no-deps --require-hashes -r requirements.lock.hashes.txt`. A management or
+  staging host should do the same; `requirements.lock.txt` alone pins versions, not artifacts.
+* **51 distributions, 1 277 SHA-256 digests, sha256 only.** Every authentic file for each pinned
+  version is listed, so the same lockfile is valid on Linux and Windows.
+* **Drift is detected, not assumed.** `python tools/generate_hash_lock.py --check` runs in CI and
+  fails if the hash lockfile and the version lockfile disagree; 15 tests in
+  `tests/test_phase19_dependency_integrity.py` assert the same, plus the validator rules.
+* **The documented OpenCV substitution stays visible.** `pip check` reports one line about
+  `opencv-python`; `tools/verify_dependency_graph.py` allow-lists exactly that substitution and
+  fails on any other.
+* **Verified by execution:** a clean install from the hash lockfile succeeded, the suite as it
+  stood at that commit passed inside that environment (435 tests; the repository suite has since
+  grown to 531), and an install with one altered digest was rejected with exit 1.
+
+**Not in place:** no internal mirror or offline wheelhouse is provisioned, and no publisher
+provenance (sigstore/PEP 740) is verified. Both are documented prerequisites
+(`docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §4.2–4.3), not claimed controls.
+
+---
+
 ## 8. Staging checklist
 
 Run these before calling a staging box ready:
@@ -301,6 +327,10 @@ Then confirm:
       document decrypts and the chain verifies.
 - [ ] No real customer or financial data is present.
 - [ ] A human still has to approve before anything posts.
+- [ ] Dependencies were installed from `requirements.lock.hashes.txt` with `--require-hashes`, and
+      `python tools/generate_hash_lock.py --check` passes.
+- [ ] `python tools/verify_dependency_graph.py` passes, and its only reported deviation is the
+      documented OpenCV substitution.
 
 ---
 
@@ -311,6 +341,10 @@ Then confirm:
 | Key rotation requires operator filesystem access; no scheduled/automatic rotation | Medium for production | Run the documented rotation on a schedule with a verified backup; see the recovery guide. |
 | Key material is protected by file permissions, not an HSM | Medium for production | File mode `0600` is enforced; hardware-backed custody is a deployment control, not implemented here. |
 | `source_documents.vault_path` stores an absolute path | Low | Mitigated by re-anchoring on read; a relative path would be cleaner. |
-| OCR accuracy not statistically established | **High for unattended posting** | Keep human review mandatory; build a powered benchmark. |
+| OCR accuracy not statistically established | **High for unattended posting** | Keep human review mandatory; build a powered benchmark (`docs/OCR_EVALUATION_PROTOCOL.md`). |
+| No publisher provenance check (hash pinning pins bytes, not who published them) | Low–Medium | Accept for staging; add sigstore/PEP 740 verification before production if required. |
+| No internal mirror / offline wheelhouse | Medium for air-gapped deployment | Mirror the 51 pinned artifacts and keep `--require-hashes` on. Prerequisite, not implemented. |
 
-None of these block isolated non-production staging. All of the first four block production.
+None of these block isolated non-production staging. The key-rotation scheduling, key custody,
+OCR accuracy and (for an air-gapped target) the mirror items block production; the rest are
+accepted residuals with the mitigation named.

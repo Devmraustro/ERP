@@ -54,31 +54,56 @@ Consequences, stated plainly:
 
 ---
 
-## 3. What is actually being measured (and the confound to fix first)
+## 3. What is actually being measured (and the confound that has now been removed)
 
-`extract_document_ocr()` assigns **`0.995` to every line** extracted from a digital-born PDF
-by `pdfplumber` — a constant, not a measured probability. OCR lines carry the recogniser's
-score for the **whole line**, and `parse_structured_invoice_text` propagates that line score
-to every field matched from it.
+### 3.1 Resolved: confidence is no longer fabricated
 
-Therefore:
+Earlier revisions of this project stored a constant `0.995` confidence on every field
+extracted from a digital-born PDF, and propagated each line's recogniser score to every field
+matched from that line. Both practices are now gone:
 
-* A field's `confidence` currently means *"the engine was sure about this line"*, **not**
-  *"this value is correct"*. For digital PDFs it means nothing at all — it is a constant.
-* The reported ECE of 0.79 % is computed over a population dominated by that constant, so it
-  does **not** establish that OCR confidence is calibrated. It shows the field extractor is
-  conservative about what it emits (precision 100 %, recall lower), which is a different and
-  good property.
-* Any rule of the form "auto-post when confidence > 0.95" would be built on a number that has
-  not been shown to predict correctness.
+| Path | What is reported | `confidence_kind` | `confidence_scope` |
+|---|---|---|---|
+| Native PDF text (`pdfplumber`) | `confidence: null` — no recognition decision was made | `not_measured` | `unavailable` |
+| Raster/scan (`rapidocr`) | the engine's score for the **line** | `engine_line` | `line` |
 
-**Prerequisite P0 for every measurement below:** report metrics separately by extraction
-path (`pdfplumber` vs OCR) and by language, and stop emitting a constant confidence for
-digital text — either emit `null`/"not applicable" or derive a per-field score from match
-evidence (regex strictness, digit checksum, cross-foot agreement). Until then calibration is
-only meaningful for the OCR path, measured on its own.
+Every field and line item also carries `confidence_calibrated: false` and a
+`confidence_baseline` sentence stating what the number does and does not mean. The value and
+its provenance are stored together (`ocr_extracted_fields.confidence`, `confidence_kind`,
+`confidence_scope`, `confidence_calibrated`), are protected against post-hoc rewriting by the
+`trg_ocr_field_preserve_raw` trigger, and are preserved verbatim when a human edits the value.
 
----
+The database column is nullable for a reason: `NULL` means "nothing was measured", which is a
+different statement from `0.0`. Rows written before this change are migrated by
+`ERPDatabase._migrate_ocr_confidence`, which relabels them by the extraction path recorded on
+their source document — `not_measured`/`NULL` for `pdfplumber`, `legacy_line_score` for
+recognised rows, since the original value cannot be re-verified.
+
+### 3.2 What is still not a field-level probability
+
+`engine_line` remains a line score. A field's value can be wrong on a well-recognised line
+(a digit misread inside a correct-looking amount) and right on a poorly recognised one. So:
+
+* `confidence_calibrated` is always `false`, and is a stored column rather than a convention;
+* no auto-accept rule exists or may be introduced from `confidence` alone;
+* review remains mandatory (`requires_human_review: true` on every extracted field, and the
+  `NeedsReview` workflow state), so a wrong value cannot reach the ledger regardless of score.
+
+### 3.3 Calibration must now be measured honestly
+
+The benchmark's Expected Calibration Error previously averaged over all 144 field instances,
+85 of which had no measured confidence at all. That produced a flattering 0.0079 that
+described the fabricated constant, not the engine. It is now computed **only over fields whose
+path measured a confidence**, and the report states:
+
+* `calibration_observations` — how many fields the ECE is actually based on;
+* `calibration_excluded_no_confidence` — how many were excluded and why;
+* `expected_calibration_error_ece: null` when nothing was measured, rather than `0.0`
+  ("no data" and "perfectly calibrated" are opposite conclusions).
+
+Current result on the synthetic set: **ECE 0.0132 over 59 observations, 85 excluded**. With
+59 observations spread over 5 bins (~12 per bin), this is below the 30-per-bin evidence floor
+and must be read as *not established* — see §6 for the procedure that would establish it.
 
 ## 4. Dataset design
 
@@ -163,9 +188,11 @@ Procedure, per extraction path and per field type:
 5. Re-measure after every engine, model or preprocessing change; store the threshold with the
    model version (`ocr_model_version` already exists on extracted fields).
 
-Current state: **no threshold is derived this way**, because the confidence is not yet a
-per-field signal (P0). Until it is, the safe configuration is "everything reviewed", which is
-what the workflow already requires.
+Current state: **no threshold is derived this way.** The provenance problem (P0) is fixed —
+confidence is no longer fabricated and its scope is recorded — but calibration itself is still
+unmeasured: the 59 available OCR observations are too few for 5 bins, and they come from
+synthetic documents. Until a powered run exists on representative data, the safe configuration
+remains "everything is reviewed", which is what the workflow already enforces.
 
 ---
 
@@ -180,6 +207,14 @@ what the workflow already requires.
 * Whichever is chosen, S4/S5/S6 strata must be measured **separately**, and an Arabic-only
   document must never be counted as "extraction succeeded" when it was actually read by a
   human.
+* Option (b) is implemented: `dz_erp/intake_ocr.py` routes an image-recognised Arabic document
+  to `manual_transcription` (reasons `DECLARED_ARABIC_SCAN` / `NO_FIELDS_RECOGNISED`) and keeps
+  native Arabic text on the normal review route, persisting the decision on `source_documents`
+  and in the audit event. `ARABIC_RECOGNITION_HEAD_AVAILABLE` is `False`, so provisioning a head
+  is a deliberate change that must arrive with this protocol's measurements.
+* The routing decision must not be mistaken for a measurement: **no Arabic recognition accuracy
+  exists in this repository**, and an Arabic stratum reported as "100%" would describe a human,
+  not the engine.
 * RTL specifics that the evaluation must cover: line-order reversal, bidi mixing of Latin
   identifiers inside Arabic text, Arabic-Indic vs Western digits, and the dotted letters that
   differ by a single glyph (ب/پ/ت/ث, د/ذ, ر/ز).
@@ -224,7 +259,7 @@ is not closed by the new engine alone".
 | Synthetic documents | No scanner noise, skew or compression | Never used for the accuracy claim; §4.3 |
 | Small sample | Intervals wide (18/18 → 82–100 %) | §4.2 sample sizes |
 | Single machine / CI variance | `extract_document_ocr` records 0.9097 on one machine vs 0.8958 on a CI runner for the same set; latency varies by >2× across runs | Report both; set thresholds against the lower run; never quote latency without the host |
-| Constant `0.995` confidence | Inflates apparent calibration | P0 in §3 |
+| Constant `0.995` confidence | Inflated apparent calibration (the ECE averaged over a fabricated value) | **Fixed** — native text reports `null` + `not_measured`; ECE counts only measured confidences (§3.1, §3.3) |
 | Extractor prioritises precision | Recall low on `RC`/`AI` (12/18) | Report abstention separately; the gap is the review load |
 | Arabic missing entirely | Any aggregate hides it | Strata are reported separately; §7 |
 | Ground-truth ambiguity | Two reasonable readings of a field | κ per field; fix definitions before scoring |

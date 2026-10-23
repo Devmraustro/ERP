@@ -387,6 +387,60 @@ def run(state: Path) -> int:
         lambda: _assert(db.verify_audit_chain(1)["key_versions"].get("2") == 1),
     )
 
+    # -------------------------------------- ledger checkpoints (off-host proof)
+    from dz_erp.rotation_audit import (
+        RotationLedger,
+        RotationLedgerCheckpointError,
+        RotationLedgerTruncatedError,
+        load_checkpoint,
+    )
+    from dz_erp.rotate_keys import _refuse_local_checkpoint
+
+    ledger_path = state / "vault.rotation-ledger.jsonl"
+    ledger = RotationLedger.open(ledger_path, create=False)
+    offhost = state.parent / (state.name + "-offhost")
+    offhost.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = offhost / "vault.rotation.checkpoint.json"
+
+    # check() records any return value as PASS, so a control that fails to fire
+    # must raise rather than return False.
+    def checkpoint_exported() -> bool:
+        _refuse_local_checkpoint(checkpoint_path, ledger_path=ledger_path, vault_root=vault_path)
+        exported = ledger.export_checkpoint(checkpoint_path)
+        _assert(exported["record_count"] >= 1 and exported["head_hash"], exported)
+        return load_checkpoint(checkpoint_path)["head_hash"] == exported["head_hash"]
+
+    check("ledger: checkpoint exported off-host", checkpoint_exported)
+    check(
+        "ledger: the retained checkpoint matches the live ledger",
+        lambda: _assert(ledger.verify_against_checkpoint(load_checkpoint(checkpoint_path))["checkpoint_matched"]),
+    )
+
+    def local_checkpoint_refused() -> bool:
+        try:
+            _refuse_local_checkpoint(state / "local-checkpoint.json", ledger_path=ledger_path, vault_root=vault_path)
+        except RotationLedgerCheckpointError:
+            return _assert(not (state / "local-checkpoint.json").exists())
+        raise AssertionError("a checkpoint beside the ledger was accepted; it would be lost with the ledger")
+
+    check("ledger: a checkpoint kept beside the ledger is refused", local_checkpoint_refused)
+
+    def truncation_detected() -> bool:
+        """Prove the control by removing the newest record, then restoring it."""
+        original = ledger_path.read_bytes()
+        try:
+            lines = original.splitlines(keepends=True)
+            ledger_path.write_bytes(b"".join(lines[:-1]))
+            try:
+                ledger.verify_against_checkpoint(load_checkpoint(checkpoint_path))
+            except RotationLedgerTruncatedError:
+                return True
+            raise AssertionError("truncating the ledger went undetected")
+        finally:
+            ledger_path.write_bytes(original)
+
+    check("ledger: removing the newest record is detected by the checkpoint", truncation_detected)
+
     # ------------------------------------------- interrupted rotation + resume
     check("recovery: interrupted rotation leaves every document readable", lambda: _interrupt_and_resume(vault))
     check(

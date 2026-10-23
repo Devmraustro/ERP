@@ -59,7 +59,11 @@ def render_synthetic_invoice_pdf(spec: Dict[str, Any]) -> bytes:
     """Render a synthetic Algerian invoice PDF with French and optional Arabic headers."""
     _ensure_font()
     buf = io.BytesIO()
-    c = canvas.Canvas(buf)
+    # `invariant=True` fixes the document ID and timestamps, so regenerating the
+    # corpus produces byte-identical files. Without it every run rewrote the
+    # tracked PDFs with a new /CreationDate, which turned a reproducible
+    # benchmark into a source of spurious diffs in committed evidence.
+    c = canvas.Canvas(buf, invariant=True)
     font_name = "DejaVu" if _FONT_REGISTERED else "Helvetica"
     c.setFont(font_name, 11)
 
@@ -240,6 +244,7 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
     stratum_stats: Dict[str, Dict[str, Any]] = {}
     latencies_ms: List[float] = []
     conf_outcomes: List[Tuple[float, int]] = []
+    calibration_excluded = 0
     line_assoc_matches = 0
     line_assoc_total = len(specs)
 
@@ -279,15 +284,26 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
             if extracted_obj:
                 field_stats[fname]["extracted"] += 1
                 pred_val = str(extracted_obj["normalized_value"]).strip()
-                conf = float(extracted_obj["confidence"])
                 is_match = int(pred_val == gt_val)
                 field_stats[fname]["exact_match"] += is_match
                 stratum_stats[s_name]["field_matches"] += is_match
                 field_stats[fname]["char_edits"] += levenshtein_distance(gt_val, pred_val)
-                conf_outcomes.append((conf, is_match))
+                # Calibration is only meaningful where a confidence was actually
+                # measured. Native PDF extraction reports none, and imputing a
+                # value (a constant, or 0.0 for a miss) would manufacture the very
+                # number the metric is supposed to test. Those fields are counted
+                # as excluded instead.
+                conf = extracted_obj.get("confidence")
+                if conf is None:
+                    calibration_excluded += 1
+                else:
+                    conf_outcomes.append((float(conf), is_match))
             else:
                 field_stats[fname]["char_edits"] += len(gt_val)
-                conf_outcomes.append((0.0, 0))
+                # An absent field has no confidence either; scoring it at 0.0
+                # would put it in the lowest bin and improve the apparent
+                # calibration of the fields that were extracted.
+                calibration_excluded += 1
 
         if len(ocr_res["lines"]) == len(spec["lines"]):
             pred_line = ocr_res["lines"][0]
@@ -295,9 +311,12 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
             if pred_line["sku"] == gt_line["sku"] and pred_line["line_ht_dzd"] == gt_line["line_ht_dzd"]:
                 line_assoc_matches += 1
 
-    # Compute Expected Calibration Error (ECE) across 5 bins
-    ece = 0.0
+    # Compute Expected Calibration Error (ECE) across 5 bins, over measured
+    # confidences only. `ece` is None - not 0.0 - when nothing was measured,
+    # because "no data" and "perfectly calibrated" are opposite conclusions.
+    ece = None
     if conf_outcomes:
+        ece = 0.0
         n_total = len(conf_outcomes)
         for b_idx in range(5):
             low, high = b_idx * 0.2, (b_idx + 1) * 0.2
@@ -345,7 +364,17 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
             4,
         ),
         "table_line_association_accuracy": round(line_assoc_matches / line_assoc_total, 4),
-        "expected_calibration_error_ece": round(ece, 4),
+        # None when no extracted field carried a measured confidence, and
+        # reported with its own observation count so it cannot be read as a
+        # statement about the whole dataset.
+        "expected_calibration_error_ece": None if ece is None else round(ece, 4),
+        "calibration_observations": len(conf_outcomes),
+        "calibration_excluded_no_confidence": calibration_excluded,
+        "calibration_note": (
+            "ECE is computed only over fields whose extraction path measured a "
+            "recognition confidence. Native PDF extraction measures none, and "
+            "fields with no confidence are excluded rather than imputed."
+        ),
         "latency_mean_ms": round(statistics.mean(latencies_ms), 2),
         "latency_p50_ms": round(statistics.median(latencies_ms), 2),
         "latency_max_ms": round(max(latencies_ms), 2),

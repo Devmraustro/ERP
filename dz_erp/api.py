@@ -335,6 +335,11 @@ def create_erp_fastapi_app(
     async def api_upload_document(
         file: UploadFile = File(...),
         force_image_ocr: bool = Form(default=False),
+        # The supplier's known document language ("ar" for an Arabic-only issuer).
+        # It only selects the review route: when an Arabic document must be
+        # recognised from an image, the response says manual transcription is
+        # required because no Arabic recognition head is provisioned.
+        declared_language: Optional[str] = Form(default=None),
         auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         corr_id = str(uuid.uuid4())
@@ -375,8 +380,16 @@ def create_erp_fastapi_app(
                 mime_type=declared_mime,
                 content=content,
                 force_image_ocr=force_image_ocr,
+                declared_language=declared_language,
             )
-            logger.log("INFO", "DOCUMENT_UPLOAD_PROCESSED", corr_id, document_id=res["document_id"], state=res["workflow_state"])
+            logger.log(
+                "INFO",
+                "DOCUMENT_UPLOAD_PROCESSED",
+                corr_id,
+                document_id=res["document_id"],
+                state=res["workflow_state"],
+                extraction_route=res.get("extraction_route"),
+            )
             return res
         except (UnsupportedMediaTypeError, UploadValidationError) as exc:
             # 415 for a disallowed type, 400 for internally inconsistent metadata.

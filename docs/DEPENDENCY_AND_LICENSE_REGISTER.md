@@ -142,7 +142,7 @@ install, graph-validation and cv2/RapidOCR import steps green on both versions.
 
 ## 3. Core Runtime, Web API, Cryptography & Test Dependencies (`Verified`)
 
-All Python packages installed in `/tmp/erp-venv` are pinned to exact versions in `/home/user/ERP/requirements.lock.txt`:
+Every Python package in the environment is pinned to an exact version in `requirements.lock.txt` **and to exact artifact digests** in `requirements.lock.hashes.txt` (see §4):
 
 - `fastapi==0.115.12` (`MIT`)
 - `pydantic==2.11.1` & `pydantic_core==2.33.0` (`MIT`)
@@ -153,3 +153,65 @@ All Python packages installed in `/tmp/erp-venv` are pinned to exact versions in
 - `pytest==8.3.5` & `pytest-cov==6.0.0` (`MIT`)
 - `pytest-asyncio==1.3.0` (`Apache-2.0`) — coroutine test support for the bounded-upload reader
 - `ruff==0.14.0` (`MIT`) — static check used by CI
+
+---
+
+## 4. Artifact integrity: hash-pinned installation (`Verified`)
+
+**Gap this closes.** `requirements.lock.txt` pins versions, not bytes. A version pin says
+"install SQLAlchemy 2.0.40"; it does not say *which* SQLAlchemy 2.0.40. A compromised index, a
+misconfigured internal mirror or a hijacked DNS answer satisfies the pin with a different wheel.
+
+**Control.** `requirements.lock.hashes.txt` lists every pinned distribution with the SHA-256 of
+every distribution file PyPI published for that version, and both CI jobs install with:
+
+```
+pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
+```
+
+| Property | Value |
+|---|---|
+| Pinned distributions | 51 (matching `requirements.lock.txt` exactly) |
+| Total digests | 1 277 |
+| Algorithms | `sha256` only |
+| Coverage | every authentic file per version (all platform/Python wheels + sdist) |
+| Generator | `tools/generate_hash_lock.py --write` (PyPI JSON API) |
+| Drift check in CI | `tools/generate_hash_lock.py --check` |
+| Drift check in tests | `tests/test_phase19_dependency_integrity.py` (15 tests) |
+
+All-platform digests are included deliberately: a per-platform hash set would either break the
+Windows CI job or force separate lockfiles for each OS. Including every genuine file for the
+pinned version still rejects anything that is not a real release of that version, which is the
+threat being addressed.
+
+### 4.1 Verified behaviour (executed, not assumed)
+
+| Check | Result |
+|---|---|
+| Clean install of all 51 packages from the hashed lockfile | **success** |
+| Full test suite inside that separately-built environment | **435 passed** |
+| `pip check` in that environment | only the documented `opencv-python` substitution |
+| Install with one digest deliberately altered | **rejected**, exit 1, "THESE PACKAGES DO NOT MATCH THE HASHES" |
+| Hash lockfile truncated to simulate generation drift | `--check` fails; 3 tests fail |
+
+### 4.2 What hash pinning does not cover
+
+* **Publisher compromise.** Hashes pin bytes; they do not vet who published them. A malicious
+  genuine release of an already-pinned version would match. Provenance attestations
+  (PEP 740 / sigstore) are not implemented, so this remains an accepted residual risk (B2).
+* **Anything installed outside the lockfile.** A developer running `pip install <pkg>` by hand is
+  not covered; the rule is that CI and deployments install only from the hash lockfile.
+* **The OpenCV substitution remains a metadata deviation.** It is allow-listed in
+  `tools/verify_dependency_graph.py` with an explanation (§2.1), not concealed, and the
+  substitution is itself hash-pinned.
+
+### 4.3 Offline / air-gapped deployment
+
+The lockfile makes an internal mirror viable but does **not** provision one. For a deployment
+that cannot reach PyPI, the infrastructure prerequisite is:
+
+1. mirror the exact 51 pinned artifacts (the JSON API records the filenames), and
+2. serve them from an internal index, keeping `--require-hashes` enabled — a mirror that serves
+   different bytes is then rejected rather than trusted.
+
+No mirror is configured in this repository, and none is claimed to exist.

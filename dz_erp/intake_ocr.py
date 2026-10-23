@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,6 +120,179 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 # vault that has never been rotated.
 # Bounded: with sustained concurrent writes convergence may need a second pass;
 # an unbounded loop would let a busy vault stall a rotation indefinitely.
+# ----------------------------------------------------------------------
+# Confidence provenance
+# ----------------------------------------------------------------------
+# A value stored on an extracted field must say what it *is*, not merely how
+# large it is. Two kinds exist, and they are not interchangeable:
+#
+#   ENGINE_LINE  the recognition engine scored the whole text line the field was
+#                matched from. It describes the line, not the field value: a
+#                perfectly recognised line can still yield a mis-parsed amount,
+#                and a badly recognised line can yield a correct one by luck.
+#   NOT_MEASURED native PDF text extraction produces exact characters, so no
+#                recognition confidence exists. Previously this path stored a
+#                constant 0.995, which was fabricated certainty and made any
+#                calibration or auto-accept threshold meaningless.
+#
+# Neither is a calibrated field-level probability. `confidence_calibrated` is
+# therefore always False until a labelled corpus and a calibration analysis
+# exist (docs/OCR_EVALUATION_PROTOCOL.md §6).
+CONFIDENCE_ENGINE_LINE = "engine_line"
+CONFIDENCE_NOT_MEASURED = "not_measured"
+
+CONFIDENCE_SCOPE_LINE = "line"
+CONFIDENCE_SCOPE_UNAVAILABLE = "unavailable"
+
+CONFIDENCE_BASELINE = {
+    CONFIDENCE_ENGINE_LINE: (
+        "Recognition engine score for the text line the value was matched from. "
+        "It is not a calibrated probability that the field value is correct."
+    ),
+    CONFIDENCE_NOT_MEASURED: (
+        "Not measured. The text came from native PDF extraction, which yields exact "
+        "characters but produces no recognition confidence."
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Script coverage and review routing
+# ---------------------------------------------------------------------------
+# The bundled recognition head is PP-OCRv4 trained on Latin and Chinese text. It
+# cannot read Arabic script. Nothing in this module can make it do so: a missing
+# model is a capability gap, not a tuning problem, and the only honest response
+# is to route those documents to a human transcription path *explicitly* rather
+# than let them produce plausible-looking Latin garbage and call it extraction.
+ARABIC_RECOGNITION_HEAD_AVAILABLE = False
+RECOGNITION_HEAD = "ppocrv4-latin-chinese"
+ARABIC_RECOGNITION_HEAD = "arabic_PP-OCRv4_rec"
+
+ROUTE_STANDARD_REVIEW = "standard_review"
+ROUTE_MANUAL_TRANSCRIPTION = "manual_transcription"
+EXTRACTION_ROUTES = (ROUTE_STANDARD_REVIEW, ROUTE_MANUAL_TRANSCRIPTION)
+
+REASON_FIELDS_EXTRACTED = "FIELDS_EXTRACTED"
+REASON_NATIVE_ARABIC_SUPPORTED = "NATIVE_ARABIC_TEXT_SUPPORTED"
+REASON_NO_FIELDS = "NO_FIELDS_RECOGNISED"
+REASON_DECLARED_ARABIC = "DECLARED_ARABIC_SCAN"
+
+# A document is treated as Arabic-script when Arabic letters outnumber Latin ones.
+_ARABIC_RANGES = (
+    (0x0600, 0x06FF),  # Arabic
+    (0x0750, 0x077F),  # Arabic Supplement
+    (0x08A0, 0x08FF),  # Arabic Extended-A
+    (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
+    (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
+)
+_ARABIC_PRESENTATION_MIN = 0x0600
+
+
+def is_arabic_char(char: str) -> bool:
+    """True when *char* is a letter in an Arabic script block."""
+    code = ord(char)
+    if not char.isalpha():
+        return False
+    return any(low <= code <= high for low, high in _ARABIC_RANGES)
+
+
+def is_latin_letter(char: str) -> bool:
+    """True when *char* is a letter in the Latin script (accented forms included)."""
+    if not char.isalpha() or is_arabic_char(char):
+        return False
+    try:
+        return "LATIN" in unicodedata.name(char)
+    except ValueError:  # pragma: no cover - unnamed code points
+        return False
+
+
+def script_profile(lines_with_meta: List[Tuple[str, Optional[float], List[List[float]]]]) -> Dict[str, Any]:
+    """Count Arabic and Latin letters in the extracted text.
+
+    This measures the *text we ended up with*, which is not necessarily the
+    language of the page. For native PDF extraction those are the same thing.
+    For a scanned page recognised by a head that cannot read Arabic they are
+    not, and the ASCII-only result is itself evidence of failure rather than of
+    a Latin document - which is why the counts are reported as an observation
+    and never used as the sole basis for claiming a document is in French.
+    """
+    text = "\n".join(item[0] for item in lines_with_meta)
+    arabic = sum(1 for char in text if is_arabic_char(char))
+    latin = sum(1 for char in text if is_latin_letter(char))
+    return {
+        "arabic_letters": arabic,
+        "latin_letters": latin,
+        "arabic_dominant": arabic > latin,
+        "measured_on": "extracted_text",
+    }
+
+
+def assess_review_route(
+    *,
+    engine_name: str,
+    lines_with_meta: List[Tuple[str, Optional[float], List[List[float]]]],
+    extracted_field_count: int,
+    declared_language: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Decide whether a human should *verify fields* or *transcribe the page*.
+
+    Route is always a human-review route: extraction never authorises posting.
+    The distinction is what the reviewer is asked to do, and it is recorded so
+    that an Arabic-only scan is never reported as a normal extraction with no
+    fields, which reads like a parsing bug rather than an unsupported script.
+    """
+    profile = script_profile(lines_with_meta)
+    native_text = engine_name == "pdfplumber"
+    declared_arabic = (declared_language or "").strip().lower().startswith("ar")
+
+    if native_text and profile["arabic_dominant"]:
+        route, reason = ROUTE_STANDARD_REVIEW, REASON_NATIVE_ARABIC_SUPPORTED
+        detail = (
+            "The text layer is Arabic and was read natively, so the fields are as "
+            "trustworthy as for any other language; review them normally."
+        )
+    elif not native_text and declared_arabic:
+        route, reason = ROUTE_MANUAL_TRANSCRIPTION, REASON_DECLARED_ARABIC
+        detail = (
+            "The document was declared Arabic and was recognised from an image. The "
+            f"bundled {RECOGNITION_HEAD} head cannot read Arabic script (no {ARABIC_RECOGNITION_HEAD} "
+            "model is provisioned), so no field value from this document is evidence of "
+            "what the invoice says."
+        )
+    elif not native_text and profile["arabic_dominant"]:
+        route, reason = ROUTE_MANUAL_TRANSCRIPTION, REASON_DECLARED_ARABIC
+        detail = (
+            "Arabic script dominates the recognised text and it came from the image "
+            f"engine, whose {RECOGNITION_HEAD} head cannot read Arabic (no "
+            f"{ARABIC_RECOGNITION_HEAD} model is provisioned). Treat every extracted "
+            "value as unreliable."
+        )
+    elif extracted_field_count == 0:
+        route, reason = ROUTE_MANUAL_TRANSCRIPTION, REASON_NO_FIELDS
+        detail = (
+            "No invoice field could be recognised. This is the expected result for an "
+            "Arabic-only scan, and also for a poor scan of any language; transcribe the "
+            "document manually rather than re-running extraction."
+        )
+    else:
+        route, reason = ROUTE_STANDARD_REVIEW, REASON_FIELDS_EXTRACTED
+        detail = "Fields were extracted and must be verified by a human before validation."
+
+    return {
+        "route": route,
+        "reason": reason,
+        "detail": detail,
+        "requires_human_review": True,
+        # Manual transcription is the stronger requirement: the reviewer starts
+        # from an empty form, not from extracted values.
+        "requires_manual_transcription": route == ROUTE_MANUAL_TRANSCRIPTION,
+        "script": profile,
+        "recognition_head": RECOGNITION_HEAD if not native_text else "pdfplumber-native-text",
+        "arabic_recognition_available": ARABIC_RECOGNITION_HEAD_AVAILABLE,
+        "arabic_recognition_head": ARABIC_RECOGNITION_HEAD,
+        "declared_language": declared_language,
+    }
+
+
 CONVERGENCE_PASSES = 3
 
 VAULT_KEY_SUFFIX = ".vault.key"
@@ -853,23 +1027,59 @@ def detect_prompt_injection(text: str) -> List[str]:
     return hits
 
 
+def _confidence_payload(value: Optional[float], kind: str) -> Dict[str, Any]:
+    """Every confidence field carries its provenance alongside its value.
+
+    Returning a bare float gives a reader no way to tell a measured engine score
+    from a fabricated constant - which is exactly how an unsupported number ends
+    up in a report or an auto-accept rule.
+    """
+    return {
+        "confidence": None if value is None else round(float(value), 4),
+        "confidence_kind": kind,
+        "confidence_scope": (
+            CONFIDENCE_SCOPE_UNAVAILABLE if kind == CONFIDENCE_NOT_MEASURED else CONFIDENCE_SCOPE_LINE
+        ),
+        # Deliberately constant False: nothing in this codebase has measured
+        # field-level calibration, so no caller may infer it from a value.
+        "confidence_calibrated": False,
+        "confidence_baseline": CONFIDENCE_BASELINE[kind],
+    }
+
+
 def parse_structured_invoice_text(
-    lines_with_meta: List[Tuple[str, float, List[List[float]]]],
+    lines_with_meta: List[Tuple[str, Optional[float], List[List[float]]]],
+    *,
+    confidence_kind: str = CONFIDENCE_ENGINE_LINE,
 ) -> Dict[str, Any]:
-    """Extract structured Algerian invoice fields and line items from OCR/PDF lines."""
+    """Extract structured Algerian invoice fields and line items from OCR/PDF lines.
+
+    ``confidence_kind`` states where the per-line score came from: a recogniser
+    score (``engine_line``) or nothing at all (``not_measured``). It is a required
+    decision by the caller rather than a guessed default inside the parser, so a
+    new extraction path cannot silently inherit the wrong meaning.
+    """
+    if confidence_kind not in (CONFIDENCE_ENGINE_LINE, CONFIDENCE_NOT_MEASURED):
+        raise ValueError(f"Unknown confidence kind {confidence_kind!r}")
     full_text = "\n".join(item[0] for item in lines_with_meta)
     injection_warnings = detect_prompt_injection(full_text)
 
     fields: Dict[str, Dict[str, Any]] = {}
     parsed_lines: List[Dict[str, Any]] = []
 
-    def _record_field(name: str, raw: str, norm: str, conf: float, bbox: List[List[float]]) -> None:
+    def _record_field(
+        name: str, raw: str, norm: str, conf: Optional[float], bbox: List[List[float]]
+    ) -> None:
         if name not in fields:
             fields[name] = {
                 "raw_text": raw,
                 "normalized_value": norm,
-                "confidence": round(float(conf), 4),
                 "bbox": bbox,
+                # No human decision exists at extraction time, and the workflow
+                # requires review regardless of any score, so this is factual
+                # rather than a policy that could drift.
+                "requires_human_review": True,
+                **_confidence_payload(conf, confidence_kind),
             }
 
     for text_line, conf, bbox in lines_with_meta:
@@ -985,8 +1195,9 @@ def parse_structured_invoice_text(
                     "unit_price_dzd": m_line.group(4),
                     "tax_rate": m_line.group(5),
                     "line_ht_dzd": format_dzd(m_line.group(6)),
-                    "confidence": round(float(conf), 4),
                     "bbox": bbox,
+                    "requires_human_review": True,
+                    **_confidence_payload(conf, confidence_kind),
                 }
             )
 
@@ -997,12 +1208,25 @@ def parse_structured_invoice_text(
     }
 
 
-def extract_document_ocr(content: bytes, mime_type: str, force_image_ocr: bool = False) -> Dict[str, Any]:
-    """Run PDF native text extraction or RapidOCR PP-OCRv4 neural network inference."""
+def extract_document_ocr(
+    content: bytes,
+    mime_type: str,
+    force_image_ocr: bool = False,
+    declared_language: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run PDF native text extraction or RapidOCR PP-OCRv4 neural network inference.
+
+    ``declared_language`` is the supplier's known document language (``"ar"`` for an
+    Arabic-only issuer). It is used only for review routing: when a document is
+    declared Arabic and must be recognised from an image, the result is routed to
+    manual transcription because the bundled head cannot read Arabic script.
+    """
     t0 = time.perf_counter()
-    lines_with_meta: List[Tuple[str, float, List[List[float]]]] = []
+    lines_with_meta: List[Tuple[str, Optional[float], List[List[float]]]] = []
     engine_name = "rapidocr-onnxruntime"
     model_version = "rapidocr-1.4.4-ppocrv4"
+    # Until a path proves otherwise, no confidence has been measured.
+    confidence_kind = CONFIDENCE_NOT_MEASURED
 
     if mime_type == "application/pdf" and not force_image_ocr:
         with pdfplumber.open(io.BytesIO(content)) as pdf:
@@ -1014,7 +1238,10 @@ def extract_document_ocr(content: bytes, mime_type: str, force_image_ocr: bool =
                     for line_idx, raw_line in enumerate(txt.splitlines()):
                         if raw_line.strip():
                             bbox = [[0.0, float(line_idx * 15)], [500.0, float(line_idx * 15)], [500.0, float((line_idx + 1) * 15)], [0.0, float((line_idx + 1) * 15)]]
-                            lines_with_meta.append((raw_line.strip(), 0.995, bbox))
+                            # Native extraction returns characters, not a
+                            # recognition decision, so there is no confidence to
+                            # report. This used to be a constant 0.995.
+                            lines_with_meta.append((raw_line.strip(), None, bbox))
 
     if not lines_with_meta:
         ocr = get_rapid_ocr()
@@ -1030,15 +1257,36 @@ def extract_document_ocr(content: bytes, mime_type: str, force_image_ocr: bool =
                 for box, text, score in res:
                     bbox_coords = [[float(pt[0]), float(pt[1])] for pt in box]
                     lines_with_meta.append((str(text), float(score), bbox_coords))
+                    confidence_kind = CONFIDENCE_ENGINE_LINE
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
-    parsed = parse_structured_invoice_text(lines_with_meta)
+    parsed = parse_structured_invoice_text(lines_with_meta, confidence_kind=confidence_kind)
+    review_route = assess_review_route(
+        engine_name=engine_name,
+        lines_with_meta=lines_with_meta,
+        extracted_field_count=len(parsed["fields"]),
+        declared_language=declared_language,
+    )
     return {
         "engine_name": engine_name,
         "model_version": model_version,
+        "confidence_kind": confidence_kind,
         "latency_ms": round(latency_ms, 2),
+        "review_route": review_route,
+        "requires_manual_transcription": review_route["requires_manual_transcription"],
         "raw_lines": [
-            {"text": txt, "confidence": round(conf, 4), "bbox": bbox}
+            {
+                "text": txt,
+                "confidence": None if conf is None else round(conf, 4),
+                "confidence_kind": confidence_kind,
+                "confidence_scope": (
+                    CONFIDENCE_SCOPE_UNAVAILABLE
+                    if confidence_kind == CONFIDENCE_NOT_MEASURED
+                    else CONFIDENCE_SCOPE_LINE
+                ),
+                "confidence_calibrated": False,
+                "bbox": bbox,
+            }
             for txt, conf, bbox in lines_with_meta
         ],
         "fields": parsed["fields"],
@@ -1057,8 +1305,13 @@ def upload_and_process_supplier_document(
     content: bytes,
     branch_id: Optional[int] = None,
     force_image_ocr: bool = False,
+    declared_language: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Ingest a supplier invoice document through Uploaded -> SecurityChecked -> Processing -> Extracted."""
+    """Ingest a supplier invoice document through Uploaded -> SecurityChecked -> Processing -> Extracted.
+
+    ``declared_language`` is recorded and used for review routing; it never changes
+    what is extracted or any amount read from the document.
+    """
     file_sha256 = hashlib.sha256(content).hexdigest()
     doc_id = str(uuid.uuid4())
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1174,7 +1427,10 @@ def upload_and_process_supplier_document(
         )
 
     # Execute OCR outside the DB lock, then persist extracted fields atomically
-    ocr_result = extract_document_ocr(content, mime_type, force_image_ocr=force_image_ocr)
+    ocr_result = extract_document_ocr(
+        content, mime_type, force_image_ocr=force_image_ocr, declared_language=declared_language
+    )
+    routing = ocr_result["review_route"]
 
     with db.transaction() as conn:
         for fname, fmeta in ocr_result["fields"].items():
@@ -1182,8 +1438,9 @@ def upload_and_process_supplier_document(
                 """
                 INSERT INTO ocr_extracted_fields (
                     company_id, document_id, page_number, line_index, field_name,
-                    raw_text, normalized_value, confidence, bbox_json, ocr_model_version, created_at
-                ) VALUES (?, ?, 1, NULL, ?, ?, ?, ?, ?, ?, ?)
+                    raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
+                    confidence_calibrated, bbox_json, ocr_model_version, created_at
+                ) VALUES (?, ?, 1, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     company_id,
@@ -1191,7 +1448,12 @@ def upload_and_process_supplier_document(
                     fname,
                     fmeta["raw_text"],
                     fmeta["normalized_value"],
+                    # Stored as NULL when nothing was measured: the column means
+                    # "the confidence that was measured", not "a number".
                     fmeta["confidence"],
+                    fmeta["confidence_kind"],
+                    fmeta["confidence_scope"],
+                    1 if fmeta["confidence_calibrated"] else 0,
                     json.dumps(fmeta["bbox"]),
                     ocr_result["model_version"],
                     now_iso,
@@ -1203,8 +1465,9 @@ def upload_and_process_supplier_document(
                 """
                 INSERT INTO ocr_extracted_fields (
                     company_id, document_id, page_number, line_index, field_name,
-                    raw_text, normalized_value, confidence, bbox_json, ocr_model_version, created_at
-                ) VALUES (?, ?, 1, ?, 'line_item_json', ?, ?, ?, ?, ?, ?)
+                    raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
+                    confidence_calibrated, bbox_json, ocr_model_version, created_at
+                ) VALUES (?, ?, 1, ?, 'line_item_json', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     company_id,
@@ -1213,6 +1476,9 @@ def upload_and_process_supplier_document(
                     json.dumps(litem, ensure_ascii=False),
                     json.dumps(litem, ensure_ascii=False),
                     litem["confidence"],
+                    litem["confidence_kind"],
+                    litem["confidence_scope"],
+                    1 if litem["confidence_calibrated"] else 0,
                     json.dumps(litem["bbox"]),
                     ocr_result["model_version"],
                     now_iso,
@@ -1223,10 +1489,23 @@ def upload_and_process_supplier_document(
         conn.execute(
             """
             UPDATE source_documents
-            SET workflow_state = ?, ocr_engine = ?, ocr_model_version = ?, ocr_latency_ms = ?
+            SET workflow_state = ?, ocr_engine = ?, ocr_model_version = ?, ocr_latency_ms = ?,
+                extraction_route = ?, route_reason = ?, declared_language = ?,
+                script_arabic_letters = ?, script_latin_letters = ?
             WHERE id = ?
             """,
-            (next_state, ocr_result["engine_name"], ocr_result["model_version"], ocr_result["latency_ms"], doc_id),
+            (
+                next_state,
+                ocr_result["engine_name"],
+                ocr_result["model_version"],
+                ocr_result["latency_ms"],
+                routing["route"],
+                routing["reason"],
+                routing["declared_language"],
+                routing["script"]["arabic_letters"],
+                routing["script"]["latin_letters"],
+                doc_id,
+            ),
         )
         db.append_audit_event(
             conn=conn,
@@ -1241,6 +1520,13 @@ def upload_and_process_supplier_document(
                 "ocr_model_version": ocr_result["model_version"],
                 "extracted_field_count": len(ocr_result["fields"]),
                 "extracted_line_count": len(ocr_result["lines"]),
+                "confidence_kind": ocr_result["confidence_kind"],
+                "confidence_calibrated": False,
+                "extraction_route": routing["route"],
+                "route_reason": routing["reason"],
+                "requires_manual_transcription": routing["requires_manual_transcription"],
+                "arabic_letters": routing["script"]["arabic_letters"],
+                "arabic_recognition_available": routing["arabic_recognition_available"],
                 "prompt_injection_warnings": ocr_result["prompt_injection_warnings"],
             },
         )
@@ -1254,6 +1540,10 @@ def upload_and_process_supplier_document(
         "latency_ms": ocr_result["latency_ms"],
         "fields": ocr_result["fields"],
         "lines": ocr_result["lines"],
+        "review_route": routing,
+        "extraction_route": routing["route"],
+        "route_reason": routing["reason"],
+        "requires_manual_transcription": routing["requires_manual_transcription"],
         "prompt_injection_warnings": ocr_result["prompt_injection_warnings"],
     }
 

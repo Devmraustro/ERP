@@ -30,8 +30,12 @@ kept separate as required:
 * **Backup/restore:** archives now carry every key version (inside the encrypted archive) plus a
   material-free version summary, and a restore of mixed-version data is verified end to end.
 
-Local suite: **418 passed**, 88 % coverage. Staging acceptance: **33/33 checks**. CI on the final
-code commit (`1be15250af…`, run `39931381080`): **success on Python 3.11, Python 3.12 and Windows**.
+Local suite: **531 passed**, 89 % coverage (4162 statements, 452 missed). Staging acceptance:
+**37/37 checks**. The earlier figures in this report (418 tests, 33/33) describe the run cited in
+§"Verification commands"; the suite has grown by 107 tests since — O2 confidence provenance,
+B2 dependency-artefact integrity, S4/D6 ledger checkpoints and monitoring, and O3 Arabic review
+routing. CI results for the current commit are reported where they are available rather than
+assumed; see `docs/QA_TEST_MATRIX_AND_RESULTS.md`.
 
 This round added three things the first delivery lacked: a tamper-evident record of the rotation
 operations themselves (§11.2), enforced key custody at read time rather than a documented
@@ -229,7 +233,8 @@ refusal → audit verification → **vault rotation** → **audit rotation** →
 **interrupted rotation + resume** → backup → **isolated restore** → **fresh OS process reads the
 restored data** → no key material in logs/journals.
 
-*Result:* **33/33 checks passed** (`exit 0`). No production host, credential, or customer data was
+*Result:* **33/33 checks passed** (`exit 0`) at the time of that run; the tool now runs
+37/37 checks after four ledger-checkpoint steps were added. No production host, credential, or customer data was
 involved. This is **not** a production-equivalent environment.
 
 ### Phase 9 — Documentation and PR accuracy — **UPDATED**
@@ -291,8 +296,8 @@ Run in `/home/user/ERP` with `/home/user/venv/bin/python` (CPython 3.11.2):
 | 2 | `python -m pip check` | 1 (expected) | `rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.` — documented, allow-listed, not concealed |
 | 3 | `python -m ruff check dz_erp tests tools` | 0 | All checks passed |
 | 4 | `python -m compileall -q dz_erp tests tools` | 0 | No syntax errors |
-| 5 | `python -m pytest --cov=dz_erp --cov-report=term -q` | 0 | **418 passed** (65.04 s without coverage, 84.89 s with); total coverage **88 %** (3948 statements, 457 missed) — the denominator grew with the new modules, which is why the percentage is lower despite 59 more tests |
-| 6 | `python tools/staging_acceptance.py` | 0 | **33/33 checks passed** (isolated, synthetic) |
+| 5 | `python -m pytest --cov=dz_erp --cov-report=term -q` | 0 | **531 passed** (94.03 s without coverage, 109.57 s with); total coverage **89 %** (4162 statements, 452 missed) |
+| 6 | `python tools/staging_acceptance.py` | 0 | **37/37 checks passed** (isolated, synthetic), including the four ledger-checkpoint checks |
 | 7 | CI run `39931381080` on `1be15250af…` | 0 | success — Python 3.11 (1 m 20 s), Python 3.12 (8 m 56 s), **Windows** key rotation/backup suite (13 m 52 s) |
 
 Coverage of the touched modules: `key_rotation.py` 86 %, `database.py` 93 %, `intake_ocr.py` 92 %,

@@ -50,6 +50,18 @@ Uploaded
 3. **Non-Destructive Human Review (`update_extracted_field_by_human`):**
    - When a human reviewer edits an extracted value, the update writes to `human_override_value`, `edited_by_id`, and `edited_at`.
    - SQLite trigger `trg_ocr_field_preserve_raw` blocks any SQL `UPDATE` that attempts to alter `raw_text`, `confidence`, or `ocr_model_version` (`OCR_RAW_IMMUTABILITY_VIOLATION`).
-4. **Prompt-Injection Defense:**
+4. **Script Coverage & Review Routing (`assess_review_route`):**
+   - The bundled recognition head is `PP-OCRv4` trained on Latin and Chinese text, so Arabic
+     script cannot be recognised from an image — a model gap, stated in code as
+     `ARABIC_RECOGNITION_HEAD_AVAILABLE = False`.
+   - Each document is therefore routed explicitly. `standard_review` (verify the extracted
+     fields) for native text, including native Arabic, and for a successful Latin recognition;
+     `manual_transcription` (start from an empty form) when an image-recognised document is
+     Arabic-dominant, declared Arabic via the `declared_language` upload field, or yielded no
+     recognisable field at all.
+   - `source_documents` records `extraction_route`, `route_reason`, `declared_language` and the
+     Arabic/Latin letter counts; the same facts are in the `OCR_EXTRACTION_COMPLETED` audit
+     event and in the upload response. Review remains mandatory on every route.
+5. **Prompt-Injection Defense:**
    - All OCR text is scanned against adversarial patterns (`IGNORE PREVIOUS INSTRUCTIONS`, `SYSTEM PROMPT`, `APPROVE THIS INVOICE`, `<script`, `DROP TABLE`, etc.).
    - Matches are logged as `PROMPT_INJECTION_DETECTED:*` warnings and treated strictly as inert data strings; no extracted text is ever interpolated into executable SQL, shell commands, or autonomous tool-calling agents.

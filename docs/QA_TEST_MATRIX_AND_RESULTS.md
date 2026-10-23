@@ -38,12 +38,19 @@ python -m ruff check dz_erp tests tools      # static check
 
 ### 1.2 Current results
 
-- **Total Collected Tests:** `218`
-- **Passed:** `218` (`100%`)
+- **Total Collected Tests:** `531`
+- **Passed:** `531` (`100%`)
 - **Failed / Skipped / Errors:** `0`
-- **Total Execution Duration:** `36.76s`
+- **Total Execution Duration:** `94.03s` (`109.57s` with coverage)
 - **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
-- **Overall Code Coverage (`dz_erp`):** **`93%`** (`2,080 / 2,236` statements covered; `100%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `database.py` and `odoo_test_adapter.py`, `95%` on `upload.py`, `93%` on `localization.py`, `90%` on `intake_ocr.py` and `procurement_stock.py`, `89%` on `api.py` and `security_audit.py`, `80%` on `decimal_utils.py`).
+- **Overall Code Coverage (`dz_erp`):** **`89%`** (`3,710 / 4,162` statements covered; `100%` on `__init__.py` and `serve.py`, `98%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `upload.py` and `odoo_test_adapter.py`, `94%` on `database.py` and `intake_ocr.py`, `93%` on `localization.py` and `rotation_audit.py`, `87%` on `key_provider.py`, `86%` on `key_rotation.py`, `85%` on `rotate_keys.py`, `83%` on `api.py`, `82%` on `procurement_stock.py`, `80%` on `decimal_utils.py`, `70%` on `security_audit.py`).
+- **Staging acceptance:** `37/37` checks (`python tools/staging_acceptance.py`).
+- **Static check:** `ruff check dz_erp tests tools` → `All checks passed!`
+- **Risk-register consistency:** `python tools/risk_register_counts.py` → `risk register summary is consistent (31 rows)`.
+
+The earlier `218`-test figure above described the Phase 8 state; the suite has since grown to
+`531`, and the coverage denominator with it. Sections below that cite older counts are retained
+as history and are dated by the commit or run they name.
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 
@@ -345,3 +352,70 @@ surfaced and fixed one genuine latent defect that the passing test suite had
 been hiding: `test_tenant_isolation_enforced_across_all_protected_endpoints`
 referenced a `doc_id` that was never bound in its own scope and only resolved
 through test-order pollution.
+
+---
+
+## 2B. Later phases — provenance, integrity, checkpoints, routing, document consistency
+
+These suites were added after the phases above. Each one exists because a claim in the
+documentation could previously not be checked by running anything.
+
+| Suite | Tests | What it pins |
+| :--- | ---: | :--- |
+| `tests/test_phase18_ocr_confidence_provenance.py` | 17 | The removed `0.995` constant; `confidence: null` + `not_measured` for native text; `engine_line` scope for engine scores; `confidence_calibrated` hard-coded `False`; the `IS NOT` trigger comparison; legacy-row relabelling. Reinstating the constant fails exactly two tests. |
+| `tests/test_phase19_dependency_integrity.py` | 15 | Hash lockfile ↔ version lockfile agreement; `--require-hashes` install step in both CI jobs; the validator rejecting wrong version, missing package, unsatisfied specifier, unparseable requirement and non-allow-listed substitution; per-line trailing backslash so pip enforces **every** digest, not just the first. |
+| `tests/test_phase20_checkpoints_and_monitoring.py` | 52 | `validate_checkpoint` rejecting empty / partial / wrong-format / wrong-schema / negative / malformed-hash documents that previously reported `valid: true`; truncation and rewritten-head detection; export refused from an unverifiable ledger or into the ledger's own directory; monitor exit codes `0/2/3`; read-only behaviour (no key material written, none printed); `ops/` units parsed with real systemd continuation semantics. |
+| `tests/test_phase21_arabic_review_routing.py` | 19 | `ARABIC_RECOGNITION_HEAD_AVAILABLE = False`; native Arabic keeps `standard_review`; declared or dominant Arabic scans route to `manual_transcription`; a scan yielding nothing is not reported as a parsing success; route/reason persisted on `source_documents` and in the audit event; API `declared_language` round trip; schema rejects an out-of-vocabulary route; migration is idempotent and leaves old rows `NULL`. |
+| `tests/test_phase22_register_and_docs_consistency.py` | 10 | The risk-register summary equals the derived counts; identifiers unique; every cited file resolves; runbook names existing units and flags; exit-code table matches the CLI; the mechanisms behind the mitigated rows still exist in code. |
+
+### 2B.1 Two defects these tests caught in their own implementation
+
+Both are worth recording because in each case the code *looked* right:
+
+1. **The hash lockfile enforced one digest per package.** `pip` treats a `--hash` line without a
+   trailing backslash as the end of the requirement, so ~1250 lines were discarded as "has
+   `--hash` but no requirement" and a second artefact for `cffi` failed the install. Fixed by
+   joining the digest lines with a trailing backslash and a newline; a structural test now
+   asserts every continuation line ends in a backslash and that pip's own parser reports
+   **zero** warnings.
+2. **Monitoring regenerated a lost ledger key and then blamed the operator.** `RotationLedger.open`
+   defaults to `create=True`, so a monitor run with the keyring missing generated a fresh key and
+   reported `RECORD_TAMPERED` — a false accusation of deliberate modification, plus key material
+   written during a read-only report. Fixed with `create=False` on every read-only path and a
+   distinct `LEDGER_KEY_UNAVAILABLE` reason. A monitor that "repairs" what it measures is worse
+   than one that fails.
+
+A third, smaller one: the checkpointer's own unit files were parsed by a naive test helper that
+ignored systemd's backslash continuation rule, which made a valid unit look broken. The helper now
+joins continuations the way systemd does, and a test asserts that behaviour directly.
+
+3. **The same bug existed a second time, in the vault path.** Read-only monitoring did not only
+   recreate a missing *ledger* key; it also constructed `PrivateDocumentVault`, which mints a key on
+   first use. Pointing `monitor --vault` at a mistyped path therefore created a directory tree, a
+   fresh `vault.vault.key`, and a healthy-looking v1 deployment — and pointing it at a real but
+   unconfigured directory did the same. `_require_existing_vault` now refuses unless a key, a version
+   registry or `ERP_VAULT_KEY` exists, and reports `VAULT_NOT_CONFIGURED` with exit `3`. The general
+   lesson recorded here: a read-only command must be proved read-only by *asserting the absence of
+   side effects*, not by reading its own docstring - which is what
+   `test_monitor_does_not_initialise_a_missing_deployment` does.
+
+### 2B.2 Mutation check (each protection removed, the matching test expected to fail)
+
+Performed on a scratch copy, restoring each file byte-for-byte afterwards (verified with `cmp`):
+
+| Mutation | Test outcome |
+| :--- | :--- |
+| `_verify_ledger_without_creating_keys` → `create=True` | 3 failed — missing-key refusal, no-replacement-key, key-loss-not-tampering |
+| `LEDGER_KEY_UNAVAILABLE` → `RECORD_TAMPERED` for a lost key | 2 failed |
+| Tail-truncation comparison disabled | 3 failed — phase 20 truncation, CLI truncation, phase 14 truncation |
+| `validate_checkpoint` made a no-op | 13 failed — every malformed-document case |
+| Off-host checkpoint refusal disabled | 2 unit failures **and staging acceptance exit 1 (36/37)** |
+| Unknown directive added to a unit file | `test_units_pass_systemd_analyze_verify` failed |
+| Declared-Arabic scan routed to `standard_review` | 5 failed, including the API round trip |
+| `ARABIC_RECOGNITION_HEAD_AVAILABLE` flipped to `True` | 4 failed |
+| Monitor re-initialises a missing deployment | 3 failed |
+
+One mutation initially **passed when it should have failed**: the systemd test filtered out
+`Unknown key` lines, which is precisely the defect a typo'd directive produces. The assertion was
+corrected to treat those lines as failures, and re-running the mutation then failed as required.
+That is a test defect, not an application defect, and it is recorded rather than quietly fixed.

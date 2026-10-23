@@ -64,11 +64,11 @@ Everything below is reproducible in this repository with the pinned environment.
 
 | Evidence | Command / file | Latest result |
 |---|---|---|
-| Full test suite | `python -m pytest -q` | **418 passed** |
+| Full test suite | `python -m pytest -q` | **531 passed** |
 | Coverage | `python -m pytest --cov=dz_erp --cov-report=term` | **88 %** (3 948 statements, 457 missed) |
 | Static checks | `python -m ruff check dz_erp tests tools` | clean |
 | Byte-compilation | `python -m compileall -q dz_erp tests tools` | clean |
-| Staging acceptance | `python tools/staging_acceptance.py` | **33/33 checks** |
+| Staging acceptance | `python tools/staging_acceptance.py` | **37/37 checks** |
 | Dependency graph | `python tools/verify_dependency_graph.py` | 52 distributions match; one documented substitution |
 | Rotation load/recovery drill | `python tools/rotation_scale_drill.py --documents 1000 --events 10000` | all thresholds pass (`docs/KEY_ROTATION_SCALE_AND_DRILL_RESULTS.md`) |
 | Key custody telemetry | `python -m dz_erp.rotate_keys monitor` | JSON with `healthy`, custody verdicts, unfinished operations |
@@ -103,9 +103,10 @@ Three disclosures, because discovering them later destroys more trust than stati
    `docs/KEY_CUSTODY_THREAT_MODEL.md`.
 2. **The audit trail is tamper-evident, not tamper-proof.** It detects modification, deletion,
    reordering and insertion, and rotation history is separately chained with off-host
-   checkpoints. An attacker holding the key and the files can rewrite history; tail truncation
-   is only caught by a checkpoint. Both limits are asserted in tests rather than described as
-   solved.
+   checkpoints that are exported, verified and freshness-checked by the `monitor` command
+   (`docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md`). An attacker holding the key and the files can
+   rewrite history; tail truncation is only caught by a checkpoint the attacker does not
+   control. Both limits are asserted in tests rather than described as solved.
 3. **The G50 output is a preparation workbook.** It is labelled as such in code, it is not a
    filing, and it must be reviewed by a licensed *Expert-Comptable* before any DGI submission.
 
@@ -142,7 +143,7 @@ python -m ruff check dz_erp tests tools
 python -m pytest -q
 
 # 3. End-to-end behaviour on synthetic data
-python tools/staging_acceptance.py            # 33/33
+python tools/staging_acceptance.py            # 37/37
 
 # 4. Rotation and recovery, with a forced crash
 python tools/rotation_scale_drill.py --documents 300 --events 3000

@@ -152,8 +152,19 @@ file access can rewrite history. Tail truncation is invisible to the chain alone
 off-host checkpoint catches it. Both limits are documented in the module and asserted in
 tests rather than glossed over.
 
-*Compensating control:* export checkpoints off-host on a schedule; monitor
-`LEDGER_UNREADABLE` / `CHECKPOINT_MISMATCH`.
+*Compensating control:* export checkpoints off-host on a schedule (`ops/` ships systemd
+units; the procedure, retention and response steps are in
+`docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md`) and verify daily with
+`monitor --checkpoint-verify --max-checkpoint-age-days`. Alerts fire on
+`LEDGER_UNREADABLE`, `CHECKPOINT_MISMATCH`, `CHECKPOINT_TRUNCATED`, `LEDGER_KEY_UNAVAILABLE`
+and a stale checkpoint; all of them exit `3`.
+
+The code now enforces the parts of this control that can be enforced locally: a checkpoint
+is refused if the ledger cannot be verified, refused if the destination is inside the
+ledger's own directory or the vault, and rejected on read if it is empty, truncated,
+wrong-format, wrong-schema or carries a malformed head hash. Previously those documents
+were treated as "nothing to compare" and the verification reported success. Scheduling and
+the physical separation of the off-host store remain operational, not code, controls.
 
 ### R8 — Windows mode bits are not access control (Medium, Windows only)
 
@@ -208,7 +219,10 @@ record.
    and on mode/owner change. This is the only detection for R1.
 3. Protected storage for the **backup** archive key, held separately from the backups.
 4. Off-host retention of `monitor` output and ledger checkpoints (`--checkpoint-export`),
-   with alerts on `healthy: false`.
+   with alerts on `healthy: false`. Scheduled export and daily verification units are
+   provided in `ops/`; the operator must confirm that `CHECKPOINT_DIR` is genuinely
+   off-host, because the code can only reject paths inside the ledger directory and the
+   vault. Procedure: `docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md`.
 5. Documented, reviewed rotation schedule, and a restore rehearsal before every key
    retirement.
 6. Volume encryption at rest, so a stolen disk yields ciphertext (A6).

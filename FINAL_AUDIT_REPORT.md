@@ -30,13 +30,19 @@ kept separate as required:
 * **Backup/restore:** archives now carry every key version (inside the encrypted archive) plus a
   material-free version summary, and a restore of mixed-version data is verified end to end.
 
-Local suite: **359 passed**, 89 % coverage. Staging acceptance: **33/33 checks**. CI on the final
-code commit: **success on Python 3.11 and 3.12**.
+Local suite: **418 passed**, 88 % coverage. Staging acceptance: **33/33 checks**. CI on the final
+code commit (`1be15250af…`, run `39931381080`): **success on Python 3.11, Python 3.12 and Windows**.
 
-Nothing here is a legal or accounting approval. Six categories of blocker remain (§7), all
-documented: hardware-backed key custody, key-rotation operationalisation, qualified Algerian
-accounting/tax review, Law 18-07/ANPDP formalities, the documented dependency deviation, and the
-absence of a real-scale operational drill.
+This round added three things the first delivery lacked: a tamper-evident record of the rotation
+operations themselves (§11.2), enforced key custody at read time rather than a documented
+convention (§11.3), and a reproducible load/interruption drill that immediately found a
+rotation-convergence defect which unit tests had missed (§11.4).
+
+Nothing here is a legal or accounting approval. Five categories of blocker remain (§7), all
+documented: key custody that is file-based and exportable, rotation that is operator-invoked with
+no scheduler, qualified Algerian accounting/tax review, Law 18-07/ANPDP formalities, and the
+absence of a drill on production-scale data. The dependency deviation remains documented and
+low-risk, and the audit-completeness gap is closed by the rotation ledger.
 
 ---
 
@@ -46,18 +52,18 @@ absence of a real-scale operational drill.
 |---|---|---|
 | Branch | `arena/6c474c64-erp` | `git branch --show-current` |
 | Initial HEAD | `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` | `git rev-parse HEAD`; remote branch commit |
-| Final code HEAD | `d823b83f79f1c0e2195768ab635f684a24b52479` | `git log --oneline -1` |
+| Final code HEAD | `1be15250af822a62db8e62a3fc1d95e7b212d755` (this report's last edit is documentation-only) | `git log --oneline -1` |
 | Working tree | Clean at commit time | `git status --short` |
 | Remote | `origin/arena/6c474c64-erp` pushed and tracking | `git push -u`, `git log origin/...` |
 | PR #1 | **OPEN, untouched, not merged** | `gh pr list` |
 | PR #2 | **OPEN, untouched, not merged**; head still `arena/5c240e1d-erp` @ `becf52b` | `gh pr view 2` |
 | CI for initial HEAD | Run `39870180714` — success (3.11, 3.12) | `gh pr checks 2` |
-| CI for final code HEAD | Run [`39873531618`](https://github.com/Devmraustro/ERP/actions/runs/39873531618) — **success** (3.11: 1 m 51 s; 3.12: 6 m 37 s) | `gh run watch … --exit-status`; `gh api …/actions/runs/39873531618/jobs` |
+| CI for final code HEAD | Run [`39931381080`](https://github.com/Devmraustro/ERP/actions/runs/39931381080) — **success** on 3.11 (1 m 20 s), 3.12 (8 m 56 s) and **Windows** (13 m 52 s) | `gh run watch … --exit-status`; `gh api …/actions/runs/39931381080/jobs` |
 | Deployments | None performed | — |
 
 **Important scoping fact:** this work lives on the session branch `arena/6c474c64-erp`, **not** on
 PR #2's branch. PR #1 and PR #2 were neither merged, modified nor rebased. This report is committed
-on top of `d823b83` and changes no code.
+on top of `1be1525` and changes no code.
 
 ### 2.1 Phase 0 reconciliation — the checkout did not match the prompt
 
@@ -285,25 +291,33 @@ Run in `/home/user/ERP` with `/home/user/venv/bin/python` (CPython 3.11.2):
 | 2 | `python -m pip check` | 1 (expected) | `rapidocr-onnxruntime 1.4.4 requires opencv-python, which is not installed.` — documented, allow-listed, not concealed |
 | 3 | `python -m ruff check dz_erp tests tools` | 0 | All checks passed |
 | 4 | `python -m compileall -q dz_erp tests tools` | 0 | No syntax errors |
-| 5 | `python -m pytest --cov=dz_erp --cov-report=term -q` | 0 | **359 passed, 1 warning in 74.47 s**; total coverage **89 %** (3439 statements, 395 missed) |
+| 5 | `python -m pytest --cov=dz_erp --cov-report=term -q` | 0 | **418 passed** (65.04 s without coverage, 84.89 s with); total coverage **88 %** (3948 statements, 457 missed) — the denominator grew with the new modules, which is why the percentage is lower despite 59 more tests |
 | 6 | `python tools/staging_acceptance.py` | 0 | **33/33 checks passed** (isolated, synthetic) |
-| 7 | CI run `39873531618` on `d823b83f79…` | 0 | success — Python 3.11 (1 m 51 s), Python 3.12 (6 m 37 s) |
+| 7 | CI run `39931381080` on `1be15250af…` | 0 | success — Python 3.11 (1 m 20 s), Python 3.12 (8 m 56 s), **Windows** key rotation/backup suite (13 m 52 s) |
 
 Coverage of the touched modules: `key_rotation.py` 86 %, `database.py` 93 %, `intake_ocr.py` 92 %,
-`security_audit.py` 70 %, `serve.py` 100 %.
+`security_audit.py` 70 %, `serve.py` 100 %. New modules: `rotation_audit.py` and
+`key_provider.py` are covered by phases 14–17 (31 tests) — note that the `KmsKeyProvider`
+refusal path and the Windows branches of `FileKeyProvider` are exercised as documented
+limitations, not as working code paths.
 
-**Stability:** the full suite was run twice after the final test fix (359 passed both times). One
-flaky assertion was found and **fixed rather than retried** (`ebd8db6`): it compared the SQLite file
-byte-for-byte across an online backup, which SQLite may legitimately rewrite; it now compares
-ciphertext and checks the source records logically.
+**Stability:** the full suite was run on every commit of this round and on both Linux Python
+versions plus Windows in CI (run `39931381080`). One flaky assertion from the earlier round was
+found and **fixed rather than retried** (`ebd8db6`): it compared the SQLite file byte-for-byte
+across an online backup, which SQLite may legitimately rewrite; it now compares ciphertext and
+checks the source records logically. Two tests in this round were rewritten for the same reason
+rather than loosened: the legacy-key fixture now reproduces the real `0600` mode instead of a
+laxer one that never shipped, and the custody tests assert the control rather than a specific
+`oct()` string.
 
 **Known non-failures:** the single pytest warning is an upstream Starlette `DeprecationWarning`
 about `anyio.abc.BlockingPortal`, unrelated to this change.
 
-**Not executed, and why:** no Windows run this session (the CI matrix and the earlier audit cover
-Windows-specific paths; the platform branches in `key_rotation._fsync_dir` and `rotation_lock` are
-`# pragma: no cover`), no container build (no Dockerfile in the repository), no load/performance
-test, no third-party penetration test, no real-scale backup/restore drill.
+**Not executed, and why:** no container build (no Dockerfile in the repository); no third-party
+penetration test; no drill on production-scale data, real backup media or real scanner output
+(the synthetic drill is in `docs/KEY_ROTATION_SCALE_AND_DRILL_RESULTS.md`, and §5 of that document
+lists what it does not prove). Windows crash-consistency under power loss is not tested — the
+suite runs on `windows-latest`, but a real fsync/power-loss test needs hardware we do not have.
 
 ---
 

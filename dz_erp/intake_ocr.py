@@ -117,6 +117,10 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 # Suffix of the per-vault key file, written beside the vault directory.
 # This file is the *version 1* (legacy) key. It remains the bootstrap key of a
 # vault that has never been rotated.
+# Bounded: with sustained concurrent writes convergence may need a second pass;
+# an unbounded loop would let a busy vault stall a rotation indefinitely.
+CONVERGENCE_PASSES = 3
+
 VAULT_KEY_SUFFIX = ".vault.key"
 
 # Version registry, written beside the vault directory only once a rotation has
@@ -371,6 +375,19 @@ class PrivateDocumentVault:
             # Atomic: a crash mid-write can no longer leave a truncated blob
             # that would fail to decrypt forever with no explanation.
             atomic_write_bytes(dest, blob, mode=0o600)
+            # Close the rotation window. Reading the active version and writing
+            # the ciphertext are not atomic, so a rotation that completes in
+            # between leaves this blob on the *previous* key at a path the
+            # rotation has already scanned past - it would survive as a stray
+            # version forever, and retiring the old key would silently orphan
+            # this document. Re-encrypt if the active key moved under us.
+            current = self._keyring.active_version
+            if current != version:
+                atomic_write_bytes(
+                    dest,
+                    encode_versioned_blob(current, self._fernet_for(current).encrypt(content)),
+                    mode=0o600,
+                )
         return str(dest)
 
     def read_bytes(self, company_id: int, requesting_company_id: int, vault_path: str) -> bytes:
@@ -515,17 +532,63 @@ class PrivateDocumentVault:
                 "errors": [],
             }
 
-            for path in sorted(self.vault_root.rglob("*.enc")):
-                report["attempted"] += 1
-                self._rotate_one(path, target_version, max_retries, journal, report)
+            # Converge rather than assume. One pass over a snapshot of the
+            # directory is not enough: a document written concurrently can land
+            # on the previous version at a path this pass already visited, and
+            # it would then survive at the old version indefinitely. Each pass
+            # re-scans the actual version headers, so the loop ends on observed
+            # convergence, not on the belief that one pass was complete.
+            converged = False
+            visited: set = set()
+            # A document whose ciphertext is damaged - or needs a key version that
+            # is missing - cannot converge by being retried. Retrying it on every
+            # pass would also count one damaged document as three failures and
+            # make the report disagree with the data. It is recorded once and
+            # then left alone; verify_blobs() still reports it.
+            unretryable: set = set()
+            for pass_index in range(1, CONVERGENCE_PASSES + 1):
+                for path in sorted(self.vault_root.rglob("*.enc")):
+                    if path in unretryable:
+                        continue
+                    if path not in visited:
+                        # Count documents, not passes: a stray picked up in a
+                        # later pass is the same document, not a new one.
+                        visited.add(path)
+                        report["attempted"] += 1
+                    failures_before = report["failed"]
+                    self._rotate_one(path, target_version, max_retries, journal, report)
+                    if report["failed"] > failures_before:
+                        unretryable.add(path)
+                strays = {
+                    version: count
+                    for version, count in self.scan_blob_versions().items()
+                    if version != target_version
+                }
+                report["convergence_passes"] = pass_index
+                report["stray_versions"] = {str(k): v for k, v in strays.items()}
+                if not strays:
+                    converged = True
+                    break
+                journal.record(
+                    event="rotation_convergence_pass",
+                    pass_index=pass_index,
+                    target_version=target_version,
+                    strays={str(k): v for k, v in strays.items()},
+                )
+            report["converged"] = converged
 
             verification = self.verify_blobs()
             report["verification"] = verification
             report["verified_ok"] = verification["failed"] == 0
             # A rotation is only reported as successful when the data it moved
-            # still decrypts. Anything else is an unverified outcome, and the
-            # ledger records it as such.
-            report["status"] = "COMPLETED_VERIFIED" if report["verified_ok"] else "COMPLETED_UNVERIFIED"
+            # still decrypts *and* nothing is left on an older key. A deployment
+            # that retired the old key on "verified" alone would orphan every
+            # stray blob, so the unreachable case must never read as success.
+            report["status"] = (
+                "COMPLETED_VERIFIED"
+                if report["verified_ok"] and converged
+                else "COMPLETED_UNVERIFIED"
+            )
             journal.record(
                 event="rotation_finished",
                 target_version=target_version,
@@ -533,6 +596,7 @@ class PrivateDocumentVault:
                 skipped=report["skipped_already_current"] + report["skipped_concurrent"],
                 failed=report["failed"],
                 verification_failures=verification["failed"],
+                converged=report["converged"],
             )
             recorded.record_summary(
                 counts={
@@ -547,7 +611,13 @@ class PrivateDocumentVault:
                     "failures": verification["failed"],
                 },
                 retained_versions=list(self._keyring.versions),
-                detail={"resumed": report["resumed"], "journal": str(journal.path)},
+                detail={
+                    "resumed": report["resumed"],
+                    "journal": str(journal.path),
+                    "converged": report["converged"],
+                    "convergence_passes": report.get("convergence_passes"),
+                    "stray_versions": report.get("stray_versions", {}),
+                },
             )
             report["ledger"] = {
                 "path": str(ledger.path),

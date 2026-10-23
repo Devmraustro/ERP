@@ -78,9 +78,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .key_provider import FileKeyProvider
 from .key_rotation import (
     KeyConfigurationError,
-    require_key_file_custody,
     KeyRing,
     KeyVersionUnavailableError,
     atomic_write_bytes,
@@ -229,8 +229,7 @@ class RotationLedger:
         if keyring_path.exists():
             ring = KeyRing.load(keyring_path, "rotation")
         elif key_file.exists():
-            require_key_file_custody(key_file)
-            ring = KeyRing.bootstrap("rotation", key_file.read_bytes().strip())
+            ring = KeyRing.bootstrap("rotation", FileKeyProvider(key_file).read())
         elif explicit_key is not None:
             ring = KeyRing.bootstrap("rotation", explicit_key)
         elif create:
@@ -244,8 +243,7 @@ class RotationLedger:
         if path.exists() and not keyring_path.exists():
             # Records exist under the legacy single-key layout: keep using that
             # key so previously written records remain verifiable.
-            require_key_file_custody(key_file)
-            ring = KeyRing.bootstrap("rotation", key_file.read_bytes().strip())
+            ring = KeyRing.bootstrap("rotation", FileKeyProvider(key_file).read())
         return cls(path, ring, keyring_path=keyring_path)
 
     @classmethod
@@ -512,8 +510,7 @@ def _generate_ledger_key(key_file: Path) -> bytes:
     try:
         fd = os.open(str(key_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        require_key_file_custody(key_file)
-        return key_file.read_bytes().strip()
+        return FileKeyProvider(key_file).read()
     with os.fdopen(fd, "wb") as handle:
         handle.write(secret)
     return secret

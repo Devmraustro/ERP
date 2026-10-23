@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from .rotation_audit import RecordedOperation, RotationLedger
+from .key_provider import FileKeyProvider
 from .key_rotation import (
     LEGACY_KEY_VERSION,
-    require_key_file_custody,
     MIN_HMAC_KEY_BYTES,
     KeyConfigurationError,
     KeyRing,
@@ -612,8 +612,7 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
     if db_path != ":memory:":
         key_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEY_SUFFIX)
         if key_path.exists():
-            require_key_file_custody(key_path)
-            return key_path.read_bytes().strip()
+            return FileKeyProvider(key_path).read()
 
         # The key file is gone but the database may already hold audit events.
         # Minting a replacement here is the silent-data-integrity case: every
@@ -636,8 +635,7 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
             # loser adopts the winner's key rather than replacing it.
             fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
-            require_key_file_custody(key_path)
-            return key_path.read_bytes().strip()
+            return FileKeyProvider(key_path).read()
         with os.fdopen(fd, "wb") as handle:
             handle.write(secret)
         return secret

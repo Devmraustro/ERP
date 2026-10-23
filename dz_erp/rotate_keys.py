@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .key_provider import FileKeyProvider
 from .key_rotation import (
     KeyConfigurationError,
     KeyRingError,
@@ -81,6 +82,7 @@ def build_monitoring_report(
             "mode": "file",
             "external_provider_configured": False,
             "satisfies_requirement": not require_external_provider,
+            "sources": [],
         },
         "blocking_notes": [],
     }
@@ -111,6 +113,12 @@ def build_monitoring_report(
             for p in (vault.vault_key_path, vault.keyring_path)
             if p.exists()
         ]
+        provider_sources = [
+            FileKeyProvider(p).describe()
+            for p in (vault.vault_key_path, vault.keyring_path)
+            if p.exists()
+        ]
+        report["key_provider"]["sources"].extend(provider_sources)
         report["vault"] = {
             "root": str(vault.vault_root),
             "active_version": ring.active_version,
@@ -161,6 +169,13 @@ def build_monitoring_report(
         ledger_state = (
             RotationLedger.open(ledger_path).verify() if ledger_path.exists() else {"valid": True, "open_operations": []}
         )
+        audit_key_path = Path(str(db.db_path) + ".audit.keys.json")
+        legacy_audit_key = Path(str(db.db_path) + ".audit.key")
+        report["key_provider"]["sources"].extend(
+            FileKeyProvider(p).describe()
+            for p in (legacy_audit_key, audit_key_path)
+            if p.exists()
+        )
         report["audit"] = {
             "db_path": db.db_path,
             "active_version": ring.active_version,
@@ -192,9 +207,23 @@ def build_monitoring_report(
 
 
 def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]:
-    report: Dict[str, Any] = {}
+    report: Dict[str, Any] = {
+        # Where the key material actually comes from, and what can be said about
+        # it. Same data as `monitor`, minus the health verdict.
+        "key_provider": {
+            "mode": "file",
+            "external_provider_configured": False,
+            "sources": [],
+        },
+    }
     if vault_path:
         vault = _vault(vault_path)
+        provider_sources = [
+            FileKeyProvider(p).describe()
+            for p in (vault.vault_key_path, vault.keyring_path)
+            if p.exists()
+        ]
+        report["key_provider"]["sources"].extend(provider_sources)
         report["vault"] = {
             "root": str(vault.vault_root),
             "keyring_path": str(vault.keyring_path),
@@ -205,6 +234,13 @@ def _status(db_path: Optional[str], vault_path: Optional[str]) -> Dict[str, Any]
         }
     if db_path:
         db = ERPDatabase(db_path)
+        audit_key_path = Path(str(db.db_path) + ".audit.keys.json")
+        legacy_audit_key = Path(str(db.db_path) + ".audit.key")
+        report["key_provider"]["sources"].extend(
+            FileKeyProvider(p).describe()
+            for p in (legacy_audit_key, audit_key_path)
+            if p.exists()
+        )
         report["audit"] = {
             "db_path": db.db_path,
             "keyring_path": str(db.audit_keyring_path),

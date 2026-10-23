@@ -24,9 +24,9 @@ from rapidocr_onnxruntime import RapidOCR
 from .database import ERPDatabase, TenantIsolationError
 from .decimal_utils import format_dzd
 from .rotation_audit import RecordedOperation, RotationLedger
+from .key_provider import FileKeyProvider
 from .key_rotation import (
     BLOB_MAGIC,
-    require_key_file_custody,
     LEGACY_KEY_VERSION,
     BlobFormatError,
     KeyConfigurationError,
@@ -168,8 +168,7 @@ def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
     if key_path.exists():
         # Enforced, not assumed: a key readable by another local account is a
         # missing control, and the deployment must learn that at start-up.
-        require_key_file_custody(key_path)
-        return key_path.read_bytes().strip()
+        return FileKeyProvider(key_path).read()
 
     # The key file is gone but the vault may still hold blobs.  Generating a
     # replacement here is the silent-data-loss case: reads of the existing
@@ -192,8 +191,7 @@ def _resolve_vault_key(vault_root: Path, explicit: Optional[bytes]) -> bytes:
         # than replacing it and orphaning the vault.
         fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        require_key_file_custody(key_path)
-        return key_path.read_bytes().strip()
+        return FileKeyProvider(key_path).read()
     with os.fdopen(fd, "wb") as handle:
         handle.write(secret)
     return secret
@@ -300,7 +298,7 @@ class PrivateDocumentVault:
                 "the environment variable."
             )
         if self.vault_key_path.exists() and self._keyring.has_version(LEGACY_KEY_VERSION):
-            legacy = self.vault_key_path.read_bytes().strip()
+            legacy = FileKeyProvider(self.vault_key_path).read()
             if legacy != self._keyring.material_for(LEGACY_KEY_VERSION):
                 raise KeyConfigurationError(
                     f"{self.vault_key_path} does not match version {LEGACY_KEY_VERSION} of the key registry "

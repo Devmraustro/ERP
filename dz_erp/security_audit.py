@@ -635,10 +635,9 @@ def _keyring_from_manifest(
 
 def _write_key_file(key_path: Path, secret: bytes) -> None:
     """Write a secret to disk with owner-only permissions, replacing any stale value."""
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(secret)
+    from .key_provider import FileKeyProvider
+
+    FileKeyProvider(key_path).write(secret)
 
 
 def restore_and_verify_backup(

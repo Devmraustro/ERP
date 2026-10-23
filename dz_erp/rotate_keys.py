@@ -82,6 +82,20 @@ def _require_existing_vault(path: str):
     from .intake_ocr import VAULT_KEY_ENV, VAULT_KEYRING_SUFFIX, VAULT_KEY_SUFFIX
 
     root = Path(path)
+
+    # A key source by itself does not prove the vault exists at this path. In
+    # particular, deployments commonly set ERP_VAULT_KEY in the environment;
+    # before this guard, a typo pointing to a missing directory passed the
+    # key-source check and PrivateDocumentVault.mkdir() created a new empty
+    # vault that monitoring then reported as healthy.
+    if not root.is_dir():
+        raise VaultNotConfiguredError(
+            f"No vault is configured at {root}: the vault directory does not exist "
+            "or is not a directory. Key material alone does not prove that this path "
+            "belongs to a configured vault. Refusing to create or initialise a vault "
+            "from a monitoring command; check --vault and restore the configured path."
+        )
+
     has_env_key = bool(os.environ.get(VAULT_KEY_ENV))
     has_registry = (root.parent / (root.name + VAULT_KEYRING_SUFFIX)).exists()
     has_key_file = (root.parent / (root.name + VAULT_KEY_SUFFIX)).exists()

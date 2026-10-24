@@ -234,7 +234,7 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     # Windows is the platform-sensitive restore job, so it must use a patched
     # stdlib rather than whichever older 3.12 patch is already in the runner cache.
     win_setup = re.search(
-        r"Set up Python 3\\.12\\.15.*?python-version:\\s*\"([^\"]+)\"",
+        r"Set up Python 3\.12\.15.*?python-version:\s*\"([^\"]+)\"",
         workflow,
         re.S,
     )

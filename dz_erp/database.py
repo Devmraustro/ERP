@@ -715,6 +715,21 @@ class ERPDatabase:
             raise ValueError("Read-only mode requires an existing file-backed database.")
         if read_only and not Path(db_path).is_file():
             raise FileNotFoundError(f"Read-only database does not exist: {db_path}")
+        if read_only:
+            legacy_key_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEY_SUFFIX)
+            keyring_path = Path(db_path).with_name(Path(db_path).name + AUDIT_KEYRING_SUFFIX)
+            has_key_source = bool(
+                hmac_secret
+                or os.environ.get(AUDIT_KEY_ENV)
+                or legacy_key_path.is_file()
+                or keyring_path.is_file()
+            )
+            if not has_key_source:
+                raise AuditKeyUnavailableError(
+                    f"Read-only inspection of {db_path} found no audit-key source "
+                    f"({legacy_key_path.name}, {keyring_path.name}, or {AUDIT_KEY_ENV}). "
+                    "Refusing to generate replacement key material."
+                )
         self._audit_keyring, self._keyring_path = _resolve_audit_keyring(db_path, hmac_secret)
         # Retained as the *active* key because existing code and tests read it,
         # but it is now one entry in a versioned registry rather than the only

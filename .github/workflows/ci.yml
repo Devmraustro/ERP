@@ -112,6 +112,20 @@ jobs:
           python tools/ci_report_failures.py junit.xml || true
           exit $status
 
+      # A passing unit suite does not prove the packaged application can execute
+      # the documented invoice-to-ledger/recovery flow. This isolated acceptance
+      # run uses temporary state and synthetic records only; it has no credentials
+      # or production endpoint. Run once, not twice, for the Python matrix.
+      - name: Run isolated synthetic staging acceptance
+        if: matrix.python-version == '3.11'
+        run: |
+          set -o pipefail
+          python tools/staging_acceptance.py 2>&1 | tee staging-acceptance.log
+
+      - name: Validate risk-register summary
+        if: matrix.python-version == '3.11'
+        run: python tools/risk_register_counts.py
+
       - name: Summarise the results
         if: always()
         run: |
@@ -138,6 +152,7 @@ jobs:
             junit.xml
             coverage.xml
             htmlcov/**
+            staging-acceptance.log
 
   # ---------------------------------------------------------------------------
   # Windows verification

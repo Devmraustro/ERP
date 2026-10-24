@@ -36,6 +36,8 @@ There was also a broader read-only defect: `ERPDatabase` ran idempotent schema/m
 | `9cc7ffec338d69d657cfa7723e94b43d16444e09` and `f4d026ddb91589d99049ff0cca19464dfc583bd5` | Validate the audit schema required for verification and correct the schema probe to use a live read-only SQLite connection. |
 | `2790fd1561bdf97995d398238c9dfb3a4400b3c3` and `d8babd72e13359c076ad20601dac4f38a8bec4e4` | Block audit-key rotation/rollback/removal and key-registry persistence when a database instance is in read-only mode; retain the method docstring. |
 | `3aad70c532193fec0d358da7f6f605a3992babd2`, `796227da28e4a0c67f97bc3a1074f6ad12185402`, and `ed56bd8a8e8eb0e702043099b9a3a5a87a609963` | Add checks for unchanged DB bytes, rejection of schema migration during monitoring, SQLite-enforced write refusal, and no key/ledger/lock side effects from key mutators. |
+| `f4d1c203144aa212e42169d2812237dda8399f37` and `053d8f34ba2eeef4de6c6842a4e504d570b4320c` | Validate expected tables, indexes and triggers using `SCHEMA_SQL`; fix the Python regex patterns used for that inventory. |
+| `86c025ae120d114dfeee458a3d81f44c502876e7` | Add a regression test that monitoring refuses to report healthy when an integrity trigger or uniqueness index has been removed, without recreating it. |
 
 Implementation uses the project's existing vault, database, key-provider, and CLI design. It introduces no new dependency and does not alter a production store or key.
 
@@ -48,7 +50,7 @@ Implementation uses the project's existing vault, database, key-provider, and CL
 5. A missing or invalid store causes a non-zero refusal with an actionable diagnostic.
 6. `--dry-run`, rollback, and key-removal commands refuse a missing store before invoking constructors that can initialize it.
 7. `status` and `monitor` use SQLite-enforced read-only connections; they do not run schema migrations or change journal mode.
-8. Incompatible/legacy schema is reported for separate migration rather than silently altered during inspection.
+8. Incompatible/legacy schema, missing tables, missing integrity triggers, or missing required indexes are reported for separate migration/repair rather than silently altered during inspection.
 9. A read-only database instance rejects both SQL writes and audit-key registry mutations before creating journals, ledgers, or locks.
 10. Existing data and keys are preserved; recovery of missing key material remains an operator recovery task.
 
@@ -65,6 +67,7 @@ The current feature branch contains tests for:
 - Proving a read-only database instance rejects DDL writes and refuses audit-key rotation, rollback, and removal without changing the DB or creating side-effect files.
 - Proving successful `status` and `monitor` leave a correctly initialized database's bytes unchanged.
 - Proving an incompatible legacy schema is reported and not automatically migrated during monitoring.
+- Proving that removal of an audit immutability trigger or posted-supplier-invoice uniqueness index makes monitoring fail closed without recreating the object.
 
 These tests have been committed but **their execution results are not yet verified in this environment**.
 

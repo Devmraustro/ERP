@@ -31,8 +31,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # rapidocr-onnxruntime 1.4.4 declares requires-python <3.13, and
-        # pyproject.toml requires >=3.11, so the supported range is 3.11-3.12.
+        # rapidocr-onnxruntime 1.4.4 declares requires-python <3.13.
+        # Restore requires security-patched tarfile extraction: Python 3.11.17+
+        # or 3.12.15+. Pinning the current minor versions lets setup-python
+        # resolve only supported patch releases.
         python-version: ["3.11", "3.12"]
 
     steps:
@@ -178,10 +180,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.12.15 (security-patched tarfile)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.15"
           cache: pip
           cache-dependency-path: requirements.lock.txt
 

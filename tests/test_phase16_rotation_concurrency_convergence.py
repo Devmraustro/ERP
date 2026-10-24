@@ -128,28 +128,36 @@ def test_non_convergence_is_reported_as_failure_not_success(tmp_path, monkeypatc
 
 
 def test_rotation_under_sustained_concurrent_writes_still_converges(tmp_path) -> None:
-    """The property, end to end, with real threads rather than an injected hook."""
+    """Exercise real concurrent writes without unbounded test-fixture growth."""
     vault = PrivateDocumentVault(tmp_path / "vault")
     for index in range(30):
         vault.store_bytes(1, _digest(f"seed-{index}"), f"SEED {index}".encode())
 
+    # A writer previously ran until rotation finished, with no cap. Since every
+    # write creates a unique blob, slow convergence could generate an enormous
+    # directory and make the test itself take many minutes. Keep the contention
+    # meaningful but deterministic in size.
+    max_writes_per_worker = 64
     written: list = []
     errors: list = []
     stop = threading.Event()
+    start_together = threading.Barrier(5)
 
     def writer(worker: int) -> None:
-        counter = 0
-        while not stop.is_set():
+        start_together.wait()
+        for counter in range(max_writes_per_worker):
+            if stop.is_set():
+                break
             body = f"W{worker}-{counter}".encode()
             try:
                 written.append(vault.store_bytes(1, hashlib.sha256(body).hexdigest(), body))
             except Exception as exc:
                 errors.append(f"{type(exc).__name__}: {exc}")
-            counter += 1
 
     threads = [threading.Thread(target=writer, args=(worker,), daemon=True) for worker in range(4)]
     for thread in threads:
         thread.start()
+    start_together.wait()
     try:
         report = vault.rotate_key()
     finally:
@@ -157,6 +165,7 @@ def test_rotation_under_sustained_concurrent_writes_still_converges(tmp_path) ->
         for thread in threads:
             thread.join(timeout=60)
 
+    assert all(not thread.is_alive() for thread in threads), "a writer thread did not terminate"
     assert errors == []
     assert report["converged"] is True, report.get("stray_versions")
     assert report["status"] == "COMPLETED_VERIFIED"

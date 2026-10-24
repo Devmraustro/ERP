@@ -151,18 +151,18 @@ def _require_existing_database(path: str) -> None:
     # source that initializes writable deployments; do not allow a partial store
     # to appear healthy merely because its companies/audit tables still exist.
     required_tables = set(
-        re.findall(r"CREATE TABLE IF NOT EXISTS\\s+([A-Za-z_][A-Za-z0-9_]*)", SCHEMA_SQL, flags=re.IGNORECASE)
+        re.findall(r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)", SCHEMA_SQL, flags=re.IGNORECASE)
     )
     required_indexes = set(
         re.findall(
-            r"CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+IF NOT EXISTS\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
             SCHEMA_SQL,
             flags=re.IGNORECASE,
         )
     )
     required_triggers = set(
         re.findall(
-            r"CREATE\\s+TRIGGER\\s+IF NOT EXISTS\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"CREATE\s+TRIGGER\s+IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
             SCHEMA_SQL,
             flags=re.IGNORECASE,
         )

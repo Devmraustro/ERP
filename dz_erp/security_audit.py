@@ -653,11 +653,30 @@ def restore_and_verify_backup(
     fernet = Fernet(backup_encryption_key)
     decrypted_tar = fernet.decrypt(Path(backup_path).read_bytes())
 
-    with tarfile.open(fileobj=io.BytesIO(decrypted_tar), mode="r:gz") as tar:
-        for member in tar.getmembers():
-            if member.name.startswith("/") or ".." in member.name:
-                raise FinancialIntegrityError(f"Unsafe tar member path detected: {member.name}")
-        tar.extractall(path=restore_target_dir)
+    # The name check below is retained as a clear, domain-specific error,
+    # but it is not sufficient on its own: a benign-looking member name can be
+    # a symlink whose link target escapes the destination. Use Python's "data"
+    # extraction filter as a second boundary. Python 3.11.4+ backports the filter;
+    # fail closed rather than silently reverting to the historically unsafe mode.
+    safe_data_filter = getattr(tarfile, "data_filter", None)
+    if safe_data_filter is None:
+        raise FinancialIntegrityError(
+            "Safe backup extraction is unavailable in this Python runtime. "
+            "Use Python 3.11.4 or newer before restoring a backup."
+        )
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(decrypted_tar), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                if member.name.startswith("/") or ".." in member.name:
+                    raise FinancialIntegrityError(f"Unsafe tar member path detected: {member.name}")
+            tar.extractall(path=restore_target_dir, filter=safe_data_filter)
+    except FinancialIntegrityError:
+        raise
+    except (tarfile.TarError, OSError) as exc:
+        raise FinancialIntegrityError(
+            f"Backup archive contains an unsafe or invalid tar entry; extraction was refused: {exc}"
+        ) from exc
 
     manifest = json.loads((restore_target_dir / "manifest.json").read_text(encoding="utf-8"))
     restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"

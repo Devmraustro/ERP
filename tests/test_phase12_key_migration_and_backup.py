@@ -29,6 +29,7 @@ from dz_erp.database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
     ERPDatabase,
+    FinancialIntegrityError,
 )
 from dz_erp.intake_ocr import VAULT_KEYRING_SUFFIX, PrivateDocumentVault
 from dz_erp.key_rotation import BLOB_MAGIC, KeyConfigurationError, KeyRing
@@ -535,6 +536,44 @@ def test_corrupt_blob_header_does_not_prevent_startup_or_rotation(tmp_path: Path
     assert report["failed"] == 1
     assert broken.exists()
 
+
+
+
+def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:
+    """A safe-looking member name must not redirect a later write outside restore_target_dir."""
+    key = Fernet.generate_key()
+    archive = io.BytesIO()
+    payload = b"SHOULD NEVER BE WRITTEN OUTSIDE THE RESTORE DIRECTORY"
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+
+        vault_dir = tarfile.TarInfo("vault")
+        vault_dir.type = tarfile.DIRTYPE
+        tar.addfile(vault_dir)
+
+        escape = tarfile.TarInfo("vault/escape")
+        escape.type = tarfile.SYMTYPE
+        escape.linkname = "../../outside"
+        tar.addfile(escape)
+
+        child = tarfile.TarInfo("vault/escape/payload.txt")
+        child.size = len(payload)
+        tar.addfile(child, io.BytesIO(payload))
+
+    backup = tmp_path / "unsafe-symlink-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    restore_target = tmp_path / "restore-target"
+
+    with pytest.raises(FinancialIntegrityError, match="unsafe|invalid|refused"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=restore_target,
+        )
+
+    assert not (tmp_path / "outside" / "payload.txt").exists()
 
 def test_restore_requires_a_backup_key_and_does_not_leak_on_failure(tmp_path: Path) -> None:
     deployment = _deployment_with_partial_rotation(tmp_path / "src")

@@ -1,75 +1,81 @@
 # Release Branch Reconciliation
 
-**Snapshot time:** 2026-10-24  
-**Repository:** `Devmraustro/ERP`  
-**Snapshot commit:** `88e8e82c8b506c8b9716d541dd87b0be3140d568`
+**Snapshot commit:** `f4200e81e534e1431afb54b2c0708405bee12830`  
+**Snapshot date:** 2026-10-24  
+**Repository:** `Devmraustro/ERP`
 
-This is a read-only snapshot of live branch and pull-request metadata. It is not a merge, deployment, or production authorization.
+This is a point-in-time snapshot of live branch and pull-request metadata. The reconciliation work itself does not authorize a merge, deployment, or production use.
 
 ## 1. References verified
 
-| Reference | Verified state at this snapshot |
+| Reference | State at snapshot commit |
 |---|---|
 | `main` | `0e106e05bc1328780e7a837a65b870d535d9f6d6` |
-| Active working branch | `arena/6c474c64-erp`; 57 commits ahead of `main`, 0 behind |
-| PR #1 | Open and unmerged; branch `arena/f74b041f-erp`, head `1b63c6ea341b8d73f1fbce84148bd5425e2e8571` |
-| PR #2 | Open and unmerged; branch `arena/5c240e1d-erp`, head `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` |
-| Working branch versus PR #2 | 37 commits ahead, 0 behind; 63 files differ in the comparison result |
-| Latest code-hardening area | Monitoring/checkpoint safeguards, read-only database inspection, and protection against initializing missing stores during key operations |
-| Latest snapshot commit | `88e8e82c8b506c8b9716d541dd87b0be3140d568`, documentation-only update to this hardening record |
+| Working branch | `arena/6c474c64-erp`; 65 commits ahead of `main`, 0 behind |
+| PR #1 | Open, unmerged; head `1b63c6ea341b8d73f1fbce84148bd5425e2e8571` on `arena/f74b041f-erp` |
+| PR #2 | Open, unmerged; head `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` on `arena/5c240e1d-erp` |
+| Working branch versus PR #2 | 45 commits ahead, 0 behind; 63 files in the compare result |
+| Latest code-hardening commit in this round | `566264d686f33f37e9ab60a0b4041bbdd5fa2845` — read-only construction refuses missing audit-key sources |
+| Latest regression-test commit in this round | `16f88b069bd5e9731f47b7b6ad07167beb1d99f6` — direct read-only constructor must not mint a key |
+| Snapshot documentation commit | `f4200e81e534e1431afb54b2c0708405bee12830` |
 
-## 2. CI evidence
+The active working branch is the more complete implementation candidate, but it has not yet been selected as the canonical PR review target. Do not treat PR #2 as containing the additional 45 commits, and do not merge or rebase either branch blindly.
 
-The previously reported run `39959119943` contains three successful jobs:
+## 2. Engineering changes since the earlier snapshot
+
+The active branch has additional safeguards against read-only operations creating state:
+
+- Missing vault paths are refused even when `ERP_VAULT_KEY` is present.
+- Missing/uninitialized databases and databases with incompatible schema are refused by the inspection preflight.
+- Read-only database construction requires an existing audit-key source and cannot generate replacement key material.
+- `ERPDatabase(read_only=True)` opens SQLite with `mode=ro`, skips schema initialization/migrations, does not change journal mode, and uses read transactions.
+- CLI `status` and `monitor` use the read-only database mode.
+- Audit-key rotation, activation changes, key removal and registry persistence are blocked on read-only instances.
+- Preflight compares expected tables, required indexes and integrity triggers against the schema source; missing objects cause a fail-closed response rather than silent recreation.
+- Regression tests cover missing paths, lost keys, direct read-only construction, unchanged DB bytes, migration refusal, rejected DDL, key-operation side effects, and missing integrity objects.
+
+These changes have been committed to the active branch. **The new regression tests have not been run in the repository environment in this session.**
+
+## 3. CI evidence and limits
+
+The previously reported GitHub Actions run `39959119943` has three successful jobs:
 
 - Key rotation, backup and recovery on Windows.
 - Full test, coverage and static checks on Python 3.12.
 - Full test, coverage and static checks on Python 3.11.
 
-The earlier engineering report associates the run with code commit `4c3642af480dd072f92e4169c24cc91cc123edf5`. It is historical evidence for that tested tree, not for the latest read-only hardening commits.
+The prior report associates that run with code commit `4c3642af480dd072f92e4169c24cc91cc123edf5`. It is historical evidence for that tested tree, not proof that the new read-only hardening passes CI.
 
-The GitHub combined-status endpoint returned no status entries for the newer commits, and the available workflow-run wrapper only returns pull-request-triggered runs. Therefore, this snapshot does **not** claim that the latest commit has a separately verified CI run. A local clone attempt also failed because this environment could not resolve `github.com`; no local test command was successfully run against the updated checkout.
+For the latest commits, the combined-status endpoint returned no status entries; the available workflow-run wrapper returned no runs for the latest SHA. A local checkout attempt failed because DNS resolution for `github.com` was unavailable. Thus there is no verified current full-suite or CI result for the new commits in this session.
 
-Previously reported results—531 tests passed, 89% coverage, 37/37 synthetic staging acceptance checks, lock/hash and dependency graph validation, Ruff, compile checks, and four systemd unit checks—remain reported historical evidence. The newly added tests and read-only changes still require execution against the exact latest candidate SHA.
+A separate local SQLite mechanics check did confirm that a `mode=ro` connection rejects DDL, leaves the database file bytes unchanged, and detects a dropped trigger. This is a focused environment check only; it is not a substitute for the project test suite.
 
-## 3. Read-only hardening added after the prior snapshot
+Previously reported results—531 tests passed, 89% coverage, 37/37 synthetic staging acceptance checks, dependency-graph and lockfile validation, Ruff, compile checks, and four systemd unit checks—remain historical results for the reported older tree. They do not validate the latest commits.
 
-The active working branch now includes these additional changes:
+## 4. Remaining production blockers
 
-- Missing vault paths are refused even when `ERP_VAULT_KEY` is set.
-- Missing, empty, uninitialized, or schema-incompatible databases are refused by the read-only inspection path.
-- Missing audit-key sources are reported instead of being silently replaced.
-- The database class supports SQLite `mode=ro`, skips startup schema migrations in inspection mode, and uses ordinary read transactions.
-- CLI `status` and `monitor` use the read-only database mode.
-- Audit key rotation, activation rollback, removal, and key-registry persistence are blocked when the DB object is opened read-only.
-- Regression tests were added for missing paths, lost audit keys, unchanged DB bytes, schema-migration refusal, SQLite write rejection, and key-operation side effects.
+**Verdict: `CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY`.**
 
-These changes are committed to the active feature branch, but have not yet been validated by running the new test set in this environment.
+The following remain blocked or operationally unverified:
 
-## 4. Outstanding production blockers
-
-The release verdict remains **`CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY`**.
-
-External or environment-dependent items remain unresolved:
-
-- **C1/C2/C4/C5/C6:** accounting, tax, retention, data-protection and legal decisions requiring qualified review.
-- **S1/S3:** actual KMS/HSM or equivalent custody infrastructure and a defensible split-custody process.
-- **O2:** OCR confidence calibration with representative observations.
-- **O3:** Arabic OCR recognition capability; unsupported Arabic scans must continue through manual transcription/review.
-- **B2:** publisher provenance and an independently managed artifact mirror/wheelhouse.
-- **D4/D7:** production-scale recovery drills and validation of intended database topology/concurrency.
-- **S4/D6:** proven off-host checkpoint storage, scheduling and alert delivery installed by the operator.
-- No production host, actual KMS/HSM, independent checkpoint destination, representative production-like scan corpus, or customer-specific professional approvals have been evidenced in this snapshot.
+- **C1/C2/C4/C5/C6:** qualified review of SCF/accounting mappings, fiscal calculations, clearance account treatment, retention and Algerian data-protection obligations.
+- **S1/S3:** actual KMS/HSM or equivalent custody infrastructure and an enforced split-custody process.
+- **O2:** OCR confidence calibration on representative observations.
+- **O3:** Arabic recognition capability; unsupported scans must remain in manual transcription/review.
+- **B2:** publisher provenance and a separately managed artifact mirror/wheelhouse.
+- **D4/D7:** production-scale recovery drills and verification of the intended database topology and concurrency assumptions.
+- **S4/D6:** confirmed off-host checkpoint storage, scheduler installation and working alert delivery.
+- No production host, actual KMS/HSM, independent checkpoint destination, representative production-like scan corpus, or customer-specific professional approvals are evidenced.
 
 ## 5. Required next actions
 
-1. Obtain a working local checkout or a confirmed CI run for the exact current feature-branch SHA.
-2. Run the phase-20 monitoring/checkpoint suite, Ruff, compile checks, complete tests and staging acceptance.
-3. Inspect all CI jobs and their head SHA; do not infer a green run from an older commit.
-4. Review the full delta from PR #2 before selecting a canonical PR/review target.
-5. Keep operational and professional blockers open until infrastructure evidence or written approval is recorded.
-6. Obtain separate explicit approval before merging either PR or deploying.
+1. Obtain a working local checkout or a confirmed CI run for the exact latest working-branch SHA.
+2. Run the phase-20 checkpoint/monitoring tests, Ruff, compile checks, complete suite, and staging acceptance on that exact checkout.
+3. Inspect all CI jobs and their actual head SHA before asserting success.
+4. Review the full 45-commit delta from PR #2 and select a canonical review target only after a file-by-file comparison.
+5. Keep infrastructure and professional approval items blocked until evidence or signed approval is available.
+6. Obtain separate explicit authorization before merging a PR or deploying.
 
 ## 6. Scope
 
-No merge or deployment was performed during this review. `main` was not modified. No production key was rotated or deleted, and no real customer data or production credentials were used.
+No pull request was merged or closed. `main` was not modified. No production deployment, production key rotation/deletion, or processing of real customer data occurred.

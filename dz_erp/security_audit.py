@@ -648,10 +648,9 @@ def restore_and_verify_backup(
 ) -> Dict[str, Any]:
     """Decrypt, unpack, and verify a backup archive in an isolated target directory."""
     restore_target_dir = Path(restore_target_dir)
-    restore_target_dir.mkdir(parents=True, exist_ok=True)
-
-    fernet = Fernet(backup_encryption_key)
-    decrypted_tar = fernet.decrypt(Path(backup_path).read_bytes())
+    target_existed = restore_target_dir.exists()
+    if target_existed and not restore_target_dir.is_dir():
+        raise FinancialIntegrityError(f"Restore target is not a directory: {restore_target_dir}")
 
     # The name check below is retained as a clear, domain-specific error,
     # but it is not sufficient on its own: a benign-looking member name can be
@@ -665,15 +664,32 @@ def restore_and_verify_backup(
             "Use Python 3.11.4 or newer before restoring a backup."
         )
 
+    fernet = Fernet(backup_encryption_key)
+    decrypted_tar = fernet.decrypt(Path(backup_path).read_bytes())
+
     try:
         with tarfile.open(fileobj=io.BytesIO(decrypted_tar), mode="r:gz") as tar:
-            for member in tar.getmembers():
+            members = tar.getmembers()
+            # Preflight every member before writing any of them. This prevents a
+            # late symlink/filter failure from leaving earlier archive entries in
+            # the target directory.
+            for member in members:
                 if member.name.startswith("/") or ".." in member.name:
                     raise FinancialIntegrityError(f"Unsafe tar member path detected: {member.name}")
+                try:
+                    safe_data_filter(member, str(restore_target_dir))
+                except (tarfile.TarError, OSError) as exc:
+                    raise FinancialIntegrityError(
+                        f"Backup archive contains an unsafe tar entry; extraction was refused: {exc}"
+                    ) from exc
+
+            restore_target_dir.mkdir(parents=True, exist_ok=True)
             tar.extractall(path=restore_target_dir, filter=safe_data_filter)
     except FinancialIntegrityError:
         raise
     except (tarfile.TarError, OSError) as exc:
+        if not target_existed:
+            shutil.rmtree(restore_target_dir, ignore_errors=True)
         raise FinancialIntegrityError(
             f"Backup archive contains an unsafe or invalid tar entry; extraction was refused: {exc}"
         ) from exc

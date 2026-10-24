@@ -574,6 +574,7 @@ def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:
         )
 
     assert not (tmp_path / "outside" / "payload.txt").exists()
+    assert not restore_target.exists(), "failed preflight must not leave a partial restore directory"
 
 def test_restore_requires_a_backup_key_and_does_not_leak_on_failure(tmp_path: Path) -> None:
     deployment = _deployment_with_partial_rotation(tmp_path / "src")

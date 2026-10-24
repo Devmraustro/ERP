@@ -219,13 +219,26 @@ jobs:
             tests/test_phase11_audit_key_rotation.py `
             tests/test_phase12_key_migration_and_backup.py `
             tests/test_phase13_key_rotation_regression.py `
+            tests/test_phase18_ocr_confidence_provenance.py `
+            tests/test_phase23_staging_acceptance.py `
             --junitxml=junit-windows.xml -ra
 
-      - name: Upload Windows test report
+      # The checkpoint acceptance path is a local sibling-directory simulation,
+      # not a real remote host. Running it here validates Windows-specific file,
+      # process and rotation behaviour without overstating remote durability.
+      - name: Run isolated synthetic staging acceptance on Windows
+        shell: pwsh
+        run: |
+          & python tools/staging_acceptance.py 2>&1 | Tee-Object -FilePath staging-acceptance-windows.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows test and staging reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reports-windows
           retention-days: 14
           if-no-files-found: warn
-          path: junit-windows.xml
+          path: |
+            junit-windows.xml
+            staging-acceptance-windows.log

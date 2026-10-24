@@ -543,7 +543,7 @@ def test_corrupt_blob_header_does_not_prevent_startup_or_rotation(tmp_path: Path
 
 @pytest.mark.parametrize(
     "runtime",
-    [(3, 11, 16), (3, 12, 14), (3, 13, 0)],
+    [(3, 11, 16), (3, 12, 9), (3, 13, 0)],
 )
 def test_restore_refuses_unpatched_python_tarfile_runtime(tmp_path: Path, monkeypatch, runtime) -> None:
     """A data filter existing on disk is not enough if its stdlib bypasses are unpatched."""
@@ -558,6 +558,23 @@ def test_restore_refuses_unpatched_python_tarfile_runtime(tmp_path: Path, monkey
         )
 
     assert not target.exists(), "runtime validation must happen before any restore filesystem changes"
+
+
+def test_restore_accepts_last_windows_binary_runtime_with_strict_preflight(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Python 3.12.10 is allowed only with our independent strict archive preflight."""
+    monkeypatch.setattr(
+        security_audit_module, "sys", SimpleNamespace(version_info=(3, 12, 10))
+    )
+    target = tmp_path / "restore-target"
+    with pytest.raises(FileNotFoundError):
+        security_audit_module.restore_and_verify_backup(
+            backup_path=tmp_path / "not-read.enc",
+            backup_encryption_key=Fernet.generate_key(),
+            restore_target_dir=target,
+        )
+    assert not target.exists()
 
 
 def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:

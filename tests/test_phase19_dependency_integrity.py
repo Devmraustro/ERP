@@ -217,13 +217,13 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     from packaging.version import Version
 
     supported = SpecifierSet(requires.group(1).strip())
-    # Python's data filter was introduced earlier, but link/path traversal
-    # bypasses were fixed in 3.11.17 and 3.12.15. Exclude earlier 3.12 patches
-    # and remain below the pinned OCR engine's Python 3.13 ceiling.
+    # Python 3.11.17 contains the current 3.11 tarfile fixes. On Windows,
+    # 3.12.10 is the last binary installer; custom preflight rejects links and
+    # path-traversal forms also fixed in 3.12.15's source-only security release.
     assert Version("3.11.17") in supported
-    assert Version("3.12.15") in supported
+    assert Version("3.12.10") in supported
     assert Version("3.11.16") not in supported
-    assert Version("3.12.14") not in supported
+    assert Version("3.12.9") not in supported
     assert Version("3.13.0") not in supported
 
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

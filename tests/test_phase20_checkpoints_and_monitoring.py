@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from dz_erp.database import ERPDatabase
+from dz_erp.database import AuditKeyUnavailableError, ERPDatabase
 from dz_erp.key_rotation import KeyConfigurationError
 from dz_erp.intake_ocr import PrivateDocumentVault
 from dz_erp.rotate_keys import _verify_ledger_without_creating_keys, build_monitoring_report, main
@@ -613,6 +613,25 @@ def test_monitor_refuses_missing_or_uninitialised_database_without_writing(tmp_p
     assert empty.read_bytes() == b"", "monitoring initialized an existing empty database file"
     assert not Path(str(empty) + ".audit.key").exists()
     assert not Path(str(empty) + ".audit.keys.json").exists()
+
+
+def test_read_only_constructor_refuses_to_generate_a_missing_audit_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The invariant also holds for direct API use, not only through the CLI guard."""
+    monkeypatch.delenv("ERP_AUDIT_HMAC_SECRET", raising=False)
+    db_path = tmp_path / "erp.sqlite3"
+    ERPDatabase(str(db_path))
+    key_path = Path(str(db_path) + ".audit.key")
+    assert key_path.is_file()
+    key_path.unlink()
+    before = db_path.read_bytes()
+
+    with pytest.raises(AuditKeyUnavailableError, match="Read-only inspection"):
+        ERPDatabase(str(db_path), read_only=True)
+
+    assert not key_path.exists(), "read-only construction generated replacement key material"
+    assert db_path.read_bytes() == before, "read-only construction mutated the database"
 
 
 def test_status_and_monitor_leave_database_bytes_unchanged(tmp_path: Path, capsys) -> None:

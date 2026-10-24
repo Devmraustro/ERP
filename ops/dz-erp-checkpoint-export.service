@@ -1,0 +1,40 @@
+# Export a rotation-ledger checkpoint for off-host retention (control S4).
+# See docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md. Installed as a oneshot driven by
+# dz-erp-checkpoint-export.timer.
+[Unit]
+Description=DZ ERP rotation ledger checkpoint export (off-host)
+Documentation=file:/srv/dz-erp/docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md
+# The export must not run while a rotation is rewriting key state.
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+# The destination MUST be storage that outlives this host (NFS/SMB share, or a
+# directory synced to an object store by a client using separate credentials).
+# A path on this host's own disk provides no truncation detection.
+Environment=ERP_STATE=/srv/dz-erp
+Environment=CHECKPOINT_DIR=/mnt/audit-offsite/checkpoints
+# A trailing backslash continues the line (systemd.syntax: the backslash becomes a
+# space), so this is one ExecStart with three arguments.
+ExecStart=/usr/bin/env python -m dz_erp.rotate_keys monitor \
+    --vault ${ERP_STATE}/vault \
+    --checkpoint-export ${CHECKPOINT_DIR}/vault.rotation.checkpoint.json
+# Preserve the previous export so an incident can bound when a change happened.
+ExecStartPre=/bin/sh -c 'test -f ${CHECKPOINT_DIR}/vault.rotation.checkpoint.json && \
+    cp -p ${CHECKPOINT_DIR}/vault.rotation.checkpoint.json \
+          ${CHECKPOINT_DIR}/vault.rotation.checkpoint.previous.json || true'
+# Exit 3 means the ledger does not verify or the write was refused; do not keep
+# a unit that silently "succeeds" in that state.
+Restart=no
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# The checkpoint contains a record count and a hash, never key material, so it is
+# written to shared storage with owner-only permissions.
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

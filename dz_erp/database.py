@@ -896,21 +896,15 @@ class ERPDatabase:
     def _migrate_ocr_confidence(self, conn: sqlite3.Connection) -> None:
         """Bring `ocr_extracted_fields` forward to nullable, provenance-bearing confidence.
 
-        Two things cannot be done with `ALTER TABLE` in SQLite (adding a NOT NULL
-        default and dropping a NOT NULL constraint), so the table is rebuilt. The
-        backfill is factual rather than cosmetic:
+        SQLite cannot drop the old NOT NULL constraint with ALTER TABLE, so the
+        table must be rebuilt. The complete rename/create/copy/drop/trigger sequence
+        is deliberately one explicit transaction. Do not use executescript() here:
+        sqlite3.executescript() commits a pending transaction before running its
+        script, which would make a failed or interrupted rebuild non-atomic.
 
-        * rows belonging to documents extracted by `pdfplumber` came from native
-          text extraction, which measures no confidence. Their stored value was a
-          constant, so it is set to NULL and marked `not_measured`.
-        * rows from the OCR engine keep their value and are marked
-          `legacy_line_score` / scope `line`: the number was real, but it is a
-          line score recorded before the distinction existed, so calling it
-          `engine_line` would claim more than we can verify.
-
-        Nothing else in a row changes: raw text, bbox, model version and human
-        overrides are copied verbatim, and the raw-immutability trigger is
-        recreated afterwards.
+        Legacy native-PDF rows are marked not_measured and their fabricated
+        confidence is cleared. OCR engine scores are retained as legacy_line_score;
+        raw text, bounding boxes, model version and human overrides are copied.
         """
         cols = conn.execute("PRAGMA table_info(ocr_extracted_fields)").fetchall()
         if not cols:
@@ -924,11 +918,19 @@ class ERPDatabase:
         if already_migrated:
             return
 
+        # PRAGMA foreign_keys is a no-op inside a transaction, so refuse an
+        # unexpected caller transaction rather than silently rebuilding without
+        # the intended FK setting.
+        if conn.in_transaction:
+            raise sqlite3.OperationalError(
+                "OCR confidence migration must start outside an active transaction."
+            )
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("DROP TRIGGER IF EXISTS trg_ocr_field_preserve_raw")
             conn.execute("ALTER TABLE ocr_extracted_fields RENAME TO ocr_extracted_fields_legacy")
-            conn.executescript(
+            conn.execute(
                 """
                 CREATE TABLE ocr_extracted_fields (
                     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -951,7 +953,7 @@ class ERPDatabase:
                     edited_by_id            INTEGER REFERENCES users(id) ON DELETE RESTRICT,
                     edited_at               TEXT,
                     created_at              TEXT NOT NULL
-                );
+                )
                 """
             )
             conn.execute(
@@ -975,7 +977,7 @@ class ERPDatabase:
                 """
             )
             conn.execute("DROP TABLE ocr_extracted_fields_legacy")
-            conn.executescript(
+            conn.execute(
                 """
                 CREATE TRIGGER IF NOT EXISTS trg_ocr_field_preserve_raw
                 BEFORE UPDATE ON ocr_extracted_fields
@@ -988,9 +990,14 @@ class ERPDatabase:
                   OR OLD.ocr_model_version != NEW.ocr_model_version
                 BEGIN
                     SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, its provenance and ocr_model_version cannot be overwritten.');
-                END;
+                END
                 """
             )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
 

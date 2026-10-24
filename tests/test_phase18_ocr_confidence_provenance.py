@@ -379,6 +379,47 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     assert "confidence_kind" in cols
 
 
+def test_confidence_migration_rolls_back_if_copy_fails(tmp_path: Path) -> None:
+    """A failed table rebuild must not strand the live table under a legacy name."""
+    path = tmp_path / "legacy-failing-migration.sqlite3"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(LEGACY_OCR_TABLE)
+    # Legacy schema allowed this value; the new schema correctly rejects it.
+    # It forces the INSERT ... SELECT stage to fail after the table rename/create.
+    conn.execute(
+        "INSERT INTO ocr_extracted_fields (company_id, document_id, field_name, raw_text,"
+        " normalized_value, confidence, bbox_json, ocr_model_version, created_at)"
+        " VALUES (1, 'doc-scan', 'amount_ht_dzd', 'raw amount', 'raw amount', 1.5, '[]', 'v', '2026-01-01')"
+    )
+    conn.executescript(
+        """
+        CREATE TABLE source_documents (
+            id TEXT PRIMARY KEY, company_id INTEGER, ocr_engine TEXT
+        );
+        INSERT INTO source_documents (id, company_id, ocr_engine)
+        VALUES ('doc-scan', 1, 'rapidocr-onnxruntime');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        ERPDatabase(str(path))
+
+    conn = sqlite3.connect(str(path))
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(ocr_extracted_fields)")}
+    row = conn.execute(
+        "SELECT confidence, raw_text FROM ocr_extracted_fields WHERE document_id = 'doc-scan'"
+    ).fetchone()
+    conn.close()
+
+    assert "ocr_extracted_fields" in tables, "the original live table must survive a failed migration"
+    assert "ocr_extracted_fields_legacy" not in tables, "a rollback must undo the table rename"
+    assert "confidence_kind" not in columns, "the old schema must remain intact after rollback"
+    assert row == (1.5, "raw amount"), "the original row must remain intact after rollback"
+
+
 # ----------------------------------------------------------------------
 # 5. A confidence value can never authorise posting
 # ----------------------------------------------------------------------

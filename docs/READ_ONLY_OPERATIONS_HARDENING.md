@@ -38,6 +38,8 @@ There was also a broader read-only defect: `ERPDatabase` ran idempotent schema/m
 | `3aad70c532193fec0d358da7f6f605a3992babd2`, `796227da28e4a0c67f97bc3a1074f6ad12185402`, and `ed56bd8a8e8eb0e702043099b9a3a5a87a609963` | Add checks for unchanged DB bytes, rejection of schema migration during monitoring, SQLite-enforced write refusal, and no key/ledger/lock side effects from key mutators. |
 | `f4d1c203144aa212e42169d2812237dda8399f37` and `053d8f34ba2eeef4de6c6842a4e504d570b4320c` | Validate expected tables, indexes and triggers using `SCHEMA_SQL`; fix the Python regex patterns used for that inventory. |
 | `86c025ae120d114dfeee458a3d81f44c502876e7` | Add a regression test that monitoring refuses to report healthy when an integrity trigger or uniqueness index has been removed, without recreating it. |
+| `566264d686f33f37e9ab60a0b4041bbdd5fa2845` | Make the database constructor itself refuse read-only mode when all audit-key sources are missing. |
+| `16f88b069bd5e9731f47b7b6ad07167beb1d99f6` | Test the read-only constructor directly to prove it does not create replacement audit key material. |
 
 Implementation uses the project's existing vault, database, key-provider, and CLI design. It introduces no new dependency and does not alter a production store or key.
 
@@ -46,7 +48,7 @@ Implementation uses the project's existing vault, database, key-provider, and CL
 1. `monitor` and `status` never create a missing vault or database.
 2. An environment key is not evidence that a vault directory exists at the supplied path.
 3. An empty or unrelated SQLite file is not treated as an initialized ERP database.
-4. A read-only DB command does not mint an audit key when all key sources are missing.
+4. A read-only DB command or direct `ERPDatabase(read_only=True)` construction does not mint an audit key when all key sources are missing.
 5. A missing or invalid store causes a non-zero refusal with an actionable diagnostic.
 6. `--dry-run`, rollback, and key-removal commands refuse a missing store before invoking constructors that can initialize it.
 7. `status` and `monitor` use SQLite-enforced read-only connections; they do not run schema migrations or change journal mode.
@@ -60,7 +62,7 @@ The current feature branch contains tests for:
 
 - Monitoring a missing vault while `ERP_VAULT_KEY` is set.
 - Monitoring a missing database and an existing but empty SQLite file without creating schema or key files.
-- Refusing to regenerate an audit key that is missing from an existing empty database.
+- Refusing to regenerate an audit key that is missing from an existing empty database, both through the CLI and through direct read-only constructor use.
 - Refusing `status` on a missing database or vault.
 - Refusing vault rotate/dry-run, rollback, and removal operations on a missing vault.
 - Refusing audit rotate/dry-run, rollback, and removal operations on a missing database.

@@ -36,21 +36,19 @@ python -m ruff check dz_erp tests tools      # static check
 | Mandatory runtime libraries | **None.** Every pinned runtime dependency is a pure-Python or wheel package |
 | Optional (GUI build only) | `libgl1`, `libglib2.0-0` — needed only if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging |
 
-### 1.2 Current results
+### 1.2 Current verification — code head 1c3e844 (2026-10-24)
 
-- **Total Collected Tests:** `531`
-- **Passed:** `531` (`100%`)
-- **Failed / Skipped / Errors:** `0`
-- **Total Execution Duration:** `94.03s` (`109.57s` with coverage)
-- **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
-- **Overall Code Coverage (`dz_erp`):** **`89%`** (`3,710 / 4,162` statements covered; `100%` on `__init__.py` and `serve.py`, `98%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `upload.py` and `odoo_test_adapter.py`, `94%` on `database.py` and `intake_ocr.py`, `93%` on `localization.py` and `rotation_audit.py`, `87%` on `key_provider.py`, `86%` on `key_rotation.py`, `85%` on `rotate_keys.py`, `83%` on `api.py`, `82%` on `procurement_stock.py`, `80%` on `decimal_utils.py`, `70%` on `security_audit.py`).
-- **Staging acceptance:** `37/37` checks (`python tools/staging_acceptance.py`).
-- **Static check:** `ruff check dz_erp tests tools` → `All checks passed!`
-- **Risk-register consistency:** `python tools/risk_register_counts.py` → `risk register summary is consistent (31 rows)`.
+The latest fully tested code commit is 1c3e84408f6314789bf381d867f151a39f1ce893. GitHub Actions run [40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357) completed successfully on that exact SHA.
 
-The earlier `218`-test figure above described the Phase 8 state; the suite has since grown to
-`531`, and the coverage denominator with it. Sections below that cite older counts are retained
-as history and are dated by the commit or run they name.
+- **Linux / Python 3.11.17:** 548 passed, 0 failed, 0 skipped; 89% coverage (4,269 statements, 458 missed); 102.68 seconds.
+- **Linux / Python 3.12.15:** 548 passed, 0 failed, 0 skipped; 89% coverage (4,269 statements, 458 missed); 513.95 seconds.
+- **Windows CI:** key rotation, migration, backup/restore, logging and recovery job passed.
+- **Migration regression:** test_confidence_migration_rolls_back_if_copy_fails passed on both supported Linux Python versions.
+- **Static and dependency checks on the exact code head:** Ruff passed, compileall passed, dependency-graph validation passed, and hash-lock drift check passed.
+
+The user's local Windows run on predecessor 21f93b7912f2e13023cd4dd4cf10267178a2bf82 collected 547 tests and finished with 529 passed, 18 platform-specific skips, 0 failures and 89% coverage. The phase-16 tests passed 4/4; phase-20 passed 65 with 3 platform-specific skips. The isolated synthetic staging acceptance script passed 37/37 on that predecessor. The only code change between that local run and 1c3e844 was the atomic OCR confidence migration and its rollback regression test; the full suite and that regression passed in exact-head CI. The standalone staging acceptance script has not been rerun on 1c3e844, so 37/37 is not represented here as an exact-head result.
+
+Earlier test totals in this document describe historical phases and are retained where explicitly dated.
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 
@@ -75,36 +73,20 @@ as history and are dated by the commit or run they name.
 
 ### 1.5 Continuous Integration — `Verified`
 
-The same suite, dependency set and static check were executed on a clean GitHub
-Actions runner (Ubuntu, Python 3.11 and 3.12, **no** system graphics libraries
-installed) by `.github/workflows/ci.yml`.
+Exact code head: 1c3e84408f6314789bf381d867f151a39f1ce893.
 
-| Item | Result |
-| :--- | :--- |
-| Run (push) | `39077748167` — `success` |
-| Run (pull_request) | `39077751326` — `success` |
-| Commit | `44d45112e81cf8e1e9b876628660e0421d6725f1` |
-| Python 3.11 job (ID `117528316809`) | `success` — all 12 steps green |
-| Python 3.12 job (ID `117528316675`) | `success` — all 12 steps green |
-| Failure annotations | **none** |
+| Workflow | Run | Result |
+|---|---|---|
+| Push, full suite / coverage / static checks | [40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357) | **success** |
+| Python 3.11 job | [120784430379](https://github.com/Devmraustro/ERP/actions/runs/40064379357/job/120784430379) | **success**, 548 passed |
+| Python 3.12 job | [120784430319](https://github.com/Devmraustro/ERP/actions/runs/40064379357/job/120784430319) | **success**, 548 passed |
+| Windows rotation / migration / backup / recovery job | [120784430214](https://github.com/Devmraustro/ERP/actions/runs/40064379357/job/120784430214) | **success** |
 
-Every step of the workflow is therefore CI-verified: install the declared set,
-validate the dependency graph, assert `cv2` and `RapidOCR` import, static check
-(ruff), byte-compile, full test suite with coverage, summarise, and upload
-artifacts. The only annotations emitted were informational (Node 20 deprecation
-and the `ubuntu-latest` label migration).
+All three jobs are green for the exact code head. Both Linux jobs also completed dependency installation with hashes, dependency-graph validation, OpenCV/RapidOCR import assertions, Ruff, byte-compilation and the full test suite with coverage. The rollback-on-failed-copy regression is explicitly shown passing on both Python 3.11 and 3.12.
 
-The full run history, and the four host-dependency defects the successive
-failures exposed, are recorded in §5.5 of
-`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`.
+The consolidated review branch may contain a documentation-only follow-up commit after this tested code head. The evidence above is deliberately tied to the code SHA and does not substitute for checking the resulting PR-head workflow before merge.
 
-**What CI does not prove.** The OCR *accuracy* figures remain host-dependent at
-the margin, because ONNX Runtime, OpenCV and PDFium dispatch SIMD kernels by host
-CPU feature. That is why the neural-OCR assertions test recognition rather than
-bit-exactness (2A.6) and the benchmark thresholds are floors with a documented
-margin.
-
----
+**What CI does not prove.** OCR accuracy remains host-dependent at the margin because ONNX Runtime, OpenCV and PDFium dispatch SIMD kernels based on host CPU features. The assertions test recognition rather than bit-exactness, and benchmark thresholds are floors with documented margins. CI does not provide statutory accounting or legal certification.
 
 ## 2. Detailed Test Matrix (`Passed`)
 

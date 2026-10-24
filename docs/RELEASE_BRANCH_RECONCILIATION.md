@@ -79,3 +79,13 @@ The following remain blocked or operationally unverified:
 ## 6. Scope
 
 No pull request was merged or closed. `main` was not modified. No production deployment, production key rotation/deletion, or processing of real customer data occurred.
+
+## 7. Follow-up verification after the snapshot — 2026-10-24
+
+This section is an addendum; sections 1–6 above remain the dated snapshot and are not rewritten as if they were live at the time.
+
+The consolidated code head 1c3e84408f6314789bf381d867f151a39f1ce893 was verified by GitHub Actions run [40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357). All three jobs succeeded: Python 3.11 and Python 3.12 each reported 548 passed tests, 0 failures and 89% coverage; the Windows key-rotation/migration/backup/recovery job also succeeded. The test test_confidence_migration_rolls_back_if_copy_fails passed on both Linux runtimes and proves the OCR confidence table rebuild rolls back after a forced copy failure.
+
+The active code branch and PR #2 were fast-forwarded without force from the prior tested head 21f93b7 to code head 1c3e844. A documentation-only follow-up is being added to make this verification visible in the current review materials; CI must also be green for that final PR head before merge. PR #1 remains open and was not merged or modified. No PR has been merged and no deployment has occurred.
+
+The latest user-local Windows full-suite run and 37/37 staging acceptance were on predecessor 21f93b7, before the atomic migration change; those results are explicitly not represented as exact-head staging acceptance. Production blockers listed in §4 remain open, and the release verdict remains CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY.

@@ -213,7 +213,7 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requires = re.search(r'requires-python\s*=\s*"([^"]+)"', text)
     assert requires, "requires-python is not declared"
-    assert requires.group(1).strip() == ">=3.11"
+    assert requires.group(1).strip() == ">=3.11.4", "the safe tar extraction filter is required for backup restore"
 
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     versions = set(re.findall(r'python-version:\s*\[([^\]]+)\]', workflow))

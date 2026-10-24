@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Algerian AI ERP Platform — SCF Localization, AI/OCR Invoice Intake, 3-Way Match Procurement & Tamper-Evident Financial Ledger"
 readme = "README.md"
 license = {text = "LGPL-3.0-only"}
-requires-python = ">=3.11"
+requires-python = ">=3.11.4"
 dependencies = [
     "fastapi==0.115.12",
     "uvicorn==0.34.0",

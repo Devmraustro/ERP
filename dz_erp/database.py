@@ -747,8 +747,16 @@ class ERPDatabase:
             pass
         else:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            with self._create_connection() as conn:
-                self._init_schema(conn)
+            # sqlite3.Connection's context manager commits/rolls back but does
+            # not close the connection. Close it explicitly so WAL checkpointing
+            # is completed here, not later during unrelated read-only inspection
+            # or garbage collection.
+            conn = self._create_connection()
+            try:
+                with conn:
+                    self._init_schema(conn)
+            finally:
+                conn.close()
         # Fail closed at start-up: if any stored event needs a key version this
         # process does not have, the service must not come up pretending the
         # chain is merely "unverified".

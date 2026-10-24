@@ -610,8 +610,9 @@ def test_restore_rejects_noncanonical_tar_paths_before_writing(
     assert not target.exists(), "archive preflight must complete before creating the restore target"
 
 
-def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:
-    """A safe-looking member name must not redirect a later write outside restore_target_dir."""
+@pytest.mark.parametrize("link_type", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_restore_rejects_tar_links_before_extraction(tmp_path: Path, link_type: bytes) -> None:
+    """A symlink or hardlink must not redirect a later write outside the restore target."""
     key = Fernet.generate_key()
     archive = io.BytesIO()
     payload = b"SHOULD NEVER BE WRITTEN OUTSIDE THE RESTORE DIRECTORY"
@@ -625,7 +626,7 @@ def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:
         tar.addfile(vault_dir)
 
         escape = tarfile.TarInfo("vault/escape")
-        escape.type = tarfile.SYMTYPE
+        escape.type = link_type
         escape.linkname = "../../outside"
         tar.addfile(escape)
 

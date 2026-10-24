@@ -231,15 +231,15 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     flat = {v.strip().strip('"').strip("'") for group in versions for v in group.split(",")}
     assert {"3.11", "3.12"} <= flat, f"CI does not cover the declared floor: {flat}"
 
-    # Windows is the platform-sensitive restore job, so it must use a patched
-    # stdlib rather than whichever older 3.12 patch is already in the runner cache.
+    # Windows pins 3.12.10 because it is the last 3.12 binary installer. The
+    # restore path must reject links, special members, and noncanonical paths itself.
     win_setup = re.search(
-        r"Set up Python 3\.12\.15.*?python-version:\s*\"([^\"]+)\"",
+        r"Set up Python 3\.12\.10.*?python-version:\s*\"([^\"]+)\"",
         workflow,
         re.S,
     )
     assert win_setup, "Windows CI must pin a security-patched Python 3.12 release"
-    assert win_setup.group(1) == "3.12.15"
+    assert win_setup.group(1) == "3.12.10"
 
     # rapidocr-onnxruntime declares <3.13; the pin must not be presented as 3.13-ready.
     import importlib.metadata as metadata

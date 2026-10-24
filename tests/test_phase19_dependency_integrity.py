@@ -47,6 +47,9 @@ def _clean_environment():
         "distributions": [
             DistributionRecord("demo", "1.0"),
             DistributionRecord("dep", "2.0"),
+            # Keep the synthetic environment valid on Windows too, where this
+            # marker is active and the validator correctly checks the package.
+            DistributionRecord("winonly", "1.0"),
             DistributionRecord(
                 "consumer", "3.0", ("demo>=1.0", "dep==2.0", 'winonly ; sys_platform == "win32"')
             ),

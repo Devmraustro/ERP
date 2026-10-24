@@ -9,6 +9,7 @@ import io
 import json
 import re
 import shutil
+import sys
 import sqlite3
 import tarfile
 import threading
@@ -655,13 +656,21 @@ def restore_and_verify_backup(
     # The name check below is retained as a clear, domain-specific error,
     # but it is not sufficient on its own: a benign-looking member name can be
     # a symlink whose link target escapes the destination. Use Python's "data"
-    # extraction filter as a second boundary. Python 3.11.4+ backports the filter;
-    # fail closed rather than silently reverting to the historically unsafe mode.
+    # extraction filter as a second boundary, but require a security-patched
+    # standard library: older filters had additional link/path-traversal bypasses.
+    version = tuple(sys.version_info[:3])
+    minimums = {(3, 11): (3, 11, 17), (3, 12): (3, 12, 15)}
+    minimum = minimums.get(version[:2])
+    if minimum is None or version < minimum:
+        raise FinancialIntegrityError(
+            "Safe backup restore requires a security-patched Python runtime: "
+            "Python 3.11.17+ or Python 3.12.15+ (and below 3.13)."
+        )
     safe_data_filter = getattr(tarfile, "data_filter", None)
     if safe_data_filter is None:
         raise FinancialIntegrityError(
             "Safe backup extraction is unavailable in this Python runtime. "
-            "Use Python 3.11.4 or newer before restoring a backup."
+            "Use a supported, security-patched Python 3.11 or 3.12 release."
         )
 
     fernet = Fernet(backup_encryption_key)

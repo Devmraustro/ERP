@@ -21,6 +21,7 @@ import os
 import sqlite3
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
@@ -31,6 +32,7 @@ from dz_erp.database import (
     ERPDatabase,
     FinancialIntegrityError,
 )
+import dz_erp.security_audit as security_audit_module
 from dz_erp.intake_ocr import VAULT_KEYRING_SUFFIX, PrivateDocumentVault
 from dz_erp.key_rotation import BLOB_MAGIC, KeyConfigurationError, KeyRing
 from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_backup
@@ -537,6 +539,25 @@ def test_corrupt_blob_header_does_not_prevent_startup_or_rotation(tmp_path: Path
     assert broken.exists()
 
 
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [(3, 11, 16), (3, 12, 14), (3, 13, 0)],
+)
+def test_restore_refuses_unpatched_python_tarfile_runtime(tmp_path: Path, monkeypatch, runtime) -> None:
+    """A data filter existing on disk is not enough if its stdlib bypasses are unpatched."""
+    monkeypatch.setattr(security_audit_module, "sys", SimpleNamespace(version_info=runtime))
+    target = tmp_path / "restore-target"
+
+    with pytest.raises(FinancialIntegrityError, match="security-patched Python runtime"):
+        security_audit_module.restore_and_verify_backup(
+            backup_path=tmp_path / "not-read.enc",
+            backup_encryption_key=Fernet.generate_key(),
+            restore_target_dir=target,
+        )
+
+    assert not target.exists(), "runtime validation must happen before any restore filesystem changes"
 
 
 def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:

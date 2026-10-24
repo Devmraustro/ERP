@@ -213,7 +213,18 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requires = re.search(r'requires-python\s*=\s*"([^"]+)"', text)
     assert requires, "requires-python is not declared"
-    assert requires.group(1).strip() == ">=3.11.4", "the safe tar extraction filter is required for backup restore"
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    supported = SpecifierSet(requires.group(1).strip())
+    # Python's data filter was introduced earlier, but link/path traversal
+    # bypasses were fixed in 3.11.17 and 3.12.15. Exclude earlier 3.12 patches
+    # and remain below the pinned OCR engine's Python 3.13 ceiling.
+    assert Version("3.11.17") in supported
+    assert Version("3.12.15") in supported
+    assert Version("3.11.16") not in supported
+    assert Version("3.12.14") not in supported
+    assert Version("3.13.0") not in supported
 
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     versions = set(re.findall(r'python-version:\s*\[([^\]]+)\]', workflow))

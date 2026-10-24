@@ -676,6 +676,39 @@ def test_read_only_monitor_refuses_legacy_schema_without_running_migrations(
     assert "hmac_key_version" not in columns
 
 
+@pytest.mark.parametrize(
+    ("object_type", "object_name"),
+    [
+        ("trigger", "trg_audit_no_update"),
+        ("index", "uq_posted_supplier_invoice"),
+    ],
+)
+def test_monitor_refuses_missing_database_integrity_objects_without_recreating_them(
+    tmp_path: Path, capsys, object_type: str, object_name: str
+) -> None:
+    """Monitoring must not silently restore a removed integrity control."""
+    db_path = tmp_path / "erp.sqlite3"
+    ERPDatabase(str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"DROP {object_type.upper()} {object_name}")
+        connection.commit()
+    before = db_path.read_bytes()
+
+    code = main(["monitor", "--db", str(db_path)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 3
+    assert report["healthy"] is False
+    assert report["audit"]["reason"] == "DB_SCHEMA_INCOMPATIBLE"
+    assert db_path.read_bytes() == before, "monitor silently recreated a missing integrity control"
+    with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+        still_present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?",
+            (object_type, object_name),
+        ).fetchone()
+    assert still_present is None
+
+
 def test_monitor_does_not_regenerate_a_missing_audit_key_for_an_empty_database(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:

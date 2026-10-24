@@ -550,7 +550,7 @@ def test_restore_refuses_unpatched_python_tarfile_runtime(tmp_path: Path, monkey
     monkeypatch.setattr(security_audit_module, "sys", SimpleNamespace(version_info=runtime))
     target = tmp_path / "restore-target"
 
-    with pytest.raises(FinancialIntegrityError, match="security-patched Python runtime"):
+    with pytest.raises(FinancialIntegrityError, match="Safe backup restore requires Python"):
         security_audit_module.restore_and_verify_backup(
             backup_path=tmp_path / "not-read.enc",
             backup_encryption_key=Fernet.generate_key(),
@@ -575,6 +575,39 @@ def test_restore_accepts_last_windows_binary_runtime_with_strict_preflight(
             restore_target_dir=target,
         )
     assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    ["../outside.txt", "vault/../outside.txt", "../evil/../dest/sub/file"],
+)
+def test_restore_rejects_noncanonical_tar_paths_before_writing(
+    tmp_path: Path, member_name: str
+) -> None:
+    """Parent segments and leave-then-return paths must fail before extraction."""
+    key = Fernet.generate_key()
+    archive = io.BytesIO()
+    payload = b"TRAVERSAL MUST NOT WRITE THIS"
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+        item = tarfile.TarInfo(member_name)
+        item.size = len(payload)
+        tar.addfile(item, io.BytesIO(payload))
+
+    backup = tmp_path / "unsafe-path-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    target = tmp_path / "restore-target"
+
+    with pytest.raises(FinancialIntegrityError, match="Unsafe tar member path"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=target,
+        )
+
+    assert not target.exists(), "archive preflight must complete before creating the restore target"
 
 
 def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:
@@ -604,7 +637,7 @@ def test_restore_rejects_tar_symlink_escape(tmp_path: Path) -> None:
     backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
     restore_target = tmp_path / "restore-target"
 
-    with pytest.raises(FinancialIntegrityError, match="unsafe|invalid|refused"):
+    with pytest.raises(FinancialIntegrityError, match="unsafe|invalid|refused|disallowed"):
         restore_and_verify_backup(
             backup_path=backup,
             backup_encryption_key=key,

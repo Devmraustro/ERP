@@ -689,12 +689,13 @@ def restore_and_verify_backup(
             # late symlink/filter failure from leaving earlier archive entries in
             # the target directory.
             root = restore_target_dir.resolve()
+            archive_types: Dict[tuple[str, ...], str] = {}
             for member in members:
                 name = member.name
                 # Tar archives use POSIX separators. Reject Windows separators,
                 # drive/UNC forms, ADS colons, NULs, empty components, and dot
                 # segments before any member reaches the filesystem.
-                if not name or "\\x00" in name or "\\\\" in name:
+                if not name or "\x00" in name or "\\" in name:
                     raise FinancialIntegrityError(f"Unsafe tar member path detected: {name!r}")
                 posix_name = PurePosixPath(name)
                 windows_name = PureWindowsPath(name)
@@ -722,6 +723,24 @@ def restore_and_verify_backup(
                     raise FinancialIntegrityError(
                         f"Backup archive contains a disallowed link or special member: {name!r}"
                     )
+
+                # Reject duplicate names and file/directory prefix conflicts
+                # inside the archive before creating any filesystem entries.
+                key = tuple(parts)
+                if key in archive_types:
+                    raise FinancialIntegrityError(f"Duplicate tar member path detected: {name!r}")
+                for prefix_length in range(1, len(key)):
+                    if archive_types.get(key[:prefix_length]) == "file":
+                        raise FinancialIntegrityError(
+                            f"Tar member has a regular file as a parent path: {name!r}"
+                        )
+                if member.isfile() and any(
+                    existing[: len(key)] == key for existing in archive_types
+                ):
+                    raise FinancialIntegrityError(
+                        f"Tar member would replace a parent directory with a file: {name!r}"
+                    )
+                archive_types[key] = "directory" if member.isdir() else "file"
 
                 # Existing symlinks within the destination can redirect a
                 # seemingly safe child path. Check the whole existing prefix as

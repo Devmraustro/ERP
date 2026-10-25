@@ -2,10 +2,23 @@
 
 Production-grade Algerian *Système Comptable Financier* (SCF) localization, procure-to-pay (`PO → Goods Receipt → 3-Way Match → SoD Approval → Idempotent GL Posting`), encrypted supplier invoice intake with OCR (`pdfplumber` + `RapidOCR PP-OCRv4`), and tamper-evident audit/backup architecture.
 
-## Quick Verification (`Passed`: 87 / 87 Tests, 92% Coverage)
+## Quick Verification
+
+Verified at commit `21f93b7` (2026-10-25): **529 passed, 18 skipped, 89 % coverage**
+on Windows/CPython 3.11 — the 18 skips are POSIX-only mode-bit/fd tests and a
+`systemd-analyze` availability check; they run on Linux CI. GitHub Actions run
+[`40053241264`](https://github.com/Devmraustro/ERP/actions/runs/40053241264) is
+green on Python 3.11, 3.12 **and** the Windows key-rotation/backup job for that
+exact commit. (The retired `/tmp/glstub` workaround is unsupported — see the
+note in `docs/QA_TEST_MATRIX_AND_RESULTS.md` §1.)
 
 ```bash
-LD_LIBRARY_PATH=/tmp/glstub /tmp/erp-venv/bin/pytest --cov=dz_erp --cov-report=term-missing
+python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
+python tools/verify_dependency_graph.py        # explicit dependency-graph validation
+python tools/generate_hash_lock.py --check     # lockfile/hash drift check
+python -m pytest --cov=dz_erp --cov-report=term-missing
+python -m ruff check dz_erp tests tools        # static check
 ```
 
 > Authentication is **server-verified bearer-token** based
@@ -23,5 +36,5 @@ LD_LIBRARY_PATH=/tmp/glstub /tmp/erp-venv/bin/pytest --cov=dz_erp --cov-report=t
 6. [`docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`](docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md) — Phase 5 server-side RBAC, Segregation of Duties (`creator != approver`), multi-company isolation, trigger-protected HMAC-SHA256 audit hash-chain, secret/PII log redaction, and encrypted backup/restore verification.
 7. [`docs/OCR_BENCHMARK_REPORT.md`](docs/OCR_BENCHMARK_REPORT.md) — Phase 6 empirical OCR benchmark report across 18 synthetic Algerian invoices in 6 strata (`benchmarks/results/ground_truth_and_results.json`).
 8. **[`docs/AUTHENTICATION_HARDENING_SPEC.md`](docs/AUTHENTICATION_HARDENING_SPEC.md)** — **Phase 7** remediation of the `X-User-Id`/`X-Company-Id` impersonation vulnerability (`CWE-287`/`CWE-639`): opaque revocable bearer tokens, PBKDF2 password hashing, brute-force lockout, schema migration, and the denial-audit rollback defect.
-9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete 87-test QA execution matrix and coverage results.
+9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (547 collected tests at `21f93b7`; earlier counts retained as dated history).
 10. [`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`](docs/PRODUCTION_READINESS_AND_GO_NO_GO.md) — Final production-readiness assessment and Go/No-Go decision.

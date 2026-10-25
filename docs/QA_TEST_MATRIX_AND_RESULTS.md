@@ -38,19 +38,34 @@ python -m ruff check dz_erp tests tools      # static check
 
 ### 1.2 Current results
 
-- **Total Collected Tests:** `531`
-- **Passed:** `531` (`100%`)
-- **Failed / Skipped / Errors:** `0`
-- **Total Execution Duration:** `94.03s` (`109.57s` with coverage)
-- **Environment:** Python `3.11.2`, `pytest 8.3.5`, `pytest-asyncio 1.3.0`, SQLite `3.40.1` (`WAL`), FastAPI `0.115.12`
-- **Overall Code Coverage (`dz_erp`):** **`89%`** (`3,710 / 4,162` statements covered; `100%` on `__init__.py` and `serve.py`, `98%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `upload.py` and `odoo_test_adapter.py`, `94%` on `database.py` and `intake_ocr.py`, `93%` on `localization.py` and `rotation_audit.py`, `87%` on `key_provider.py`, `86%` on `key_rotation.py`, `85%` on `rotate_keys.py`, `83%` on `api.py`, `82%` on `procurement_stock.py`, `80%` on `decimal_utils.py`, `70%` on `security_audit.py`).
-- **Staging acceptance:** `37/37` checks (`python tools/staging_acceptance.py`).
+Verified locally at commit `21f93b7912f2e13023cd4dd4cf10267178a2bf82` on
+2026-10-25 (Windows 11, CPython 3.11.9, SQLite 3.40.1, FastAPI 0.115.12,
+pytest 8.3.5), and by GitHub Actions run
+[`40053241264`](https://github.com/Devmraustro/ERP/actions/runs/40053241264)
+(green: Python 3.11, Python 3.12, and the Windows key-rotation/backup job) for
+that exact commit.
+
+- **Total Collected Tests:** `547`
+- **Passed:** `529`
+- **Skipped:** `18` — all platform-conditional by design: `16` POSIX-only
+  mode-bit/fd/symlink custody tests (`os.name != "posix"`) and `2`
+  `systemd-analyze` availability checks. They execute on the Linux CI jobs.
+- **Failed / Errors:** `0`
+- **Total Execution Duration:** `560.28s` with coverage (first run) / `476.62s` (re-run)
+- **Overall Code Coverage (`dz_erp`):** **`89%`** (`3,785 / 4,261` statements covered on Windows; `100%` on `__init__.py` and `serve.py`, `98%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `upload.py` and `odoo_test_adapter.py`, `94%` on `database.py` and `intake_ocr.py`, `93%` on `localization.py` and `rotation_audit.py`, `88%` on `rotate_keys.py`, `83%` on `api.py`, `82%` on `procurement_stock.py`, `81%` on `key_rotation.py`, `80%` on `decimal_utils.py`, `77%` on `key_provider.py`, `73%` on `security_audit.py`).
+- **Staging acceptance:** `37/37` checks (`python tools/staging_acceptance.py`, isolated synthetic state directory, including the 23,800.00 DZD balanced trial check, both key rotations, checkpoint refusal/truncation checks, isolated restore and fresh-process reopen).
 - **Static check:** `ruff check dz_erp tests tools` → `All checks passed!`
+- **Byte-compile:** `python -m compileall -q dz_erp tests tools` → clean.
+- **Dependency graph:** `python tools/verify_dependency_graph.py` → `OK - the environment matches the declared dependency graph` (53 installed distributions; the single documented `opencv-python → opencv-python-headless` substitution).
+- **Lockfile integrity:** `python tools/generate_hash_lock.py --check` → `OK - 51 pinned distributions, 1277 hashes, no drift`.
 - **Risk-register consistency:** `python tools/risk_register_counts.py` → `risk register summary is consistent (31 rows)`.
 
-The earlier `218`-test figure above described the Phase 8 state; the suite has since grown to
-`531`, and the coverage denominator with it. Sections below that cite older counts are retained
-as history and are dated by the commit or run they name.
+Prior snapshots are retained below as dated history: the Phase-7 suite was
+`87` tests / `92%`, an intermediate round reported `531` passed on Linux
+(CPython 3.11.2, `3,710 / 4,162` statements, 89 %), and the read-only
+hardening round since added the regression tests that bring the suite to
+`547` collected. Sections that cite older counts name the commit or run they
+describe.
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 

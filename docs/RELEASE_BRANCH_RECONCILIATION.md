@@ -89,3 +89,21 @@ The consolidated code head 1c3e84408f6314789bf381d867f151a39f1ce893 was verified
 The active code branch and PR #2 were fast-forwarded without force from the prior tested head 21f93b7 to code head 1c3e844. A documentation-only follow-up is being added to make this verification visible in the current review materials; CI must also be green for that final PR head before merge. PR #1 remains open and was not merged or modified. No PR has been merged and no deployment has occurred.
 
 The latest user-local Windows full-suite run and 37/37 staging acceptance were on predecessor 21f93b7, before the atomic migration change; those results are explicitly not represented as exact-head staging acceptance. Production blockers listed in §4 remain open, and the release verdict remains CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY.
+
+## 8. Latest verification update — 2026-10-25
+
+The consolidated review branch and PR #2 are aligned at `4225f36c56fed66700d61ffe832db7373214a93d`. GitHub Actions run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) completed successfully on that exact head.
+
+| Check | Exact-head result |
+|---|---|
+| Linux / Python 3.11.17 full suite | 562 passed, 3 skipped, 0 failed; 88% coverage |
+| Linux / Python 3.12.15 full suite | 562 passed, 3 skipped, 0 failed; 88% coverage |
+| Windows / Python 3.12.10 security, migration, backup/recovery subset | 138 passed, 8 skipped, 0 failed |
+| Linux synthetic staging acceptance | 37/37 |
+| Windows synthetic staging acceptance | 37/37 |
+| Risk-register summary | Pass, 31 rows |
+| Dependency, static analysis and byte-compilation gates | Pass across the configured matrix |
+
+The latest code changes add a foreign-key integrity check to the transactional OCR confidence migration and regression coverage for orphaned legacy rows; the original table is preserved if the migration cannot proceed safely. The success fixtures were updated with valid parent records after the first attempted CI revealed two invalid fixtures. All tests pass on the corrected head.
+
+PR #2 remains open and unmerged; PR #1 remains open and unmerged. `main` has not been changed. No production deployment, production key operation, or processing of real customer data occurred. Production blockers in §4 remain open, and the release verdict stays **CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY**.

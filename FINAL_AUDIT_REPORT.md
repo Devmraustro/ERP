@@ -13,7 +13,26 @@ claims on a *different* platform rather than trusting them.
 ---
 
 
-## Latest verification addendum — 2026-10-24
+## Latest verification addendum — 2026-10-25
+
+This addendum supersedes earlier verification figures for the current review head; the dated audit snapshot and older addenda remain historical.
+
+**Exact code/PR head:** `4225f36c56fed66700d61ffe832db7373214a93d`  
+**GitHub Actions:** [run 40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) — all three jobs successful.
+
+- Linux Python 3.11.17: **562 passed, 3 skipped, 0 failed**; 88% coverage (4,403 statements, 523 missed).
+- Linux Python 3.12.15: **562 passed, 3 skipped, 0 failed**; 88% coverage (4,403 statements, 523 missed).
+- Windows Python 3.12.10 platform-sensitive suite: **138 passed, 8 skipped, 0 failed**.
+- Synthetic isolated staging acceptance: **37/37 on Linux and 37/37 on Windows**. The checkpoint-path test uses a same-host sibling directory and does not prove off-host durability.
+- Risk-register summary validation: passed; 31 rows.
+- Hash-verified install, dependency graph, OpenCV/RapidOCR import, Ruff and byte-compilation gates passed as configured in the CI matrix.
+
+The final migration-hardening change validates the rebuilt OCR table with `PRAGMA foreign_key_check` before removing the legacy table. If a legacy record references a missing company, source document or user, the migration raises and rolls back, preserving the original table. Regression tests prove (a) normal legacy migration, (b) idempotency, (c) rollback after a failed data copy and (d) rollback on orphan references. The first attempt on predecessor `9eb402d` revealed two old success fixtures that lacked parent rows; the fixtures were corrected at `4225f36`, and the exact-head suite is green.
+
+**Release verdict remains:** CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY. CI and synthetic tests do not replace KMS/HSM custody, genuinely off-host checkpoints and alerting, representative OCR validation, production-scale recovery drills, or qualified Algerian accounting and legal sign-offs.
+
+
+## Previous verification addendum — 2026-10-24 (historical)
 
 This addendum records the follow-up verification; the dated audit snapshot and command table below remain historical.
 

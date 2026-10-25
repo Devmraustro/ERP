@@ -164,6 +164,40 @@ half-usable deployment.
 | `RotationInProgressError` | Another rotation holds the lock | Wait for it, or investigate a stale process. Never delete a lock file while a rotation may be running. |
 | `KeyVersionInUseError` on removal | Data still depends on the version | Re-encrypt first (vault), or keep the version (audit history cannot be re-signed). |
 | Report `failed > 0` with `InvalidToken` | Blob was already corrupt before rotation | Quarantine the blob for investigation; the rest of the store migrated normally. |
+| `OCR confidence migration would introduce ... foreign-key violation(s)` | A legacy OCR field refers to a missing company, source document or edited-by user | Stop retries. Take a verified backup, inspect a copy with the LEFT JOIN checks below, repair from authoritative records only, then retry the migration after the references are valid. Do not fabricate parent rows or edit the sole source database in place. |
+
+### OCR confidence migration refused because of orphaned references
+
+The OCR confidence migration rebuilds `ocr_extracted_fields` transactionally. It checks the replacement table's foreign keys before dropping the retained legacy table. If a referenced company, source document or edited-by user is missing, the migration raises `sqlite3.IntegrityError` and rolls back. The original table and its rows should remain in place; do not repeatedly restart the application hoping the migration will skip the bad row.
+
+1. Stop further migration attempts and take a verified backup of the database file and its required key material. Work on a copy, not the only source.
+2. Run the following diagnostic queries against the copied database. They identify missing parent records without modifying data:
+
+```sql
+-- OCR rows whose company does not exist.
+SELECT l.id, l.company_id, l.document_id
+FROM ocr_extracted_fields AS l
+LEFT JOIN companies AS c ON c.id = l.company_id
+WHERE c.id IS NULL;
+
+-- OCR rows whose source document does not exist.
+SELECT l.id, l.company_id, l.document_id
+FROM ocr_extracted_fields AS l
+LEFT JOIN source_documents AS d ON d.id = l.document_id
+WHERE d.id IS NULL;
+
+-- OCR rows whose optional editor reference does not exist.
+SELECT l.id, l.edited_by_id, l.document_id
+FROM ocr_extracted_fields AS l
+LEFT JOIN users AS u ON u.id = l.edited_by_id
+WHERE l.edited_by_id IS NOT NULL AND u.id IS NULL;
+```
+
+3. Reconcile each result against authoritative database records or a verified backup. Restore the correct parent record or apply a reviewed data-repair plan on the copy. Do not invent a company, document or user merely to satisfy the constraint; that would change the accounting/audit meaning of the data.
+4. Re-run the diagnostic queries and verify the related OCR/document/company data and audit chain. Only then retry the supported application migration on a fresh, backed-up copy.
+5. If the parent records cannot be restored conclusively, keep the original database intact and escalate for a reviewed recovery decision. Do not drop the orphan row, rename tables manually, or bypass the migration check.
+
+The FK check proves referential existence for the rebuilt OCR table; it does not, by itself, prove that every cross-company relationship reflects the correct business ownership. Review tenant/company consistency separately when repairing historical data.
 
 ### Interrupted rotation
 

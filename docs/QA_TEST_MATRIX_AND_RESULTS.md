@@ -36,19 +36,20 @@ python -m ruff check dz_erp tests tools      # static check
 | Mandatory runtime libraries | **None.** Every pinned runtime dependency is a pure-Python or wheel package |
 | Optional (GUI build only) | `libgl1`, `libglib2.0-0` — needed only if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging |
 
-### 1.2 Current verification — code head 1c3e844 (2026-10-24)
+### 1.2 Current verification — consolidated head 4225f36 (2026-10-25)
 
-The latest fully tested code commit is 1c3e84408f6314789bf381d867f151a39f1ce893. GitHub Actions run [40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357) completed successfully on that exact SHA.
+The exact current PR/code head `4225f36c56fed66700d61ffe832db7373214a93d` passed GitHub Actions run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234). All three jobs succeeded.
 
-- **Linux / Python 3.11.17:** 548 passed, 0 failed, 0 skipped; 89% coverage (4,269 statements, 458 missed); 102.68 seconds.
-- **Linux / Python 3.12.15:** 548 passed, 0 failed, 0 skipped; 89% coverage (4,269 statements, 458 missed); 513.95 seconds.
-- **Windows CI:** key rotation, migration, backup/restore, logging and recovery job passed.
-- **Migration regression:** test_confidence_migration_rolls_back_if_copy_fails passed on both supported Linux Python versions.
-- **Static and dependency checks on the exact code head:** Ruff passed, compileall passed, dependency-graph validation passed, and hash-lock drift check passed.
+- **Linux / Python 3.11.17:** 562 passed, 3 platform-specific skipped, 0 failed; **88% coverage** (4,403 statements, 523 missed); 92.58 seconds.
+- **Linux / Python 3.12.15:** 562 passed, 3 platform-specific skipped, 0 failed; **88% coverage** (4,403 statements, 523 missed); 289.31 seconds.
+- **Windows / Python 3.12.10:** key rotation, migration, backup/restore, logging and recovery subset: 138 passed, 8 platform-specific skipped, 0 failed; 92.88 seconds.
+- **Synthetic staging acceptance:** 37/37 on Linux and 37/37 on Windows. The checkpoint path exercise uses a same-host sibling directory; it does not prove real off-host durability.
+- **Risk register:** `python tools/risk_register_counts.py` passed and reported a consistent 31-row register.
+- **Exact-head migration regressions:** valid legacy OCR rows migrate and re-migrate idempotently; a failed copy rolls back the table rebuild; a legacy row with an orphan foreign-key reference is rejected and the original table is preserved.
 
-The user's local Windows run on predecessor 21f93b7912f2e13023cd4dd4cf10267178a2bf82 collected 547 tests and finished with 529 passed, 18 platform-specific skips, 0 failures and 89% coverage. The phase-16 tests passed 4/4; phase-20 passed 65 with 3 platform-specific skips. The isolated synthetic staging acceptance script passed 37/37 on that predecessor. The only code change between that local run and 1c3e844 was the atomic OCR confidence migration and its rollback regression test; the full suite and that regression passed in exact-head CI. The standalone staging acceptance script has not been rerun on 1c3e844, so 37/37 is not represented here as an exact-head result.
+Dependency installation with hashes, dependency-graph validation, OpenCV/RapidOCR import, Ruff, byte-compilation and hash-lock drift checks passed in the Linux jobs; Windows dependency validation, Ruff and byte-compilation also passed. The full test suite and acceptance checks are complete on the exact head, rather than inferred from a previous commit.
 
-Earlier test totals in this document describe historical phases and are retained where explicitly dated.
+Earlier test totals below describe historical phases and are retained for traceability.
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 
@@ -73,20 +74,19 @@ Earlier test totals in this document describe historical phases and are retained
 
 ### 1.5 Continuous Integration — `Verified`
 
-Exact code head: 1c3e84408f6314789bf381d867f151a39f1ce893.
+Exact PR/code head: `4225f36c56fed66700d61ffe832db7373214a93d`. Workflow run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) completed successfully.
 
-| Workflow | Run | Result |
-|---|---|---|
-| Push, full suite / coverage / static checks | [40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357) | **success** |
-| Python 3.11 job | [120784430379](https://github.com/Devmraustro/ERP/actions/runs/40064379357/job/120784430379) | **success**, 548 passed |
-| Python 3.12 job | [120784430319](https://github.com/Devmraustro/ERP/actions/runs/40064379357/job/120784430319) | **success**, 548 passed |
-| Windows rotation / migration / backup / recovery job | [120784430214](https://github.com/Devmraustro/ERP/actions/runs/40064379357/job/120784430214) | **success** |
+| Job | Result |
+|---|---|
+| [Python 3.11 full suite, coverage, staging and risk-register check](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220958167) | **success** — 562 passed, 3 skipped; 88% coverage; staging 37/37 |
+| [Python 3.12 full suite and static checks](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220958125) | **success** — 562 passed, 3 skipped; 88% coverage |
+| [Windows rotation, migration, backup/restore and staging](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220957929) | **success** — 138 passed, 8 skipped; staging 37/37 |
 
-All three jobs are green for the exact code head. Both Linux jobs also completed dependency installation with hashes, dependency-graph validation, OpenCV/RapidOCR import assertions, Ruff, byte-compilation and the full test suite with coverage. The rollback-on-failed-copy regression is explicitly shown passing on both Python 3.11 and 3.12.
+The Windows count is for the platform-sensitive test subset, not the entire Linux matrix. Staging acceptance runs on Linux/Python 3.11 and Windows; it is deliberately skipped on Python 3.12 to avoid duplicating the same synthetic acceptance workflow.
 
-The consolidated review branch may contain a documentation-only follow-up commit after this tested code head. The evidence above is deliberately tied to the code SHA and does not substitute for checking the resulting PR-head workflow before merge.
+The exact head includes the atomic OCR confidence migration, foreign-key checking before dropping the legacy table, rollback tests for invalid confidence and orphan references, corrected valid legacy fixtures, strict TAR restore preflight, and Windows reparse/junction checks. The two original fixture failures on the earlier `9eb402d` commit were corrected in `4225f36`; the latest full CI is green.
 
-**What CI does not prove.** OCR accuracy remains host-dependent at the margin because ONNX Runtime, OpenCV and PDFium dispatch SIMD kernels based on host CPU features. The assertions test recognition rather than bit-exactness, and benchmark thresholds are floors with documented margins. CI does not provide statutory accounting or legal certification.
+**What CI does not prove.** The synthetic checkpoint drill uses a same-host sibling directory, not an independent off-host target. CI and staging do not provide statutory accounting or legal certification, real KMS/HSM custody, production-scale recovery evidence, or representative real-world Arabic OCR accuracy.
 
 ## 2. Detailed Test Matrix (`Passed`)
 

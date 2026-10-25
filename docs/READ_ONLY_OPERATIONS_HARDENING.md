@@ -71,7 +71,7 @@ The current feature branch contains tests for:
 - Proving an incompatible legacy schema is reported and not automatically migrated during monitoring.
 - Proving that removal of an audit immutability trigger or posted-supplier-invoice uniqueness index makes monitoring fail closed without recreating the object.
 
-These regression tests are verified. The Windows local phase-20 run on code head 21f93b7 reported 65 passed and 3 platform-specific skips; the unchanged-database-bytes test passed. The exact code head 1c3e844 passed the full suite on Linux Python 3.11 and 3.12, including the new OCR-migration rollback regression. The standalone staging acceptance result 37/37 belongs to predecessor 21f93b7, not the exact current code head.
+These regression tests are verified on the consolidated head `4225f36c56fed66700d61ffe832db7373214a93d`. Exact-head CI run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) passed on Linux Python 3.11 and 3.12, including the phase-20 read-only invariants, OCR migration rollback checks, and the orphan-reference guard. The same run passed the Windows key-rotation/migration/backup/recovery suite. Staging acceptance passed 37/37 on Linux and Windows.
 
 ## 5. Repeatable verification commands and recorded evidence
 
@@ -87,7 +87,7 @@ python tools/staging_acceptance.py
 
 Then inspect GitHub Actions for the **exact current commit SHA** and confirm all supported Linux Python jobs and the Windows key-rotation/recovery job are green. A historical successful run does not verify these later changes.
 
-**Recorded exact-code CI evidence:** commit 1c3e84408f6314789bf381d867f151a39f1ce893, [run 40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357), all three jobs successful. Linux Python 3.11 and 3.12 each reported 548 passed, no failed/skipped tests and 89% coverage; the Windows key-rotation, migration, backup/restore and recovery job also passed. The new test test_confidence_migration_rolls_back_if_copy_fails verifies that a failed OCR confidence migration restores the original table and row. Full local Windows and staging acceptance evidence is recorded above with its predecessor SHA so it is not confused with exact-head CI.
+**Recorded exact-head CI evidence:** code head `4225f36c56fed66700d61ffe832db7373214a93d`, [run 40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234), all three jobs successful. Linux Python 3.11 and 3.12 each reported 562 passed, 3 skipped, 0 failed and 88% coverage (4,403 statements, 523 missed). The Windows platform-sensitive suite reported 138 passed, 8 skipped, 0 failed. Staging acceptance passed 37/37 on both Linux and Windows. The OCR migration tests verify atomic rollback for failed copies and rejection of legacy orphan references without losing the original table. All three jobs passed dependency/static checks appropriate to their matrix.
 
 The checks listed above remain the repeatable gate for future changes. A fresh isolated staging acceptance run after pulling the exact current tree is still recommended before relying on staging acceptance as exact-head evidence.
 

@@ -976,6 +976,21 @@ class ERPDatabase:
                 LEFT JOIN source_documents d ON d.id = l.document_id
                 """
             )
+            # Foreign keys are disabled only to permit the rebuild. Validate the
+            # replacement table explicitly before discarding the legacy copy; old
+            # databases may contain orphans because their schema did not enforce
+            # the same constraints. If any references are invalid, fail closed and
+            # roll back to the original table rather than preserve silent orphans.
+            violations = conn.execute(
+                "PRAGMA foreign_key_check(ocr_extracted_fields)"
+            ).fetchall()
+            if violations:
+                table, rowid, parent, foreign_key_id = violations[0]
+                raise sqlite3.IntegrityError(
+                    "OCR confidence migration would introduce "
+                    f"{len(violations)} foreign-key violation(s); first violation: "
+                    f"table={table}, rowid={rowid}, parent={parent}, fk={foreign_key_id}."
+                )
             conn.execute("DROP TABLE ocr_extracted_fields_legacy")
             conn.execute(
                 """

@@ -420,6 +420,53 @@ def test_confidence_migration_rolls_back_if_copy_fails(tmp_path: Path) -> None:
     assert row == (1.5, "raw amount"), "the original row must remain intact after rollback"
 
 
+def test_confidence_migration_rolls_back_when_legacy_rows_have_orphan_references(
+    tmp_path: Path,
+) -> None:
+    """A migration must not silently move legacy OCR rows with broken foreign keys."""
+    path = tmp_path / "legacy-orphan-migration.sqlite3"
+
+    # Start from the production schema, then emulate an old OCR table that
+    # allowed an orphan document reference.
+    db = ERPDatabase(str(path))
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO companies (id, code, name, country_code, created_at) "
+            "VALUES (1, 'DZ1', 'Synthetic', 'DZ', '2026-01-01')"
+        )
+
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DROP TRIGGER IF EXISTS trg_ocr_field_preserve_raw")
+    conn.execute("DROP TABLE ocr_extracted_fields")
+    conn.execute(LEGACY_OCR_TABLE)
+    conn.execute(
+        "INSERT INTO ocr_extracted_fields (company_id, document_id, field_name, raw_text,"
+        " normalized_value, confidence, bbox_json, ocr_model_version, created_at)"
+        " VALUES (1, 'missing-document', 'amount_ht_dzd', 'raw amount', '1000.00',"
+        " 0.97, '[]', 'v', '2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="foreign-key violation"):
+        ERPDatabase(str(path))
+
+    conn = sqlite3.connect(str(path))
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(ocr_extracted_fields)")}
+    row = conn.execute(
+        "SELECT confidence, raw_text, document_id FROM ocr_extracted_fields"
+    ).fetchone()
+    conn.close()
+
+    assert "ocr_extracted_fields" in tables
+    assert "ocr_extracted_fields_legacy" not in tables
+    assert "confidence_kind" not in columns
+    assert row == (0.97, "raw amount", "missing-document")
+
+
 # ----------------------------------------------------------------------
 # 5. A confidence value can never authorise posting
 # ----------------------------------------------------------------------

@@ -4,13 +4,24 @@ Production-grade Algerian *Système Comptable Financier* (SCF) localization, pro
 
 ## Quick Verification
 
-Verified at commit `21f93b7` (2026-10-25): **529 passed, 18 skipped, 89 % coverage**
-on Windows/CPython 3.11 — the 18 skips are POSIX-only mode-bit/fd tests and a
-`systemd-analyze` availability check; they run on Linux CI. GitHub Actions run
-[`40053241264`](https://github.com/Devmraustro/ERP/actions/runs/40053241264) is
-green on Python 3.11, 3.12 **and** the Windows key-rotation/backup job for that
-exact commit. (The retired `/tmp/glstub` workaround is unsupported — see the
-note in `docs/QA_TEST_MATRIX_AND_RESULTS.md` §1.)
+Verified at code head `4225f36c56fed66700d61ffe832db7373214a93d` (2026-10-25):
+GitHub Actions run [`40210565234`](https://github.com/Devmraustro/ERP/actions/runs/40210565234)
+is green on Linux Python 3.11 and 3.12 (562 passed, 3 skipped, 88 % coverage each)
+**and** the Windows key-rotation/backup job (138 passed, 8 skipped), with the
+isolated synthetic staging acceptance at **37/37** on both platforms. The
+documentation-only successor `62a4bf9` (PR #2 head) is also green (run
+[`40211521769`](https://github.com/Devmraustro/ERP/actions/runs/40211521769),
+all three jobs successful).
+
+On Windows/CPython 3.12.10 the full local suite reports **546 passed, 19 skipped,
+0 failed** and the staging acceptance script exits **0** with **37/37** checks.
+The 19 local skips are POSIX-only mode-bit/fd tests and a `systemd-analyze`
+availability check; they run on Linux CI. Supported runtimes are Python
+3.11.17+ and 3.12.10+ (`requires-python` in `pyproject.toml`); older patch
+releases, including 3.11.9, are refused by the restore safety gate because they
+lack the tarfile security fixes plus the independent archive preflight.
+(The retired `/tmp/glstub` workaround is unsupported — see the note in
+`docs/QA_TEST_MATRIX_AND_RESULTS.md` §1.)
 
 ```bash
 python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -36,5 +47,5 @@ python -m ruff check dz_erp tests tools        # static check
 6. [`docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`](docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md) — Phase 5 server-side RBAC, Segregation of Duties (`creator != approver`), multi-company isolation, trigger-protected HMAC-SHA256 audit hash-chain, secret/PII log redaction, and encrypted backup/restore verification.
 7. [`docs/OCR_BENCHMARK_REPORT.md`](docs/OCR_BENCHMARK_REPORT.md) — Phase 6 empirical OCR benchmark report across 18 synthetic Algerian invoices in 6 strata (`benchmarks/results/ground_truth_and_results.json`).
 8. **[`docs/AUTHENTICATION_HARDENING_SPEC.md`](docs/AUTHENTICATION_HARDENING_SPEC.md)** — **Phase 7** remediation of the `X-User-Id`/`X-Company-Id` impersonation vulnerability (`CWE-287`/`CWE-639`): opaque revocable bearer tokens, PBKDF2 password hashing, brute-force lockout, schema migration, and the denial-audit rollback defect.
-9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (547 collected tests at `21f93b7`; earlier counts retained as dated history).
+9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (565 collected tests at the consolidated head; earlier counts retained as dated history).
 10. [`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`](docs/PRODUCTION_READINESS_AND_GO_NO_GO.md) — Final production-readiness assessment and Go/No-Go decision.

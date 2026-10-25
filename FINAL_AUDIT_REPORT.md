@@ -13,6 +13,53 @@ claims on a *different* platform rather than trusting them.
 ---
 
 
+## Final verification addendum — merge head 0867206 (2026-10-25, Windows local)
+
+This addendum records the post-merge verification at `0867206554d5d6521c803f84be1b957880ada111`
+(the merge of the consolidated review work into the session branch plus this documentation-only
+addendum). Older addenda below remain historical.
+
+**Local Windows / CPython 3.12.10 full suite (hash-verified install):**
+546 passed, 19 skipped (POSIX-only and `systemd-analyze` conditions), 0 failed;
+**89 % coverage** (4,403 statements, 504 missed, `coverage312.xml`); duration 27 min 28 s
+including subprocess coverage for the process-boundary tests.
+
+**Isolated synthetic staging acceptance:** **37/37 passed, process exit code 0** (verified twice
+with `$LASTEXITCODE`). An earlier session recorded "Exited with code 1" from the shell wrapper
+while all 37 checks printed `[PASS]`; the wrapper was reacting to a benign `pdfminer` stderr
+warning (`CropBox missing from /Page, defaulting to MediaBox`) surfaced as a PowerShell
+`NativeCommandError` record. The script itself returned 0 in both reproductions; no runner
+defect exists.
+
+**Static/dependency gates on 3.12.10:** Ruff clean (`dz_erp tests tools`), `compileall` clean,
+`tools/verify_dependency_graph.py` OK (only the documented `opencv-python-headless`
+substitution), `tools/generate_hash_lock.py --check` OK (51 distributions, 1277 hashes),
+`tools/risk_register_counts.py` consistent (31 rows), documentation-consistency tests
+12/12 passed after the README refresh.
+
+**Python version policy (intentional):** supported runtimes are Python **3.11.17+** and
+**3.12.10+** (`requires-python` in `pyproject.toml`, enforced by
+`tests/test_phase19_dependency_integrity.py` and the restore safety gate in
+`dz_erp/security_audit.py`). Python 3.11.9 is deliberately unsupported for backup/restore
+(it lacks the tarfile security fixes; the preflight guard then fails closed). Running the full
+suite on 3.11.9 produced 11 expected failures, all in `test_phase11`/`test_phase12` restore
+tests, asserting exactly that refusal; they pass on 3.12.10.
+
+**CI:** the docs-only remote tip `62a4bf9` (PR #2 head) is green — GitHub Actions run
+[`40211521769`](https://github.com/Devmraustro/ERP/actions/runs/40211521769), all three jobs
+successful; the code head `4225f36` beneath it is green with run
+[`40210565234`](https://github.com/Devmraustro/ERP/actions/runs/40210565234) (562 passed /
+3 skipped / 88 % coverage on Linux 3.11 and 3.12; Windows 3.12.10 subset 138 passed / 8 skipped;
+staging 37/37 on both). The merge commit and this addendum add **no code changes**, so those
+runs remain the authoritative code evidence; a CI run for the merge SHA itself requires a
+workflow dispatch or PR head update with push credentials (not available locally).
+
+**Release verdict remains:** CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY. The
+blockers in §7 below are unchanged: KMS/HSM or equivalent custody, genuinely off-host
+checkpoints with alerting, representative OCR validation, production-scale recovery drills,
+and qualified Algerian accounting/legal sign-offs.
+
+
 ## Latest verification addendum — 2026-10-25
 
 This addendum supersedes earlier verification figures for the current review head; the dated audit snapshot and older addenda remain historical.

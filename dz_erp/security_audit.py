@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import sqlite3
+import stat
 import tarfile
 import threading
 import time
@@ -641,6 +642,34 @@ def _write_key_file(key_path: Path, secret: bytes) -> None:
     FileKeyProvider(key_path).write(secret)
 
 
+def _lstat_restore_path(path: Path):
+    """Inspect an existing restore path component without following links.
+
+    Path.is_symlink does not cover every Windows reparse point, and checking
+    only an archive's members does not protect against a hard-linked file already
+    present in the destination. Return lstat metadata so the caller can also
+    refuse to truncate a regular file whose inode is shared outside the target.
+    """
+    path = Path(path)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise FinancialIntegrityError(
+            f"Cannot safely inspect restore target path component {path}: {exc}"
+        ) from exc
+
+    is_reparse_point = os.name == "nt" and bool(
+        int(getattr(metadata, "st_file_attributes", 0)) & 0x0400  # FILE_ATTRIBUTE_REPARSE_POINT
+    )
+    if stat.S_ISLNK(metadata.st_mode) or is_reparse_point:
+        raise FinancialIntegrityError(
+            f"Restore target contains a symbolic link or reparse point: {path}"
+        )
+    return metadata
+
+
 def restore_and_verify_backup(
     backup_path: Path,
     backup_encryption_key: bytes,
@@ -649,8 +678,7 @@ def restore_and_verify_backup(
 ) -> Dict[str, Any]:
     """Decrypt, unpack, and verify a backup archive in an isolated target directory."""
     restore_target_dir = Path(restore_target_dir)
-    if restore_target_dir.is_symlink():
-        raise FinancialIntegrityError(f"Restore target must not be a symbolic link: {restore_target_dir}")
+    _lstat_restore_path(restore_target_dir)
     restore_target_dir = restore_target_dir.resolve()
     target_existed = restore_target_dir.exists()
     if target_existed and not restore_target_dir.is_dir():
@@ -748,24 +776,35 @@ def restore_and_verify_backup(
                 current = root
                 for index, part in enumerate(parts):
                     current = current / part
-                    if current.is_symlink():
-                        raise FinancialIntegrityError(
-                            f"Restore target contains a symbolic link in archive path: {name!r}"
-                        )
-                    if current.exists():
-                        if index < len(parts) - 1 and not current.is_dir():
+                    current_info = _lstat_restore_path(current)
+                    if current_info is None:
+                        continue
+
+                    if index < len(parts) - 1:
+                        if not stat.S_ISDIR(current_info.st_mode):
                             raise FinancialIntegrityError(
                                 f"Restore path component is not a directory: {current}"
                             )
-                        if index == len(parts) - 1:
-                            if member.isdir() and not current.is_dir():
-                                raise FinancialIntegrityError(
-                                    f"Directory archive member conflicts with existing file: {current}"
-                                )
-                            if member.isfile() and current.is_dir():
-                                raise FinancialIntegrityError(
-                                    f"File archive member conflicts with existing directory: {current}"
-                                )
+                        continue
+
+                    if member.isdir():
+                        if not stat.S_ISDIR(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"Directory archive member conflicts with existing file: {current}"
+                            )
+                    elif member.isfile():
+                        if stat.S_ISDIR(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"File archive member conflicts with existing directory: {current}"
+                            )
+                        if not stat.S_ISREG(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"Refusing to overwrite a non-regular restore target: {current}"
+                            )
+                        if int(getattr(current_info, "st_nlink", 1)) > 1:
+                            raise FinancialIntegrityError(
+                                f"Refusing to overwrite a pre-existing hard-linked file in restore target: {current}"
+                            )
                 try:
                     filtered = safe_data_filter(member, str(root))
                     if filtered is None:

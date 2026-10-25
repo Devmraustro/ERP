@@ -648,6 +648,94 @@ def test_restore_rejects_tar_links_before_extraction(tmp_path: Path, link_type: 
     assert not (tmp_path / "outside" / "payload.txt").exists()
     assert not restore_target.exists(), "failed preflight must not leave a partial restore directory"
 
+def test_restore_refuses_preexisting_hardlink_target_before_writing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A regular archive member must not truncate an outside file via an existing hard link."""
+    monkeypatch.setattr(security_audit_module.sys, "version_info", (3, 11, 17))
+    key = Fernet.generate_key()
+    target = tmp_path / "restore-target"
+    vault_target = target / "vault"
+    vault_target.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"OUTSIDE FILE MUST REMAIN UNCHANGED")
+    hardlink = vault_target / "payload.txt"
+    try:
+        os.link(outside, hardlink)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable on this test filesystem: {exc}")
+    assert hardlink.stat().st_nlink > 1
+
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+        vault_dir = tarfile.TarInfo("vault")
+        vault_dir.type = tarfile.DIRTYPE
+        tar.addfile(vault_dir)
+        payload = b"ARCHIVE PAYLOAD MUST NOT OVERWRITE THE LINKED INODE"
+        member = tarfile.TarInfo("vault/payload.txt")
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+
+    backup = tmp_path / "hardlink-target-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    with pytest.raises(FinancialIntegrityError, match="hard-linked file"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=target,
+        )
+
+    assert outside.read_bytes() == b"OUTSIDE FILE MUST REMAIN UNCHANGED"
+    assert hardlink.read_bytes() == b"OUTSIDE FILE MUST REMAIN UNCHANGED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_restore_refuses_existing_windows_junction_prefix(tmp_path: Path, monkeypatch) -> None:
+    """A pre-existing junction inside the target must not redirect extraction outside it."""
+    monkeypatch.setattr(security_audit_module.sys, "version_info", (3, 12, 10))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    protected = outside / "payload.txt"
+    protected.write_bytes(b"JUNCTION TARGET MUST REMAIN UNCHANGED")
+
+    target = tmp_path / "restore-target"
+    target.mkdir()
+    junction = target / "vault"
+    command = f'mklink /J "{junction}" "{outside}"'
+    result = subprocess.run(["cmd", "/c", command], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        pytest.skip(f"the Windows runner cannot create a junction: {result.stderr or result.stdout}")
+    assert junction.is_dir()
+
+    key = Fernet.generate_key()
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+        vault_dir = tarfile.TarInfo("vault")
+        vault_dir.type = tarfile.DIRTYPE
+        tar.addfile(vault_dir)
+        payload = b"UNSAFE WRITE THROUGH JUNCTION"
+        member = tarfile.TarInfo("vault/payload.txt")
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+
+    backup = tmp_path / "junction-target-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    with pytest.raises(FinancialIntegrityError, match="reparse point"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=target,
+        )
+
+    assert protected.read_bytes() == b"JUNCTION TARGET MUST REMAIN UNCHANGED"
+
+
 def test_restore_requires_a_backup_key_and_does_not_leak_on_failure(tmp_path: Path) -> None:
     deployment = _deployment_with_partial_rotation(tmp_path / "src")
     db, vault = deployment["db"], deployment["vault"]

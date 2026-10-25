@@ -65,6 +65,7 @@ Each row is executable or verifiable in this repository.
 | Forge an audit record | HMAC-SHA256 per event, chained | `verify_all_audit_chains`; tamper tests |
 | Rewrite rotation history | Ledger MAC chain + off-host checkpoints | `RotationLedger.verify`, `verify_against_checkpoint` |
 | Delete a key to hide a compromise | Removal requires explicit confirmation and records a refusal otherwise | `vault-remove` / `audit-remove` refusal tests |
+| Redirect a restore into an existing symlink, Windows junction/reparse point, or hard-linked file | Preflight uses `lstat`; reparse points are refused, non-regular targets are refused, and regular targets with `st_nlink > 1` cannot be overwritten | `test_restore_refuses_preexisting_hardlink_target_before_writing`, `test_restore_refuses_existing_windows_junction_prefix` |
 | Retire a key that documents still need | Rotation converges and reports `stray_versions`; `COMPLETED_VERIFIED` requires convergence | `tests/test_phase16_rotation_concurrency_convergence.py` |
 | Rotate a key while the audit chain is already broken | Refused, and the refusal itself is recorded in the ledger | Phase 14 refusal test |
 | Lose a key version | Start-up and read paths raise `VaultKeyUnavailableError` / `AuditKeyUnavailableError`; never silently regenerates | Phase 10/11/12 tests |

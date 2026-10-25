@@ -648,6 +648,7 @@ def test_restore_rejects_tar_links_before_extraction(tmp_path: Path, link_type: 
     assert not (tmp_path / "outside" / "payload.txt").exists()
     assert not restore_target.exists(), "failed preflight must not leave a partial restore directory"
 
+
 def test_restore_refuses_preexisting_hardlink_target_before_writing(
     tmp_path: Path, monkeypatch
 ) -> None:

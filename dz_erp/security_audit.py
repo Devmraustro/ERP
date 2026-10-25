@@ -642,7 +642,7 @@ def _write_key_file(key_path: Path, secret: bytes) -> None:
     FileKeyProvider(key_path).write(secret)
 
 
-def _lstat_restore_path(path: Path):
+def _lstat_restore_path(path: Path) -> Optional[os.stat_result]:
     """Inspect an existing restore path component without following links.
 
     Path.is_symlink does not cover every Windows reparse point, and checking

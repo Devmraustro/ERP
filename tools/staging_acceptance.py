@@ -14,9 +14,12 @@ end-to-end workflow against an isolated temporary directory:
             -> interrupted rotation + resume -> backup -> isolated restore
             -> verification in a fresh OS process
 
-Every input is synthetic and every path is inside ``--state`` (a fresh temporary
-directory by default). No production host, credential, or customer record is
-touched, and no key material is printed.
+Every input is synthetic. Primary ERP state is kept under ``--state`` (a fresh temporary
+directory by default). The checkpoint-path check creates a sibling directory on
+the **same host** to verify path separation from the live ledger and vault; it does
+not simulate off-host availability, independent credentials, or durable remote
+retention. No production host, credential, or customer record is touched, and no
+key material is printed.
 
 Usage::
 
@@ -387,7 +390,7 @@ def run(state: Path) -> int:
         lambda: _assert(db.verify_audit_chain(1)["key_versions"].get("2") == 1),
     )
 
-    # -------------------------------------- ledger checkpoints (off-host proof)
+    # ------------------------ ledger checkpoint path separation (same-host simulation)
     from dz_erp.rotation_audit import (
         RotationLedger,
         RotationLedgerCheckpointError,
@@ -398,9 +401,9 @@ def run(state: Path) -> int:
 
     ledger_path = state / "vault.rotation-ledger.jsonl"
     ledger = RotationLedger.open(ledger_path, create=False)
-    offhost = state.parent / (state.name + "-offhost")
-    offhost.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = offhost / "vault.rotation.checkpoint.json"
+    checkpoint_simulation_dir = state.parent / (state.name + "-checkpoint-simulation")
+    checkpoint_simulation_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_simulation_dir / "vault.rotation.checkpoint.json"
 
     # check() records any return value as PASS, so a control that fails to fire
     # must raise rather than return False.
@@ -410,7 +413,7 @@ def run(state: Path) -> int:
         _assert(exported["record_count"] >= 1 and exported["head_hash"], exported)
         return load_checkpoint(checkpoint_path)["head_hash"] == exported["head_hash"]
 
-    check("ledger: checkpoint exported off-host", checkpoint_exported)
+    check("ledger: checkpoint path is separate from live state (same-host simulation)", checkpoint_exported)
     check(
         "ledger: the retained checkpoint matches the live ledger",
         lambda: _assert(ledger.verify_against_checkpoint(load_checkpoint(checkpoint_path))["checkpoint_matched"]),
@@ -628,6 +631,12 @@ def _no_secrets(state: Path, db, vault) -> bool:
     return True
 
 
+def _cleanup_default_state(state: Path) -> None:
+    """Remove default temporary state and the same-host checkpoint simulation directory."""
+    shutil.rmtree(state, ignore_errors=True)
+    shutil.rmtree(state.parent / f"{state.name}-checkpoint-simulation", ignore_errors=True)
+
+
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Isolated synthetic staging acceptance run.")
     parser.add_argument("--state", help="Directory to use (must be empty or absent).")
@@ -644,7 +653,8 @@ def main(argv: List[str] | None = None) -> int:
         state = Path(tempfile.mkdtemp(prefix="erp-staging-"))
 
     print(f"staging acceptance — isolated state: {state}")
-    print("synthetic data only; no production host or credential is used\n")
+    print("synthetic data only; no production host or credential is used")
+    print("checkpoint path separation uses a same-host sibling directory; no off-host durability is claimed\n")
     try:
         status = run(state)
     except Exception:
@@ -653,7 +663,7 @@ def main(argv: List[str] | None = None) -> int:
         status = 1
     finally:
         if not args.keep and not args.state:
-            shutil.rmtree(state, ignore_errors=True)
+            _cleanup_default_state(state)
 
     summary = state / "acceptance-summary.json"
     if state.exists() and args.keep:

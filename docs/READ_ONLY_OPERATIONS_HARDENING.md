@@ -71,9 +71,9 @@ The current feature branch contains tests for:
 - Proving an incompatible legacy schema is reported and not automatically migrated during monitoring.
 - Proving that removal of an audit immutability trigger or posted-supplier-invoice uniqueness index makes monitoring fail closed without recreating the object.
 
-These tests have been committed but **their execution results are not yet verified in this environment**.
+These regression tests are verified on the consolidated head `4225f36c56fed66700d61ffe832db7373214a93d`. Exact-head CI run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) passed on Linux Python 3.11 and 3.12, including the phase-20 read-only invariants, OCR migration rollback checks, and the orphan-reference guard. The same run passed the Windows key-rotation/migration/backup/recovery suite. Staging acceptance passed 37/37 on Linux and Windows.
 
-## 5. Required verification before calling this fix complete
+## 5. Repeatable verification commands and recorded evidence
 
 Run these checks from a clean checkout of the latest `arena/6c474c64-erp` tip:
 
@@ -87,10 +87,8 @@ python tools/staging_acceptance.py
 
 Then inspect GitHub Actions for the **exact current commit SHA** and confirm all supported Linux Python jobs and the Windows key-rotation/recovery job are green. A historical successful run does not verify these later changes.
 
-The working container could not clone the repository because DNS resolution for `github.com` failed. The available GitHub status response also returned no status entries for the new commit, so this document deliberately does not claim that local tests or CI have passed.
+**Recorded exact-head CI evidence:** code head `4225f36c56fed66700d61ffe832db7373214a93d`, [run 40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234), all three jobs successful. Linux Python 3.11 and 3.12 each reported 562 passed, 3 skipped, 0 failed and 88% coverage (4,403 statements, 523 missed). The Windows platform-sensitive suite reported 138 passed, 8 skipped, 0 failed. Staging acceptance passed 37/37 on both Linux and Windows. The OCR migration tests verify atomic rollback for failed copies and rejection of legacy orphan references without losing the original table. All three jobs passed dependency/static checks appropriate to their matrix.
 
-## 6. Release effect
-
-This is security hardening in the authorized feature branch only. It does not authorize merge, deployment, real customer data, production key changes, or a change to the release verdict.
+The checks listed above remain the repeatable gate for future changes. A fresh isolated staging acceptance run after pulling the exact current tree is still recommended before relying on staging acceptance as exact-head evidence.
 
 **Verdict remains: `CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY`.**

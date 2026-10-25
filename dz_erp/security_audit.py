@@ -9,13 +9,15 @@ import io
 import json
 import re
 import shutil
+import sys
 import sqlite3
+import stat
 import tarfile
 import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterator, List, Optional
 
 from cryptography.fernet import Fernet
@@ -640,6 +642,34 @@ def _write_key_file(key_path: Path, secret: bytes) -> None:
     FileKeyProvider(key_path).write(secret)
 
 
+def _lstat_restore_path(path: Path) -> Optional[os.stat_result]:
+    """Inspect an existing restore path component without following links.
+
+    Path.is_symlink does not cover every Windows reparse point, and checking
+    only an archive's members does not protect against a hard-linked file already
+    present in the destination. Return lstat metadata so the caller can also
+    refuse to truncate a regular file whose inode is shared outside the target.
+    """
+    path = Path(path)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise FinancialIntegrityError(
+            f"Cannot safely inspect restore target path component {path}: {exc}"
+        ) from exc
+
+    is_reparse_point = os.name == "nt" and bool(
+        int(getattr(metadata, "st_file_attributes", 0)) & 0x0400  # FILE_ATTRIBUTE_REPARSE_POINT
+    )
+    if stat.S_ISLNK(metadata.st_mode) or is_reparse_point:
+        raise FinancialIntegrityError(
+            f"Restore target contains a symbolic link or reparse point: {path}"
+        )
+    return metadata
+
+
 def restore_and_verify_backup(
     backup_path: Path,
     backup_encryption_key: bytes,
@@ -648,16 +678,156 @@ def restore_and_verify_backup(
 ) -> Dict[str, Any]:
     """Decrypt, unpack, and verify a backup archive in an isolated target directory."""
     restore_target_dir = Path(restore_target_dir)
-    restore_target_dir.mkdir(parents=True, exist_ok=True)
+    _lstat_restore_path(restore_target_dir)
+    restore_target_dir = restore_target_dir.resolve()
+    target_existed = restore_target_dir.exists()
+    if target_existed and not restore_target_dir.is_dir():
+        raise FinancialIntegrityError(f"Restore target is not a directory: {restore_target_dir}")
+
+    # The data filter is used as one boundary, not the only boundary.
+    # Python 3.11 releases after 3.11.17 are source-only; Python 3.12.15 is also
+    # source-only, while 3.12.10 is the last Windows binary installer. For 3.12.10+
+    # we therefore independently reject every link/special member and every
+    # non-canonical/escaping path before extraction; this blocks the tarfile
+    # link-fallback and leave-then-return path bypasses even on older filter code.
+    version = tuple(sys.version_info[:3])
+    supported_runtime = (
+        (version[:2] == (3, 11) and version >= (3, 11, 17))
+        or (version[:2] == (3, 12) and version >= (3, 12, 10))
+    )
+    if not supported_runtime:
+        raise FinancialIntegrityError(
+            "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ "
+            "(and below 3.13); unsafe archive member types and paths are rejected."
+        )
+    safe_data_filter = getattr(tarfile, "data_filter", None)
+    if safe_data_filter is None:
+        raise FinancialIntegrityError(
+            "Safe backup extraction is unavailable in this Python runtime. "
+            "Use a supported, security-patched Python 3.11 or 3.12 release."
+        )
 
     fernet = Fernet(backup_encryption_key)
     decrypted_tar = fernet.decrypt(Path(backup_path).read_bytes())
 
-    with tarfile.open(fileobj=io.BytesIO(decrypted_tar), mode="r:gz") as tar:
-        for member in tar.getmembers():
-            if member.name.startswith("/") or ".." in member.name:
-                raise FinancialIntegrityError(f"Unsafe tar member path detected: {member.name}")
-        tar.extractall(path=restore_target_dir)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(decrypted_tar), mode="r:gz") as tar:
+            members = tar.getmembers()
+            # Preflight every member before writing any of them. This prevents a
+            # late symlink/filter failure from leaving earlier archive entries in
+            # the target directory.
+            root = restore_target_dir.resolve()
+            archive_types: Dict[tuple[str, ...], str] = {}
+            for member in members:
+                name = member.name
+                # Tar archives use POSIX separators. Reject Windows separators,
+                # drive/UNC forms, ADS colons, NULs, empty components, and dot
+                # segments before any member reaches the filesystem.
+                if not name or "\x00" in name or "\\" in name:
+                    raise FinancialIntegrityError(f"Unsafe tar member path detected: {name!r}")
+                posix_name = PurePosixPath(name)
+                windows_name = PureWindowsPath(name)
+                if (
+                    posix_name.is_absolute()
+                    or windows_name.is_absolute()
+                    or windows_name.drive
+                    or name.startswith("/")
+                ):
+                    raise FinancialIntegrityError(f"Unsafe tar member path detected: {name!r}")
+                canonical_name = name[:-1] if member.isdir() and name.endswith("/") else name
+                parts = canonical_name.split("/")
+                if (
+                    not canonical_name
+                    or any(part in ("", ".", "..") for part in parts)
+                    or any(":" in part for part in parts)
+                ):
+                    raise FinancialIntegrityError(f"Unsafe tar member path detected: {name!r}")
+
+                # Backups generated by this application need only ordinary
+                # directories and regular files. Reject symlinks, hardlinks,
+                # devices, FIFOs, and every other special type; this removes
+                # link-target and link-fallback attack surfaces entirely.
+                if not (member.isdir() or member.isfile()):
+                    raise FinancialIntegrityError(
+                        f"Backup archive contains a disallowed link or special member: {name!r}"
+                    )
+
+                # Reject duplicate names and file/directory prefix conflicts
+                # inside the archive before creating any filesystem entries.
+                key = tuple(parts)
+                if key in archive_types:
+                    raise FinancialIntegrityError(f"Duplicate tar member path detected: {name!r}")
+                for prefix_length in range(1, len(key)):
+                    if archive_types.get(key[:prefix_length]) == "file":
+                        raise FinancialIntegrityError(
+                            f"Tar member has a regular file as a parent path: {name!r}"
+                        )
+                if member.isfile() and any(
+                    existing[: len(key)] == key for existing in archive_types
+                ):
+                    raise FinancialIntegrityError(
+                        f"Tar member would replace a parent directory with a file: {name!r}"
+                    )
+                archive_types[key] = "directory" if member.isdir() else "file"
+
+                # Existing symlinks within the destination can redirect a
+                # seemingly safe child path. Check the whole existing prefix as
+                # well as the final target before writing anything.
+                current = root
+                for index, part in enumerate(parts):
+                    current = current / part
+                    current_info = _lstat_restore_path(current)
+                    if current_info is None:
+                        continue
+
+                    if index < len(parts) - 1:
+                        if not stat.S_ISDIR(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"Restore path component is not a directory: {current}"
+                            )
+                        continue
+
+                    if member.isdir():
+                        if not stat.S_ISDIR(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"Directory archive member conflicts with existing file: {current}"
+                            )
+                    elif member.isfile():
+                        if stat.S_ISDIR(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"File archive member conflicts with existing directory: {current}"
+                            )
+                        if not stat.S_ISREG(current_info.st_mode):
+                            raise FinancialIntegrityError(
+                                f"Refusing to overwrite a non-regular restore target: {current}"
+                            )
+                        if int(getattr(current_info, "st_nlink", 1)) > 1:
+                            raise FinancialIntegrityError(
+                                f"Refusing to overwrite a pre-existing hard-linked file in restore target: {current}"
+                            )
+                try:
+                    filtered = safe_data_filter(member, str(root))
+                    if filtered is None:
+                        raise FinancialIntegrityError(
+                            f"Backup archive member was refused by the safe extraction filter: {name!r}"
+                        )
+                except FinancialIntegrityError:
+                    raise
+                except (tarfile.TarError, OSError) as exc:
+                    raise FinancialIntegrityError(
+                        f"Backup archive contains an unsafe tar entry; extraction was refused: {exc}"
+                    ) from exc
+
+            restore_target_dir.mkdir(parents=True, exist_ok=True)
+            tar.extractall(path=restore_target_dir, filter=safe_data_filter)
+    except FinancialIntegrityError:
+        raise
+    except (tarfile.TarError, OSError) as exc:
+        if not target_existed:
+            shutil.rmtree(restore_target_dir, ignore_errors=True)
+        raise FinancialIntegrityError(
+            f"Backup archive contains an unsafe or invalid tar entry; extraction was refused: {exc}"
+        ) from exc
 
     manifest = json.loads((restore_target_dir / "manifest.json").read_text(encoding="utf-8"))
     restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"

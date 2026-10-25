@@ -36,36 +36,20 @@ python -m ruff check dz_erp tests tools      # static check
 | Mandatory runtime libraries | **None.** Every pinned runtime dependency is a pure-Python or wheel package |
 | Optional (GUI build only) | `libgl1`, `libglib2.0-0` — needed only if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging |
 
-### 1.2 Current results
+### 1.2 Current verification — consolidated head 4225f36 (2026-10-25)
 
-Verified locally at commit `21f93b7912f2e13023cd4dd4cf10267178a2bf82` on
-2026-10-25 (Windows 11, CPython 3.11.9, SQLite 3.40.1, FastAPI 0.115.12,
-pytest 8.3.5), and by GitHub Actions run
-[`40053241264`](https://github.com/Devmraustro/ERP/actions/runs/40053241264)
-(green: Python 3.11, Python 3.12, and the Windows key-rotation/backup job) for
-that exact commit.
+The exact current PR/code head `4225f36c56fed66700d61ffe832db7373214a93d` passed GitHub Actions run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234). All three jobs succeeded.
 
-- **Total Collected Tests:** `547`
-- **Passed:** `529`
-- **Skipped:** `18` — all platform-conditional by design: `16` POSIX-only
-  mode-bit/fd/symlink custody tests (`os.name != "posix"`) and `2`
-  `systemd-analyze` availability checks. They execute on the Linux CI jobs.
-- **Failed / Errors:** `0`
-- **Total Execution Duration:** `560.28s` with coverage (first run) / `476.62s` (re-run)
-- **Overall Code Coverage (`dz_erp`):** **`89%`** (`3,785 / 4,261` statements covered on Windows; `100%` on `__init__.py` and `serve.py`, `98%` on `benchmark.py`, `97%` on `auth.py` and `net.py`, `96%` on `upload.py` and `odoo_test_adapter.py`, `94%` on `database.py` and `intake_ocr.py`, `93%` on `localization.py` and `rotation_audit.py`, `88%` on `rotate_keys.py`, `83%` on `api.py`, `82%` on `procurement_stock.py`, `81%` on `key_rotation.py`, `80%` on `decimal_utils.py`, `77%` on `key_provider.py`, `73%` on `security_audit.py`).
-- **Staging acceptance:** `37/37` checks (`python tools/staging_acceptance.py`, isolated synthetic state directory, including the 23,800.00 DZD balanced trial check, both key rotations, checkpoint refusal/truncation checks, isolated restore and fresh-process reopen).
-- **Static check:** `ruff check dz_erp tests tools` → `All checks passed!`
-- **Byte-compile:** `python -m compileall -q dz_erp tests tools` → clean.
-- **Dependency graph:** `python tools/verify_dependency_graph.py` → `OK - the environment matches the declared dependency graph` (53 installed distributions; the single documented `opencv-python → opencv-python-headless` substitution).
-- **Lockfile integrity:** `python tools/generate_hash_lock.py --check` → `OK - 51 pinned distributions, 1277 hashes, no drift`.
-- **Risk-register consistency:** `python tools/risk_register_counts.py` → `risk register summary is consistent (31 rows)`.
+- **Linux / Python 3.11.17:** 562 passed, 3 platform-specific skipped, 0 failed; **88% coverage** (4,403 statements, 523 missed); 92.58 seconds.
+- **Linux / Python 3.12.15:** 562 passed, 3 platform-specific skipped, 0 failed; **88% coverage** (4,403 statements, 523 missed); 289.31 seconds.
+- **Windows / Python 3.12.10:** key rotation, migration, backup/restore, logging and recovery subset: 138 passed, 8 platform-specific skipped, 0 failed; 92.88 seconds.
+- **Synthetic staging acceptance:** 37/37 on Linux and 37/37 on Windows. The checkpoint path exercise uses a same-host sibling directory; it does not prove real off-host durability.
+- **Risk register:** `python tools/risk_register_counts.py` passed and reported a consistent 31-row register.
+- **Exact-head migration regressions:** valid legacy OCR rows migrate and re-migrate idempotently; a failed copy rolls back the table rebuild; a legacy row with an orphan foreign-key reference is rejected and the original table is preserved.
 
-Prior snapshots are retained below as dated history: the Phase-7 suite was
-`87` tests / `92%`, an intermediate round reported `531` passed on Linux
-(CPython 3.11.2, `3,710 / 4,162` statements, 89 %), and the read-only
-hardening round since added the regression tests that bring the suite to
-`547` collected. Sections that cite older counts name the commit or run they
-describe.
+Dependency installation with hashes, dependency-graph validation, OpenCV/RapidOCR import, Ruff, byte-compilation and hash-lock drift checks passed in the Linux jobs; Windows dependency validation, Ruff and byte-compilation also passed. The full test suite and acceptance checks are complete on the exact head, rather than inferred from a previous commit.
+
+Earlier test totals below describe historical phases and are retained for traceability.
 
 ### 1.3 Prior (Phase 7) results — retained for traceability
 
@@ -90,36 +74,19 @@ describe.
 
 ### 1.5 Continuous Integration — `Verified`
 
-The same suite, dependency set and static check were executed on a clean GitHub
-Actions runner (Ubuntu, Python 3.11 and 3.12, **no** system graphics libraries
-installed) by `.github/workflows/ci.yml`.
+Exact PR/code head: `4225f36c56fed66700d61ffe832db7373214a93d`. Workflow run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) completed successfully.
 
-| Item | Result |
-| :--- | :--- |
-| Run (push) | `39077748167` — `success` |
-| Run (pull_request) | `39077751326` — `success` |
-| Commit | `44d45112e81cf8e1e9b876628660e0421d6725f1` |
-| Python 3.11 job (ID `117528316809`) | `success` — all 12 steps green |
-| Python 3.12 job (ID `117528316675`) | `success` — all 12 steps green |
-| Failure annotations | **none** |
+| Job | Result |
+|---|---|
+| [Python 3.11 full suite, coverage, staging and risk-register check](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220958167) | **success** — 562 passed, 3 skipped; 88% coverage; staging 37/37 |
+| [Python 3.12 full suite and static checks](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220958125) | **success** — 562 passed, 3 skipped; 88% coverage |
+| [Windows rotation, migration, backup/restore and staging](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220957929) | **success** — 138 passed, 8 skipped; staging 37/37 |
 
-Every step of the workflow is therefore CI-verified: install the declared set,
-validate the dependency graph, assert `cv2` and `RapidOCR` import, static check
-(ruff), byte-compile, full test suite with coverage, summarise, and upload
-artifacts. The only annotations emitted were informational (Node 20 deprecation
-and the `ubuntu-latest` label migration).
+The Windows count is for the platform-sensitive test subset, not the entire Linux matrix. Staging acceptance runs on Linux/Python 3.11 and Windows; it is deliberately skipped on Python 3.12 to avoid duplicating the same synthetic acceptance workflow.
 
-The full run history, and the four host-dependency defects the successive
-failures exposed, are recorded in §5.5 of
-`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`.
+The exact head includes the atomic OCR confidence migration, foreign-key checking before dropping the legacy table, rollback tests for invalid confidence and orphan references, corrected valid legacy fixtures, strict TAR restore preflight, and Windows reparse/junction checks. The two original fixture failures on the earlier `9eb402d` commit were corrected in `4225f36`; the latest full CI is green.
 
-**What CI does not prove.** The OCR *accuracy* figures remain host-dependent at
-the margin, because ONNX Runtime, OpenCV and PDFium dispatch SIMD kernels by host
-CPU feature. That is why the neural-OCR assertions test recognition rather than
-bit-exactness (2A.6) and the benchmark thresholds are floors with a documented
-margin.
-
----
+**What CI does not prove.** The synthetic checkpoint drill uses a same-host sibling directory, not an independent off-host target. CI and staging do not provide statutory accounting or legal certification, real KMS/HSM custody, production-scale recovery evidence, or representative real-world Arabic OCR accuracy.
 
 ## 2. Detailed Test Matrix (`Passed`)
 

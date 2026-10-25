@@ -2,15 +2,52 @@
 
 **Repository:** https://github.com/Devmraustro/ERP
 **Branch:** `arena/6c474c64-erp`
-**Initial HEAD:** `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` (head of PR #2, CI green)
-**Final code HEAD (CI-verified):** `d823b83f79f1c0e2195768ab635f684a24b52479`
-**Verification date:** 2026-10-22/23 (UTC)
-**Environment used for all local evidence:** Linux x86-64, CPython 3.11.2, SQLite 3.40.1,
+**Initial HEAD of the historical audit snapshot:** `becf52b74f2dabbd3ad9291bd28e2a207ce6b720` (head of PR #2, CI green)
+**Final code HEAD of that historical snapshot (CI-verified):** `d823b83f79f1c0e2195768ab635f684a24b52479`
+**Historical snapshot verification date:** 2026-10-22/23 (UTC)
+**Environment used for that historical local evidence:** Linux x86-64, CPython 3.11.2, SQLite 3.40.1,
 cryptography 44.0.2, pytest 8.3.5, ruff 0.14.0, venv at `/home/user/venv` (outside the repo).
 **Target of the earlier audit:** Windows 11 / CPython 3.11.9 — so this session re-verified the
 claims on a *different* platform rather than trusting them.
 
 ---
+
+
+## Latest verification addendum — 2026-10-25
+
+This addendum supersedes earlier verification figures for the current review head; the dated audit snapshot and older addenda remain historical.
+
+**Exact code/PR head:** `4225f36c56fed66700d61ffe832db7373214a93d`  
+**GitHub Actions:** [run 40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) — all three jobs successful.
+
+- Linux Python 3.11.17: **562 passed, 3 skipped, 0 failed**; 88% coverage (4,403 statements, 523 missed).
+- Linux Python 3.12.15: **562 passed, 3 skipped, 0 failed**; 88% coverage (4,403 statements, 523 missed).
+- Windows Python 3.12.10 platform-sensitive suite: **138 passed, 8 skipped, 0 failed**.
+- Synthetic isolated staging acceptance: **37/37 on Linux and 37/37 on Windows**. The checkpoint-path test uses a same-host sibling directory and does not prove off-host durability.
+- Risk-register summary validation: passed; 31 rows.
+- Hash-verified install, dependency graph, OpenCV/RapidOCR import, Ruff and byte-compilation gates passed as configured in the CI matrix.
+
+The final migration-hardening change validates the rebuilt OCR table with `PRAGMA foreign_key_check` before removing the legacy table. If a legacy record references a missing company, source document or user, the migration raises and rolls back, preserving the original table. Regression tests prove (a) normal legacy migration, (b) idempotency, (c) rollback after a failed data copy and (d) rollback on orphan references. The first attempt on predecessor `9eb402d` revealed two old success fixtures that lacked parent rows; the fixtures were corrected at `4225f36`, and the exact-head suite is green.
+
+**Release verdict remains:** CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY. CI and synthetic tests do not replace KMS/HSM custody, genuinely off-host checkpoints and alerting, representative OCR validation, production-scale recovery drills, or qualified Algerian accounting and legal sign-offs.
+
+
+## Previous verification addendum — 2026-10-24 (historical)
+
+This addendum records the follow-up verification; the dated audit snapshot and command table below remain historical.
+
+**Exact code head:** 1c3e84408f6314789bf381d867f151a39f1ce893  
+**GitHub Actions:** [run 40064379357](https://github.com/Devmraustro/ERP/actions/runs/40064379357) — all three jobs successful.
+
+- Linux Python 3.11: 548 passed, 0 failed, 0 errors, 0 skipped; 89% coverage (4,269 statements, 458 missed).
+- Linux Python 3.12: 548 passed, 0 failed, 0 errors, 0 skipped; 89% coverage (4,269 statements, 458 missed).
+- Windows key rotation, migration, backup/restore, logging and recovery job: success.
+- The regression test test_confidence_migration_rolls_back_if_copy_fails passed on Python 3.11 and 3.12. It forces the OCR confidence migration copy stage to fail and proves rollback leaves the original table and row intact.
+- Ruff, compileall, dependency graph validation and hash-lock drift checking passed in exact-head CI.
+
+The user's local Windows run is on predecessor 21f93b7912f2e13023cd4dd4cf10267178a2bf82: 529 passed, 18 platform-specific skips, 0 failed, 89% coverage. Phase 16 passed 4/4; phase 20 passed 65 with 3 platform-specific skips. The isolated synthetic staging acceptance script passed 37/37 at that predecessor. The atomic OCR migration change is the only code delta from that local run and is covered by the exact-head CI regression and full suite; the standalone staging acceptance script itself has not been rerun on 1c3e844.
+
+**Release verdict remains unchanged:** CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY. CI and synthetic tests do not replace KMS/HSM custody, off-host checkpoint/alerting verification, representative OCR validation, production-scale recovery drills, or qualified Algerian accounting and legal sign-offs.
 
 ## 1. Executive summary and verdict
 
@@ -30,12 +67,7 @@ kept separate as required:
 * **Backup/restore:** archives now carry every key version (inside the encrypted archive) plus a
   material-free version summary, and a restore of mixed-version data is verified end to end.
 
-Local suite: **531 passed**, 89 % coverage (4162 statements, 452 missed). Staging acceptance:
-**37/37 checks**. The earlier figures in this report (418 tests, 33/33) describe the run cited in
-§"Verification commands"; the suite has grown by 107 tests since — O2 confidence provenance,
-B2 dependency-artefact integrity, S4/D6 ledger checkpoints and monitoring, and O3 Arabic review
-routing. CI results for the current commit are reported where they are available rather than
-assumed; see `docs/QA_TEST_MATRIX_AND_RESULTS.md`.
+The suite result of 531 passed and the 37/37 staging acceptance cited here belong to the earlier audit run and are retained as historical evidence. For the latest code-head results, use the verification addendum at the top of this report; it distinguishes exact-head CI evidence from the predecessor Windows and staging run.
 
 This round added three things the first delivery lacked: a tamper-evident record of the rotation
 operations themselves (§11.2), enforced key custody at read time rather than a documented
@@ -286,7 +318,7 @@ is `NOT NULL` and a global key operation has no trustworthy tenant to attribute.
 
 ---
 
-## 6. Quality verification (exact commands, exit codes, results)
+## 6. Quality verification — historical snapshot (exact commands, exit codes, results)
 
 Run in `/home/user/ERP` with `/home/user/venv/bin/python` (CPython 3.11.2):
 

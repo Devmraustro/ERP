@@ -213,12 +213,33 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requires = re.search(r'requires-python\s*=\s*"([^"]+)"', text)
     assert requires, "requires-python is not declared"
-    assert requires.group(1).strip() == ">=3.11"
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    supported = SpecifierSet(requires.group(1).strip())
+    # Python 3.11.17 contains the current 3.11 tarfile fixes. On Windows,
+    # 3.12.10 is the last binary installer; custom preflight rejects links and
+    # path-traversal forms also fixed in 3.12.15's source-only security release.
+    assert Version("3.11.17") in supported
+    assert Version("3.12.10") in supported
+    assert Version("3.11.16") not in supported
+    assert Version("3.12.9") not in supported
+    assert Version("3.13.0") not in supported
 
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     versions = set(re.findall(r'python-version:\s*\[([^\]]+)\]', workflow))
     flat = {v.strip().strip('"').strip("'") for group in versions for v in group.split(",")}
     assert {"3.11", "3.12"} <= flat, f"CI does not cover the declared floor: {flat}"
+
+    # Windows pins 3.12.10 because it is the last 3.12 binary installer. The
+    # restore path must reject links, special members, and noncanonical paths itself.
+    win_setup = re.search(
+        r"Set up Python 3\.12\.10.*?python-version:\s*\"([^\"]+)\"",
+        workflow,
+        re.S,
+    )
+    assert win_setup, "Windows CI must pin a security-patched Python 3.12 release"
+    assert win_setup.group(1) == "3.12.10"
 
     # rapidocr-onnxruntime declares <3.13; the pin must not be presented as 3.13-ready.
     import importlib.metadata as metadata

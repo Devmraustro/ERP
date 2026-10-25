@@ -153,23 +153,17 @@ configuration production will run.
 
 ---
 
-## 3. Disabling `/docs` and `/redoc`
+## 3. API documentation exposure
 
-`/docs` and `/redoc` are reachable and disclose the complete API surface: every route, every
-parameter, every schema. That is useful during staging and is an information-disclosure
-liability in production.
+The application disables Swagger UI and ReDoc by default through the application builder used by
+`dz_erp.serve`. For local development only, `ERP_DOCS_ENABLED=true` can enable them explicitly.
+Do not expose API documentation from a staging or production service unless a separate access
+control protects it; the application's own bearer-token scheme is not a substitute for an
+independent gate around the docs surface.
 
-```python
-app = FastAPI(docs_url=None, redoc_url=None)
-```
-
-**Verified:** `/docs` returns 200 today, and `/metrics`, `/debug` and `/admin` all return 404.
-
-**Staging:** leave them enabled — staging exists to be exercised.
-**Production:** disable both, or place them behind authentication that is not the application's
-own bearer-token scheme. This is a deployment configuration change; it is not currently
-parameterised by an environment variable, so it must be made in `dz_erp/serve.py` before a
-production build.
+- **Default / staging / production:** `/docs` and `/redoc` should return 404.
+- **Local development:** set `ERP_DOCS_ENABLED=true` only for the period in which the docs are needed.
+- `/metrics`, `/debug` and `/admin` are not implemented and should return 404.
 
 ---
 
@@ -321,8 +315,8 @@ Then confirm:
 
 - [ ] `/healthz` returns 200 and the server is **not** reachable off-loopback.
 - [ ] A request with no token returns 401, and a line appears in `$ERP_SECURITY_LOG_PATH`.
-- [ ] The vault and audit key files exist with mode `0600`.
-- [ ] `/docs` and `/redoc` are reachable (staging) — and remember to disable them for production.
+- [ ] On POSIX, the vault and audit key files are mode `0600` and their directory is `0700`. On Windows, set and verify an explicit NTFS ACL limited to the service account; `chmod` mode bits are not an access-control boundary.
+- [ ] `/docs` and `/redoc` return 404 by default. For local development only, set `ERP_DOCS_ENABLED=true` when explicitly needed; do not expose the docs on a staging or production service without separate authentication.
 - [ ] An encrypted backup restores into a scratch directory **from a separate process**, and a
       document decrypts and the chain verifies.
 - [ ] No real customer or financial data is present.
@@ -339,7 +333,7 @@ Then confirm:
 | Gap | Severity | Remediation |
 |---|---|---|
 | Key rotation requires operator filesystem access; no scheduled/automatic rotation | Medium for production | Run the documented rotation on a schedule with a verified backup; see the recovery guide. |
-| Key material is protected by file permissions, not an HSM | Medium for production | File mode `0600` is enforced; hardware-backed custody is a deployment control, not implemented here. |
+| Key material is file-based, not HSM-backed | Medium for production | POSIX mode `0600` is enforced; Windows mode bits are not access control and the service-account ACL must be set and verified separately. No KMS/HSM is implemented. |
 | `source_documents.vault_path` stores an absolute path | Low | Mitigated by re-anchoring on read; a relative path would be cleaner. |
 | OCR accuracy not statistically established | **High for unattended posting** | Keep human review mandatory; build a powered benchmark (`docs/OCR_EVALUATION_PROTOCOL.md`). |
 | No publisher provenance check (hash pinning pins bytes, not who published them) | Low–Medium | Accept for staging; add sigstore/PEP 740 verification before production if required. |

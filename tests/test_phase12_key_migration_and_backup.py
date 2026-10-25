@@ -19,8 +19,10 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
@@ -29,7 +31,9 @@ from dz_erp.database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
     ERPDatabase,
+    FinancialIntegrityError,
 )
+import dz_erp.security_audit as security_audit_module
 from dz_erp.intake_ocr import VAULT_KEYRING_SUFFIX, PrivateDocumentVault
 from dz_erp.key_rotation import BLOB_MAGIC, KeyConfigurationError, KeyRing
 from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_backup
@@ -534,6 +538,218 @@ def test_corrupt_blob_header_does_not_prevent_startup_or_rotation(tmp_path: Path
     report = restarted.rotate_key()
     assert report["failed"] == 1
     assert broken.exists()
+
+
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [(3, 11, 16), (3, 12, 9), (3, 13, 0)],
+)
+def test_restore_refuses_unpatched_python_tarfile_runtime(tmp_path: Path, monkeypatch, runtime) -> None:
+    """A data filter existing on disk is not enough if its stdlib bypasses are unpatched."""
+    monkeypatch.setattr(security_audit_module, "sys", SimpleNamespace(version_info=runtime))
+    target = tmp_path / "restore-target"
+
+    with pytest.raises(FinancialIntegrityError, match="Safe backup restore requires Python"):
+        security_audit_module.restore_and_verify_backup(
+            backup_path=tmp_path / "not-read.enc",
+            backup_encryption_key=Fernet.generate_key(),
+            restore_target_dir=target,
+        )
+
+    assert not target.exists(), "runtime validation must happen before any restore filesystem changes"
+
+
+def test_restore_accepts_last_windows_binary_runtime_with_strict_preflight(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Python 3.12.10 is allowed only with our independent strict archive preflight."""
+    monkeypatch.setattr(
+        security_audit_module, "sys", SimpleNamespace(version_info=(3, 12, 10))
+    )
+    target = tmp_path / "restore-target"
+    with pytest.raises(FileNotFoundError):
+        security_audit_module.restore_and_verify_backup(
+            backup_path=tmp_path / "not-read.enc",
+            backup_encryption_key=Fernet.generate_key(),
+            restore_target_dir=target,
+        )
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    ["../outside.txt", "vault/../outside.txt", "../evil/../dest/sub/file"],
+)
+def test_restore_rejects_noncanonical_tar_paths_before_writing(
+    tmp_path: Path, member_name: str
+) -> None:
+    """Parent segments and leave-then-return paths must fail before extraction."""
+    key = Fernet.generate_key()
+    archive = io.BytesIO()
+    payload = b"TRAVERSAL MUST NOT WRITE THIS"
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+        item = tarfile.TarInfo(member_name)
+        item.size = len(payload)
+        tar.addfile(item, io.BytesIO(payload))
+
+    backup = tmp_path / "unsafe-path-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    target = tmp_path / "restore-target"
+
+    with pytest.raises(FinancialIntegrityError, match="Unsafe tar member path"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=target,
+        )
+
+    assert not target.exists(), "archive preflight must complete before creating the restore target"
+
+
+@pytest.mark.parametrize("link_type", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_restore_rejects_tar_links_before_extraction(tmp_path: Path, link_type: bytes) -> None:
+    """A symlink or hardlink must not redirect a later write outside the restore target."""
+    key = Fernet.generate_key()
+    archive = io.BytesIO()
+    payload = b"SHOULD NEVER BE WRITTEN OUTSIDE THE RESTORE DIRECTORY"
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+
+        vault_dir = tarfile.TarInfo("vault")
+        vault_dir.type = tarfile.DIRTYPE
+        tar.addfile(vault_dir)
+
+        escape = tarfile.TarInfo("vault/escape")
+        escape.type = link_type
+        escape.linkname = "../../outside"
+        tar.addfile(escape)
+
+        child = tarfile.TarInfo("vault/escape/payload.txt")
+        child.size = len(payload)
+        tar.addfile(child, io.BytesIO(payload))
+
+    backup = tmp_path / "unsafe-symlink-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    restore_target = tmp_path / "restore-target"
+
+    with pytest.raises(FinancialIntegrityError, match="unsafe|invalid|refused|disallowed"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=restore_target,
+        )
+
+    assert not (tmp_path / "outside" / "payload.txt").exists()
+    assert not restore_target.exists(), "failed preflight must not leave a partial restore directory"
+
+
+def test_restore_refuses_preexisting_hardlink_target_before_writing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A regular archive member must not truncate an outside file via an existing hard link."""
+    monkeypatch.setattr(security_audit_module.sys, "version_info", (3, 11, 17))
+    key = Fernet.generate_key()
+    target = tmp_path / "restore-target"
+    vault_target = target / "vault"
+    vault_target.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"OUTSIDE FILE MUST REMAIN UNCHANGED")
+    hardlink = vault_target / "payload.txt"
+    try:
+        os.link(outside, hardlink)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable on this test filesystem: {exc}")
+    assert hardlink.stat().st_nlink > 1
+
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+        vault_dir = tarfile.TarInfo("vault")
+        vault_dir.type = tarfile.DIRTYPE
+        tar.addfile(vault_dir)
+        payload = b"ARCHIVE PAYLOAD MUST NOT OVERWRITE THE LINKED INODE"
+        member = tarfile.TarInfo("vault/payload.txt")
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+
+    backup = tmp_path / "hardlink-target-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    with pytest.raises(FinancialIntegrityError, match="hard-linked file"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=target,
+        )
+
+    assert outside.read_bytes() == b"OUTSIDE FILE MUST REMAIN UNCHANGED"
+    assert hardlink.read_bytes() == b"OUTSIDE FILE MUST REMAIN UNCHANGED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_restore_refuses_existing_windows_junction_prefix(tmp_path: Path, monkeypatch) -> None:
+    """A pre-existing junction inside the target must not redirect extraction outside it."""
+    monkeypatch.setattr(security_audit_module.sys, "version_info", (3, 12, 10))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    protected = outside / "payload.txt"
+    protected.write_bytes(b"JUNCTION TARGET MUST REMAIN UNCHANGED")
+
+    target = tmp_path / "restore-target"
+    target.mkdir()
+    junction = target / "vault"
+    # PowerShell single-quoted literals avoid cmd.exe's nested-quote parsing
+    # ambiguity; escape any embedded single quote in a user profile/temp path.
+    junction_arg = str(junction).replace("'", "''")
+    outside_arg = str(outside).replace("'", "''")
+    command = (
+        f"New-Item -ItemType Junction -Path '{junction_arg}' -Target '{outside_arg}' | Out-Null"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        pytest.skip("PowerShell is unavailable on this Windows runner")
+    if result.returncode != 0:
+        pytest.skip(f"the Windows runner cannot create a junction: {result.stderr or result.stdout}")
+    assert junction.is_dir()
+
+    key = Fernet.generate_key()
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        manifest = tarfile.TarInfo("manifest.json")
+        manifest.size = 2
+        tar.addfile(manifest, io.BytesIO(b"{}"))
+        vault_dir = tarfile.TarInfo("vault")
+        vault_dir.type = tarfile.DIRTYPE
+        tar.addfile(vault_dir)
+        payload = b"UNSAFE WRITE THROUGH JUNCTION"
+        member = tarfile.TarInfo("vault/payload.txt")
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+
+    backup = tmp_path / "junction-target-backup.enc"
+    backup.write_bytes(Fernet(key).encrypt(archive.getvalue()))
+    with pytest.raises(FinancialIntegrityError, match="reparse point"):
+        restore_and_verify_backup(
+            backup_path=backup,
+            backup_encryption_key=key,
+            restore_target_dir=target,
+        )
+
+    assert protected.read_bytes() == b"JUNCTION TARGET MUST REMAIN UNCHANGED"
 
 
 def test_restore_requires_a_backup_key_and_does_not_leak_on_failure(tmp_path: Path) -> None:

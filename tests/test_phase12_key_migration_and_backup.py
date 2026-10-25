@@ -706,8 +706,22 @@ def test_restore_refuses_existing_windows_junction_prefix(tmp_path: Path, monkey
     target = tmp_path / "restore-target"
     target.mkdir()
     junction = target / "vault"
-    command = f'mklink /J "{junction}" "{outside}"'
-    result = subprocess.run(["cmd", "/c", command], capture_output=True, text=True, check=False)
+    # PowerShell single-quoted literals avoid cmd.exe's nested-quote parsing
+    # ambiguity; escape any embedded single quote in a user profile/temp path.
+    junction_arg = str(junction).replace("'", "''")
+    outside_arg = str(outside).replace("'", "''")
+    command = (
+        f"New-Item -ItemType Junction -Path '{junction_arg}' -Target '{outside_arg}' | Out-Null"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        pytest.skip("PowerShell is unavailable on this Windows runner")
     if result.returncode != 0:
         pytest.skip(f"the Windows runner cannot create a junction: {result.stderr or result.stdout}")
     assert junction.is_dir()

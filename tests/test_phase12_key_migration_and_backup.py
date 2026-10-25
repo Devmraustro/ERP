@@ -19,6 +19,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace

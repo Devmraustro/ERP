@@ -130,6 +130,22 @@ def test_dependency_integrity_claims_are_still_supported() -> None:
     assert "generate_hash_lock.py --check" in workflow
 
 
+def test_key_provider_platform_specific_claims_are_explicit() -> None:
+    """Security docs must distinguish POSIX mode checks from Windows ACL controls."""
+    provider = (REPO / "dz_erp" / "key_provider.py").read_text(encoding="utf-8")
+    threat = (REPO / "docs" / "KEY_CUSTODY_THREAT_MODEL.md").read_text(encoding="utf-8")
+    staging = (REPO / "docs" / "STAGING_SECURITY_CONFIGURATION.md").read_text(encoding="utf-8")
+
+    assert "FILE_FLAG_OPEN_REPARSE_POINT" in provider
+    assert "FILE_ATTRIBUTE_REPARSE_POINT" in provider
+    assert "O_NOFOLLOW" in provider
+    assert "FILE_FLAG_OPEN_REPARSE_POINT" in threat
+    assert "mode bits are not access control" in threat
+    assert "NTFS ACL" in staging
+    assert "`/docs` and `/redoc` return 404 by default" in staging
+    assert "ERP_DOCS_ENABLED=true" in staging
+
+
 def test_counts_tool_runs_as_a_command() -> None:
     result = subprocess.run(
         [sys.executable, str(REPO / "tools" / "risk_register_counts.py")],

@@ -221,6 +221,7 @@ jobs:
             tests/test_phase11_audit_key_rotation.py `
             tests/test_phase12_key_migration_and_backup.py `
             tests/test_phase13_key_rotation_regression.py `
+            tests/test_phase17_key_providers.py `
             tests/test_phase18_ocr_confidence_provenance.py `
             tests/test_phase23_staging_acceptance.py `
             --junitxml=junit-windows.xml -ra

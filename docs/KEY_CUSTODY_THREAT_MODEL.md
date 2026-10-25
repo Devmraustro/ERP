@@ -58,7 +58,7 @@ Each row is executable or verifiable in this repository.
 | Path | Control | Evidence |
 |---|---|---|
 | Read a key file as another local account | `0600`; the mode of the **open descriptor** is checked, not the path | `FileKeyProvider.read`, `tests/test_phase17_key_providers.py::test_mode_is_checked_on_the_descriptor_not_the_path` |
-| Replace a key file with a symlink to a file you control | `O_NOFOLLOW`; symlinked keys are refused outright | `test_refuses_to_follow_a_symlinked_key` |
+| Replace a key file with a symlink/reparse point | POSIX uses `O_NOFOLLOW`; Windows opens the reparse point with `FILE_FLAG_OPEN_REPARSE_POINT` and rejects `FILE_ATTRIBUTE_REPARSE_POINT` on the opened handle | `test_refuses_to_follow_a_symlinked_key`, `test_windows_provider_refuses_to_follow_a_symlinked_key` |
 | Loosen a key's mode and keep using it | Start-up refuses; the service does not start with a readable-by-others key | `test_vault_refuses_to_open_with_a_world_readable_key_file`, `test_audit_store_refuses_a_loose_key_file` |
 | Copy a key file out and attack it offline | **Nothing.** Detected only by file-integrity monitoring (deployment) | Residual risk R1 |
 | Read the key from the running process | **Nothing.** The active key is in memory by necessity | Residual risk R2 |
@@ -73,10 +73,14 @@ Each row is executable or verifiable in this repository.
 
 `FileKeyProvider.read()`:
 
-1. opens with `O_NOFOLLOW` — a symlink raises rather than being followed;
-2. `fstat`s that descriptor and rejects any group/other permission bit;
-3. reads from the same descriptor it validated;
-4. caches for the process lifetime, with `reload()` for a rotation on disk.
+1. **POSIX:** opens with `O_NOFOLLOW`; a symlink raises rather than being followed.
+2. **Windows:** opens with `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT)`, checks
+   `FILE_ATTRIBUTE_REPARSE_POINT` on the same handle, and refuses it before converting
+   it to a Python file descriptor.
+3. **POSIX:** `fstat`s the descriptor and rejects any group/other permission bit. Windows ACLs
+   are not enforced by mode bits and must be configured separately as described in R8.
+4. Reads from the same descriptor it validated and caches it for the process lifetime, with
+   `reload()` for a rotation on disk.
 
 Steps 2–3 remove the stat-then-open window where a file could be swapped between the check
 and the read. This is a real hardening, and it is also bounded: it says nothing about an

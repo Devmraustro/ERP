@@ -18,10 +18,10 @@ implicit, so that:
 Providers
 ---------
 ``FileKeyProvider``
-    Key material in a file on the local filesystem. Reads with ``O_NOFOLLOW`` and
-    verifies the mode *of the file descriptor it actually read*, so the check and
-    the read cannot disagree (no stat-then-open window). Refuses group/world
-    readable files and symlinks.
+    Key material in a file on the local filesystem. POSIX opens with ``O_NOFOLLOW``;
+    Windows opens the reparse-point object with ``FILE_FLAG_OPEN_REPARSE_POINT`` and
+    refuses it before transferring the same handle to Python. POSIX mode checks are
+    made on the opened descriptor; Windows ACLs must be configured separately.
 
 ``EnvironmentKeyProvider``
     Key material from an environment variable. Useful for containers and CI
@@ -80,8 +80,95 @@ class KeyProvider(Protocol):
     def reload(self) -> None: ...
 
 
+def _open_windows_file_no_follow(path: Path) -> int:
+    """Open a Windows file without following a symlink or other reparse point.
+
+    Windows does not expose POSIX O_NOFOLLOW. FILE_FLAG_OPEN_REPARSE_POINT opens
+    the link object itself, and FILE_ATTRIBUTE_TAG_INFO is inspected on that same
+    handle before it is transferred to a Python file descriptor. Refuse every
+    reparse point rather than attempting to follow or interpret it.
+    """
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_tag_info_class = 9  # FILE_INFO_BY_HANDLE_CLASS.FileAttributeTagInfo
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.CreateFileW(
+        str(path),
+        generic_read,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid_handle_value:
+        error = ctypes.get_last_error()
+        message = ctypes.FormatError(error).strip()
+        if error in {2, 3}:  # ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND
+            raise FileNotFoundError(error, message, str(path))
+        raise OSError(error, f"CreateFileW failed: {message}", str(path))
+
+    try:
+        info = FileAttributeTagInfo()
+        if not kernel32.GetFileInformationByHandleEx(
+            handle,
+            file_attribute_tag_info_class,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            error = ctypes.get_last_error()
+            message = ctypes.FormatError(error).strip()
+            raise OSError(error, f"GetFileInformationByHandleEx failed: {message}", str(path))
+
+        if info.FileAttributes & file_attribute_reparse_point:
+            raise KeyConfigurationError(
+                f"Refusing to read key material through a Windows reparse point: {path}."
+            )
+
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | os.O_BINARY)
+        handle = None  # The file descriptor now owns the Windows handle.
+        return descriptor
+    finally:
+        if handle is not None:
+            kernel32.CloseHandle(handle)
+
+
 class FileKeyProvider:
-    """Key material from an owner-only file, read without following symlinks."""
+    """Key material from an owner-only file, refusing symlinks/reparse points."""
 
     def __init__(self, path: Path, *, check_custody: bool = True) -> None:
         self.path = Path(path)
@@ -93,11 +180,16 @@ class FileKeyProvider:
     def read(self) -> bytes:
         if self._cached is not None:
             return self._cached
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         try:
-            fd = os.open(str(self.path), flags)
+            if os.name == "nt":
+                fd = _open_windows_file_no_follow(self.path)
+            else:
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(str(self.path), flags)
         except FileNotFoundError as exc:
             raise KeyMaterialUnavailable(f"Key file {self.path} does not exist.") from exc
+        except KeyConfigurationError:
+            raise
         except OSError as exc:
             if getattr(exc, "errno", None) in {40, 62}:  # ELOOP (Linux) / EMLINK-ish (macOS)
                 raise KeyConfigurationError(

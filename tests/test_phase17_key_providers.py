@@ -93,6 +93,20 @@ def test_refuses_to_follow_a_symlinked_key(tmp_path) -> None:
         FileKeyProvider(link).read()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="exercises the Windows reparse-point open path")
+def test_windows_provider_refuses_to_follow_a_symlinked_key(tmp_path) -> None:
+    """Windows must inspect the reparse point itself, not the file it targets."""
+    real = _key_file(tmp_path, Fernet.generate_key())
+    link = tmp_path / "windows-link.key"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"the Windows runner cannot create a file symlink: {exc}")
+
+    with pytest.raises(KeyConfigurationError, match="reparse point"):
+        FileKeyProvider(link).read()
+
+
 @posix_only
 def test_mode_is_checked_on_the_descriptor_not_the_path(tmp_path, monkeypatch) -> None:
     """Swap the file between any path check and the read; the read still decides."""

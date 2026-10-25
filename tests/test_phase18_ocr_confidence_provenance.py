@@ -310,6 +310,10 @@ def test_legacy_rows_are_relabelled_by_their_actual_extraction_path(tmp_path: Pa
     """A pre-existing database must not keep a fabricated 0.995 as if it were data."""
     path = tmp_path / "legacy.sqlite3"
     conn = sqlite3.connect(str(path))
+    # Seed the referenced company so the migration's new FK validation checks
+    # document relationships, rather than rejecting an invalid test fixture.
+    conn.execute("CREATE TABLE companies (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO companies (id) VALUES (1)")
     conn.executescript(LEGACY_OCR_TABLE)
     conn.executemany(
         "INSERT INTO ocr_extracted_fields (company_id, document_id, field_name, raw_text,"
@@ -359,6 +363,17 @@ def test_legacy_rows_are_relabelled_by_their_actual_extraction_path(tmp_path: Pa
 def test_migration_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "legacy2.sqlite3"
     conn = sqlite3.connect(str(path))
+    # A valid legacy row needs an existing company and source document; the test
+    # is about idempotency, not about preserving an orphan relationship.
+    conn.execute("CREATE TABLE companies (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO companies (id) VALUES (1)")
+    conn.execute(
+        "CREATE TABLE source_documents (id TEXT PRIMARY KEY, company_id INTEGER, ocr_engine TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO source_documents (id, company_id, ocr_engine) "
+        "VALUES ('doc', 1, 'rapidocr-onnxruntime')"
+    )
     conn.executescript(LEGACY_OCR_TABLE)
     conn.execute(
         "INSERT INTO ocr_extracted_fields (company_id, document_id, field_name, raw_text,"

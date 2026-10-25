@@ -58,7 +58,7 @@ Each row is executable or verifiable in this repository.
 | Path | Control | Evidence |
 |---|---|---|
 | Read a key file as another local account | `0600`; the mode of the **open descriptor** is checked, not the path | `FileKeyProvider.read`, `tests/test_phase17_key_providers.py::test_mode_is_checked_on_the_descriptor_not_the_path` |
-| Replace a key file with a symlink/reparse point | POSIX uses `O_NOFOLLOW`; Windows opens the reparse point with `FILE_FLAG_OPEN_REPARSE_POINT` and rejects `FILE_ATTRIBUTE_REPARSE_POINT` on the opened handle | `test_refuses_to_follow_a_symlinked_key`, `test_windows_provider_refuses_to_follow_a_symlinked_key` |
+| Replace a key file with a symlink/reparse point | POSIX uses `O_NOFOLLOW`; Windows opens the reparse point with `FILE_FLAG_OPEN_REPARSE_POINT` and rejects `FILE_ATTRIBUTE_REPARSE_POINT` on the opened handle | `test_refuses_to_follow_a_symlinked_key`, `test_windows_provider_rejects_reparse_handle_without_symlink_privilege`, optional real-link integration test |
 | Loosen a key's mode and keep using it | Start-up refuses; the service does not start with a readable-by-others key | `test_vault_refuses_to_open_with_a_world_readable_key_file`, `test_audit_store_refuses_a_loose_key_file` |
 | Copy a key file out and attack it offline | **Nothing.** Detected only by file-integrity monitoring (deployment) | Residual risk R1 |
 | Read the key from the running process | **Nothing.** The active key is in memory by necessity | Residual risk R2 |

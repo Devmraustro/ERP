@@ -107,6 +107,56 @@ def test_windows_provider_refuses_to_follow_a_symlinked_key(tmp_path) -> None:
         FileKeyProvider(link).read()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="exercises the Windows reparse-point API path")
+def test_windows_provider_rejects_reparse_handle_without_symlink_privilege(tmp_path, monkeypatch) -> None:
+    """A reparse-point handle is refused even when the runner cannot create real symlinks."""
+    import ctypes
+
+    captured = {}
+    closed = []
+    fake_handle = 0x1234
+
+    class FakeFunction:
+        def __init__(self, callback):
+            self.callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    def create_file(*args):
+        captured["flags"] = args[5]
+        return fake_handle
+
+    def get_file_info(handle, info_class, output, size):
+        captured["handle"] = handle
+        captured["info_class"] = info_class
+        attributes = ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32))
+        attributes[0] = 0x00000400  # FILE_ATTRIBUTE_REPARSE_POINT
+        attributes[1] = 0xA000000C  # IO_REPARSE_TAG_SYMLINK
+        return 1
+
+    def close_handle(handle):
+        closed.append(handle)
+        return 1
+
+    class FakeKernel32:
+        CreateFileW = FakeFunction(create_file)
+        GetFileInformationByHandleEx = FakeFunction(get_file_info)
+        CloseHandle = FakeFunction(close_handle)
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: FakeKernel32())
+
+    with pytest.raises(KeyConfigurationError, match="reparse point"):
+        FileKeyProvider(tmp_path / "does-not-need-to-exist.key").read()
+
+    assert captured["flags"] & 0x00200000, "CreateFileW must request FILE_FLAG_OPEN_REPARSE_POINT"
+    assert captured["handle"] == fake_handle
+    assert captured["info_class"] == 9
+    assert closed == [fake_handle], "a rejected reparse-point handle must be closed"
+
+
 @posix_only
 def test_mode_is_checked_on_the_descriptor_not_the_path(tmp_path, monkeypatch) -> None:
     """Swap the file between any path check and the read; the read still decides."""

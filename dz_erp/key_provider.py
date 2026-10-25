@@ -97,8 +97,8 @@ def _open_windows_file_no_follow(path: Path) -> int:
     file_share_write = 0x00000002
     file_share_delete = 0x00000004
     open_existing = 3
-    file_flag_open_reparse_point = 0x00200000
-    file_attribute_reparse_point = 0x00000400
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
     file_attribute_tag_info_class = 9  # FILE_INFO_BY_HANDLE_CLASS.FileAttributeTagInfo
 
     class FileAttributeTagInfo(ctypes.Structure):
@@ -131,7 +131,7 @@ def _open_windows_file_no_follow(path: Path) -> int:
         file_share_read | file_share_write | file_share_delete,
         None,
         open_existing,
-        file_flag_open_reparse_point,
+        FILE_FLAG_OPEN_REPARSE_POINT,
         None,
     )
     invalid_handle_value = ctypes.c_void_p(-1).value
@@ -154,7 +154,7 @@ def _open_windows_file_no_follow(path: Path) -> int:
             message = ctypes.FormatError(error).strip()
             raise OSError(error, f"GetFileInformationByHandleEx failed: {message}", str(path))
 
-        if info.FileAttributes & file_attribute_reparse_point:
+        if info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
             raise KeyConfigurationError(
                 f"Refusing to read key material through a Windows reparse point: {path}."
             )

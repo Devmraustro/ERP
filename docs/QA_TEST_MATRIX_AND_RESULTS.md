@@ -73,20 +73,15 @@ This is evidence for the exact tested commit only. It does not establish externa
 
 ### 1.5 Continuous Integration — `Verified`
 
-Exact PR/code head: `4225f36c56fed66700d61ffe832db7373214a93d`. Workflow run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) completed successfully.
+Latest tested code head: `2de2ae7e8aca1fa522b4e4a1f1210f18f86bc838`. GitHub Actions run [40382194997](https://github.com/Devmraustro/ERP/actions/runs/40382194997) completed successfully with all three jobs green. The subsequent commit `6bcb859f43fd9da8c6a34acf5eccadf2f73201e1` only refreshes this QA evidence document; no application or test code changed in that documentation commit.
 
-| Job | Result |
+| Job | Exact tested-code result |
 |---|---|
-| [Python 3.11 full suite, coverage, staging and risk-register check](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220958167) | **success** — 562 passed, 3 skipped; 88% coverage; staging 37/37 |
-| [Python 3.12 full suite and static checks](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220958125) | **success** — 562 passed, 3 skipped; 88% coverage |
-| [Windows rotation, migration, backup/restore and staging](https://github.com/Devmraustro/ERP/actions/runs/40210565234/job/121220957929) | **success** — 138 passed, 8 skipped; staging 37/37 |
+| Linux Python 3.11 full suite, coverage, staging and risk-register check | **success** — 620 passed, 3 skipped, 0 failed; 88% coverage; staging 37/37; 31-row risk-register summary consistent |
+| Linux Python 3.12 full suite and static checks | **success** — 620 passed, 3 skipped, 0 failed; 88% coverage |
+| Windows key rotation, migration, backup/restore and staging | **success** — 148 passed, 8 platform-specific skipped, 0 failed; staging 37/37 |
 
-The Windows count is for the platform-sensitive test subset, not the entire Linux matrix. Staging acceptance runs on Linux/Python 3.11 and Windows; it is deliberately skipped on Python 3.12 to avoid duplicating the same synthetic acceptance workflow.
-
-The exact head includes the atomic OCR confidence migration, foreign-key checking before dropping the legacy table, rollback tests for invalid confidence and orphan references, corrected valid legacy fixtures, strict TAR restore preflight, and Windows reparse/junction checks. The two original fixture failures on the earlier `9eb402d` commit were corrected in `4225f36`; the latest full CI is green.
-
-**What CI does not prove.** The synthetic checkpoint drill uses a same-host sibling directory, not an independent off-host target. CI and staging do not provide statutory accounting or legal certification, real KMS/HSM custody, production-scale recovery evidence, or representative real-world Arabic OCR accuracy.
-
+This evidence applies to the exact tested code head above. The documentation-only follow-up is not represented as having a separate CI result until a run for that new commit is observed. Release verdict remains **CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY**.
 ## 2. Detailed Test Matrix (`Passed`)
 
 ### 2.1 Phase 2 — Algerian SCF Localization & Upstream `azinak/l10n-dz-account-fix` Suite (`tests/test_phase2_localization.py`)

@@ -157,6 +157,48 @@ def test_backup_restore_rejects_preexisting_linked_destination_paths() -> None:
     assert "test_restore_refuses_existing_windows_junction_prefix" in tests
 
 
+def test_key_provider_contract_documentation_matches_the_code() -> None:
+    """docs/KEY_PROVIDER_CONTRACT.md describes a surface the code really has."""
+    contract = REPO / "docs" / "KEY_PROVIDER_CONTRACT.md"
+    assert contract.is_file()
+    text = contract.read_text(encoding="utf-8")
+    provider = (REPO / "dz_erp" / "key_provider.py").read_text(encoding="utf-8")
+
+    # Every describe() key the contract promises must exist in the implementation.
+    for key in (
+        "provider", "exists", "is_symlink", "backupable", "hsm_equivalent",
+        "custody_checked", "key_material_exportable", "mode_enforced",
+    ):
+        assert f'"{key}"' in provider, f"key_provider.py no longer reports {key}"
+        assert key in text, f"the contract must document {key}"
+
+    # Exceptions the contract names must be real classes, not aspirations.
+    for exc in ("KeyMaterialUnavailable", "KeyConfigurationError", "KeyCustodyError"):
+        assert exc in text and exc in provider, f"{exc} must exist in both doc and code"
+
+    # The contract must not claim hardware custody for this build: the only
+    # hsm_equivalent value it may state is False.
+    assert re.search(r"hsm_equivalent[^\n]*True", text) is None, (
+        "the contract must not claim hsm_equivalent is ever True in this build"
+    )
+    assert "`implemented` | `False`" in text, "the KMS provider must be documented as not implemented"
+
+    # The configuration surface must name variables the code actually reads.
+    intake = (REPO / "dz_erp" / "intake_ocr.py").read_text(encoding="utf-8")
+    database = (REPO / "dz_erp" / "database.py").read_text(encoding="utf-8")
+    assert 'VAULT_KEY_ENV = "ERP_VAULT_KEY"' in intake
+    assert 'AUDIT_KEY_ENV = "ERP_AUDIT_HMAC_SECRET"' in database
+    assert "ERP_VAULT_KEY" in text and "ERP_AUDIT_HMAC_SECRET" in text
+
+    # The Windows ACL limitation must be stated, pointing at the real records.
+    assert "mode bits are not access control" in text
+    assert "STAGING_SECURITY_CONFIGURATION.md" in text
+    assert "KEY_CUSTODY_THREAT_MODEL.md" in text
+
+    # A correct KMS integration must keep every object decryptable after rotation.
+    assert "remains decryptable after rotation" in text
+
+
 def test_counts_tool_runs_as_a_command() -> None:
     result = subprocess.run(
         [sys.executable, str(REPO / "tools" / "risk_register_counts.py")],

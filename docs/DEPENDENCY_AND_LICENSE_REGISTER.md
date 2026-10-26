@@ -177,7 +177,7 @@ pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
 | Coverage | every authentic file per version (all platform/Python wheels + sdist) |
 | Generator | `tools/generate_hash_lock.py --write` (PyPI JSON API) |
 | Drift check in CI | `tools/generate_hash_lock.py --check` |
-| Drift check in tests | `tests/test_phase19_dependency_integrity.py` (15 tests) |
+| Drift check in tests | `tests/test_phase19_dependency_integrity.py` (19 tests) |
 
 All-platform digests are included deliberately: a per-platform hash set would either break the
 Windows CI job or force separate lockfiles for each OS. Including every genuine file for the
@@ -215,3 +215,62 @@ that cannot reach PyPI, the infrastructure prerequisite is:
    different bytes is then rejected rather than trusted.
 
 No mirror is configured in this repository, and none is claimed to exist.
+
+#### 4.3.1 Building and verifying an offline wheelhouse
+
+`tools/verify_wheelhouse.py` turns the above prerequisite into a repeatable,
+verifiable procedure for the simpler (and more common) air-gapped case: a
+*wheelhouse directory* rather than a served index.
+
+**Build — on a trusted workstation with network access** (the tool prints the
+command; `--execute` runs it):
+
+```bash
+python tools/verify_wheelhouse.py --build ./wheelhouse --execute
+```
+
+which runs
+
+```bash
+python -m pip download --no-deps --only-binary=:all: --require-hashes \
+    --dest ./wheelhouse -r requirements.lock.hashes.txt
+```
+
+pip itself verifies every downloaded artifact against the hash lockfile *while
+downloading*, so a poisoned index or tampered mirror cannot silently substitute
+bytes; `--only-binary :all:` keeps the wheelhouse to wheels (no on-host
+compilation, no sdist build-time code execution).
+
+**Verify — offline, on the target host before installing:**
+
+```bash
+python tools/verify_wheelhouse.py --wheelhouse ./wheelhouse
+```
+
+The verifier recomputes each file's sha256 and accepts a file only when (a) its
+digest is recorded in the hash lockfile for exactly one pinned distribution and
+(b) its filename names that distribution and version. Unknown artifacts,
+tampered files, name/version mismatches, and pins with no artifact at all are
+each a failure (exit 1), reported per category. It never weakens the hash gate
+and never fetches anything.
+
+**Install — air-gapped, from the verified wheelhouse only:**
+
+```bash
+python -m pip install --no-deps --no-index --find-links ./wheelhouse \
+    --require-hashes -r requirements.lock.hashes.txt
+```
+
+`--no-index` forbids any index fallback; a wheelhouse that passed verification
+therefore contains only pinned bytes, and pip re-verifies the same digests at
+install time.
+
+**Verified behaviour** (smoke test on the real tool): a wheelhouse containing
+the authentic `six-1.17.0` wheel against a matching mini-lockfile verifies OK;
+the same wheel with one bit flipped is rejected as an unknown artifact, exit 1.
+The parser, verifier decision logic and build command are covered by four tests
+in `tests/test_phase19_dependency_integrity.py` (no network required).
+
+**Still not covered:** publisher provenance (§4.2) — a wheelhouse proves the
+*bytes* are the pinned ones, not who published them. PEP 740/sigstore
+attestation verification remains an accepted residual risk (B2).

@@ -23,11 +23,29 @@ lack the tarfile security fixes plus the independent archive preflight.
 (The retired `/tmp/glstub` workaround is unsupported — see the note in
 `docs/QA_TEST_MATRIX_AND_RESULTS.md` §1.)
 
+**Final evidence round (2026-10-26, local — not pushed).** Full suite on
+Windows/CPython 3.12.10: **551 passed, 19 skipped, 0 failed** (29 min; one
+benign third-party `DeprecationWarning` from starlette/anyio), coverage
+**88 %** (4,458 statements, 516 missed — the new OCR-harness statements moved
+the rounding boundary from 89 % to 88 %), staging acceptance **37/37, exit 0**.
+The OCR benchmark reproduces its committed figures exactly on consecutive runs
+(exact-match `0.9097`, ECE `0.0132`, `18/18` totals consistent, `13` missing /
+`0` mismatch) — all **synthetic** data; only latency varies between runs.
+GitHub Actions has **not** run for these local commits (not pushed, no
+workflow-dispatch authorization): the green runs quoted above remain attached
+to `4225f36` and `62a4bf9` only. New in this round: `tools/verify_wheelhouse.py`
+(offline wheelhouse build/verify against the hash lockfile, smoke-tested
+including tamper rejection), `docs/KEY_PROVIDER_CONTRACT.md` (key-provider
+contract with a consistency test), OCR totals-consistency / failure-category /
+per-language metrics with a CLI (`python -m dz_erp.benchmark <output_dir>`),
+and 4 wheelhouse tests (phase 19 now 19 tests, phase 22 now 13).
+
 ```bash
 python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
 python -m pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
 python tools/verify_dependency_graph.py        # explicit dependency-graph validation
 python tools/generate_hash_lock.py --check     # lockfile/hash drift check
+python tools/verify_wheelhouse.py --build ./wheelhouse   # print the hash-enforced offline wheelhouse command
 python -m pytest --cov=dz_erp --cov-report=term-missing
 python -m ruff check dz_erp tests tools        # static check
 ```
@@ -49,3 +67,4 @@ python -m ruff check dz_erp tests tools        # static check
 8. **[`docs/AUTHENTICATION_HARDENING_SPEC.md`](docs/AUTHENTICATION_HARDENING_SPEC.md)** — **Phase 7** remediation of the `X-User-Id`/`X-Company-Id` impersonation vulnerability (`CWE-287`/`CWE-639`): opaque revocable bearer tokens, PBKDF2 password hashing, brute-force lockout, schema migration, and the denial-audit rollback defect.
 9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (565 collected tests at the consolidated head; earlier counts retained as dated history).
 10. [`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`](docs/PRODUCTION_READINESS_AND_GO_NO_GO.md) — Final production-readiness assessment and Go/No-Go decision.
+11. [`docs/KEY_PROVIDER_CONTRACT.md`](docs/KEY_PROVIDER_CONTRACT.md) — The contract between the application and any key source: provider protocol, auditable `describe()` surface, failure modes (raise, never fall back), rotation behaviour, Windows ACL limitation, and the acceptance criteria a real KMS/HSM integration must meet (none is bundled; `KmsKeyProvider` reports `implemented: False`, `hsm_equivalent: False`).

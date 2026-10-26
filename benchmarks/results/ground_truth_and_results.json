@@ -565,13 +565,26 @@
     "overall_field_exact_match_rate": 0.9097,
     "overall_cer": 0.1113,
     "table_line_association_accuracy": 1.0,
+    "arithmetic_consistency": {
+      "documents": 18,
+      "headers_evaluated": 18,
+      "headers_consistent": 18,
+      "line_sums_evaluated": 18,
+      "line_sums_consistent": 18,
+      "note": "Header consistency requires HT + TVA (+ a recognised droit de timbre) to reproduce TTC under 2-decimal DZD rounding; documents missing a needed field are excluded from the evaluated count, not scored as failures."
+    },
+    "failure_categories": {
+      "missing": 13,
+      "mismatch": 0,
+      "note": "missing = field not extracted at all; mismatch = extracted value differs from the ground truth. Per-field counts are in by_field[<field>]['failures']."
+    },
     "expected_calibration_error_ece": 0.0132,
     "calibration_observations": 59,
     "calibration_excluded_no_confidence": 85,
     "calibration_note": "ECE is computed only over fields whose extraction path measured a recognition confidence. Native PDF extraction measures none, and fields with no confidence are excluded rather than imputed.",
-    "latency_mean_ms": 817.62,
-    "latency_p50_ms": 682.05,
-    "latency_max_ms": 1785.24,
+    "latency_mean_ms": 3702.61,
+    "latency_p50_ms": 3252.74,
+    "latency_max_ms": 8302.01,
     "by_field": {
       "invoice_number": {
         "total": 18,
@@ -580,7 +593,11 @@
         "exact_match_rate": 0.9444,
         "precision": 1.0,
         "recall": 0.9444,
-        "cer": 0.0556
+        "cer": 0.0556,
+        "failures": {
+          "missing": 1,
+          "mismatch": 0
+        }
       },
       "supplier_nif": {
         "total": 18,
@@ -589,7 +606,11 @@
         "exact_match_rate": 1.0,
         "precision": 1.0,
         "recall": 1.0,
-        "cer": 0.0
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
       },
       "supplier_rc": {
         "total": 18,
@@ -598,7 +619,11 @@
         "exact_match_rate": 0.6667,
         "precision": 1.0,
         "recall": 0.6667,
-        "cer": 0.3333
+        "cer": 0.3333,
+        "failures": {
+          "missing": 6,
+          "mismatch": 0
+        }
       },
       "supplier_ai": {
         "total": 18,
@@ -607,7 +632,11 @@
         "exact_match_rate": 0.6667,
         "precision": 1.0,
         "recall": 0.6667,
-        "cer": 0.3333
+        "cer": 0.3333,
+        "failures": {
+          "missing": 6,
+          "mismatch": 0
+        }
       },
       "invoice_date": {
         "total": 18,
@@ -616,7 +645,11 @@
         "exact_match_rate": 1.0,
         "precision": 1.0,
         "recall": 1.0,
-        "cer": 0.0
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
       },
       "amount_ht_dzd": {
         "total": 18,
@@ -625,7 +658,11 @@
         "exact_match_rate": 1.0,
         "precision": 1.0,
         "recall": 1.0,
-        "cer": 0.0
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
       },
       "amount_tva_dzd": {
         "total": 18,
@@ -634,7 +671,11 @@
         "exact_match_rate": 1.0,
         "precision": 1.0,
         "recall": 1.0,
-        "cer": 0.0
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
       },
       "amount_ttc_dzd": {
         "total": 18,
@@ -643,40 +684,62 @@
         "exact_match_rate": 1.0,
         "precision": 1.0,
         "recall": 1.0,
-        "cer": 0.0
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
       }
     },
     "by_stratum": {
       "S1_FRENCH_DIGITAL_PDF": {
         "docs": 3,
         "field_accuracy": 1.0,
-        "mean_latency_ms": 7.56
+        "mean_latency_ms": 33.81
       },
       "S2_BILINGUAL_FR_AR_DIGITAL_PDF": {
         "docs": 3,
         "field_accuracy": 1.0,
-        "mean_latency_ms": 7.79
+        "mean_latency_ms": 39.89
       },
       "S3_CASH_TIMBRE_DIGITAL_PDF": {
         "docs": 3,
         "field_accuracy": 1.0,
-        "mean_latency_ms": 7.44
+        "mean_latency_ms": 35.9
       },
       "S4_CLEAN_RASTER_SCAN_PNG": {
         "docs": 3,
         "field_accuracy": 0.7083,
-        "mean_latency_ms": 1732.39
+        "mean_latency_ms": 7480.25
       },
       "S5_STAMPED_SKEWED_SCAN_PNG": {
         "docs": 3,
         "field_accuracy": 1.0,
-        "mean_latency_ms": 1595.22
+        "mean_latency_ms": 7535.79
       },
       "S6_THERMAL_CASH_RECEIPT_PNG": {
         "docs": 3,
         "field_accuracy": 0.75,
-        "mean_latency_ms": 1555.34
+        "mean_latency_ms": 7090.01
       }
-    }
+    },
+    "by_language": {
+      "french_digital": {
+        "docs": 6,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 34.85
+      },
+      "bilingual_fr_ar": {
+        "docs": 3,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 39.89
+      },
+      "french_raster": {
+        "docs": 9,
+        "field_accuracy": 0.8194,
+        "mean_latency_ms": 7368.68
+      }
+    },
+    "language_coverage_note": "Groups measured on this synthetic set: french_digital, bilingual_fr_ar and french_raster. A scanned Arabic-only stratum is intentionally absent: the bundled recognition head cannot read it (docs/OCR_EVALUATION_PROTOCOL.md §7, risk O3); such documents are routed to manual transcription rather than mis-read."
   }
 }

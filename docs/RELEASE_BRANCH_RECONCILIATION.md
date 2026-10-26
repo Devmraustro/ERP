@@ -62,7 +62,7 @@ The following remain blocked or operationally unverified:
 - **S1/S3:** actual KMS/HSM or equivalent custody infrastructure and an enforced split-custody process.
 - **O2:** OCR confidence calibration on representative observations.
 - **O3:** Arabic recognition capability; unsupported scans must remain in manual transcription/review.
-- **B2:** publisher provenance and a separately managed artifact mirror/wheelhouse.
+- **B2:** publisher provenance (PEP 740/sigstore), and a provisioned internal mirror/wheelhouse — the build/verify procedure and its offline verifier now exist (`tools/verify_wheelhouse.py`), no provisioned artifact source does.
 - **D4/D7:** production-scale recovery drills and verification of the intended database topology and concurrency assumptions.
 - **S4/D6:** confirmed off-host checkpoint storage, scheduler installation and working alert delivery.
 - No production host, actual KMS/HSM, independent checkpoint destination, representative production-like scan corpus, or customer-specific professional approvals are evidenced.

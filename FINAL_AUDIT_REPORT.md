@@ -566,15 +566,55 @@ rather than a one-off benchmark.
 * No scheduler: `monitor` detects an overdue key, nothing rotates it.
 * Arabic-only scanned documents still cannot be recognised by the default model head
   (`docs/OCR_EVALUATION_PROTOCOL.md` §7); digital-born Arabic is unaffected.
-* Field confidence is still the line score (constant `0.995` for digital PDFs), so no auto-accept
-  threshold can be honestly calibrated yet (protocol §3, prerequisite P0).
+* No representative-observation confidence calibration: the fabricated constant (`0.995` for
+  digital PDFs) has been removed — native text now reports `confidence_kind: not_measured` —
+  but auto-accept thresholds still cannot be honestly calibrated without a measured corpus
+  (protocol §3, §6; the synthetic set is not that corpus).
 * No production-scale drill, no third-party penetration test, no real-data benchmark.
 
 The consolidated view of all of the above, with severity, evidence, owner and action per item, is
 `docs/RISK_REGISTER.md`; the reviewer-facing index is `docs/COMPLIANCE_REVIEW_PACKAGE.md`.
 
+### 11.6 Final evidence round (2026-10-26, local — not pushed)
+
+* **OCR evaluation (still synthetic-only).** The harness (`dz_erp/benchmark.py`) now also reports
+  an arithmetic-consistency axis (extracted `HT + TVA + timbre == TTC`, line sums vs. header HT),
+  failure categories (`missing` vs `mismatch`, per field), a per-language roll-up that names the
+  intentionally absent scanned-Arabic stratum, and a CLI (`python -m dz_erp.benchmark
+  <output_dir>`). The tracked artefact was regenerated with it and **reproduced twice with
+  identical specs and identical accuracy/consistency/calibration/failure figures**
+  (exact-match `0.9097`, CER `0.1113`, ECE `0.0132`, `18/18` header and line-sum consistency,
+  `13` missing / `0` mismatch); only latency varied (≈ 3.70 s vs ≈ 4.16 s mean per document on
+  the same host — latency is capacity data, never accuracy). Every figure is from 18 *synthetic*
+  invoices in 6 strata; nothing here is a production-accuracy claim (protocol §11).
+* **Dependency provenance (B2).** `tools/verify_wheelhouse.py` closes the verifiable half of the
+  wheelhouse gap: it prints the hash-enforced build command
+  (`pip download --require-hashes --only-binary=:all:`), verifies an existing wheelhouse offline
+  (sha256 + name/version per file; exit 1 on unknown/tampered/mismatched artifacts or missing
+  pins), and documents the air-gapped install command. Smoke-tested against real downloaded
+  wheels, including tamper rejection; parser/verifier/command covered by 4 new tests (phase 19:
+  15 → 19). Publisher provenance (PEP 740/sigstore) and a provisioned mirror remain open (B2).
+* **Key custody.** `docs/KEY_PROVIDER_CONTRACT.md` is the written contract for any key source:
+  the narrow `KeyProvider` protocol, the auditable `describe()` surface per provider, the
+  raise-never-fallback failure modes, rotation behaviour (registry authoritative, verification is
+  read-only), the Windows ACL limitation, and the acceptance criteria a production KMS/HSM
+  integration must meet before it may claim hardware custody. `KmsKeyProvider` remains
+  `implemented: False` / `hsm_equivalent: False`; a phase-22 consistency test (12 → 13) pins the
+  document to the code.
+* **Verification (Windows/CPython 3.12.10):** full suite **551 passed, 19 skipped, 0 failed**
+  (29:21; one benign third-party `DeprecationWarning`), coverage **88 %** (4,458 statements,
+  516 missed — the rounding boundary moved from 89 % because the new harness code added
+  statements), staging acceptance **37/37, exit 0**, ruff / compileall / dependency-graph /
+  hash-lock check / risk-register counts all green.
+* **Honest boundaries:** no CI run exists for this exact commit (not pushed; no dispatch
+  authorization) — the green runs quoted in §6 remain attached to `4225f36` and `62a4bf9` only.
+  No representative OCR corpus, no KMS/HSM, no off-host checkpoint destination, no production
+  drills, no professional approvals: all external, unchanged.
+
 ---
 
-*Every number in this report comes from a command executed against commit
-`d823b83f79…`; the CI result is the run for that exact SHA. Nothing in this report is inferred from
-the previous audit.*
+*Every number in §6 comes from a command executed against commit `d823b83f79…`; every number in
+§11.6 comes from a command executed on 2026-10-26 against the final evidence working tree whose
+parent is `3dab89b95a02a3db4dc3aecb52c3e61f30bdddda`. CI results are quoted only for commits that
+were actually run (§6: `4225f36`, `62a4bf9`); no CI result is claimed for any commit that was not
+pushed. Nothing in this report is inferred from the previous audit.*

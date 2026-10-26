@@ -25,12 +25,14 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import bootstrap
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools import generate_hash_lock
+from tools import generate_hash_lock, verify_wheelhouse
 from tools.verify_dependency_graph import DistributionRecord, _failures
 
 LOCKFILE = REPO_ROOT / "requirements.lock.txt"
@@ -248,3 +250,73 @@ def test_supported_python_versions_are_declared_and_consistent() -> None:
     assert "<3.13" in requires_python.replace(" ", ""), (
         "if the OCR engine's Python ceiling changed, revisit Risk O5"
     )
+
+
+# ----------------------------------------------------------------------
+# 4. Offline wheelhouse builder/verifier (Risk B2 residual closure)
+# ----------------------------------------------------------------------
+def _digest(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_wheelhouse_pins_parser_joins_continuations_and_requires_hashes() -> None:
+    text = (
+        "# comment line, ignored\n"
+        "demo==1.0 \\\n"
+        "    --hash=sha256:" + "a" * 64 + " \\\n"
+        "    --hash=sha256:" + "b" * 64 + "\n"
+        "other==2.0 --hash=sha256:" + "c" * 64 + "\n"
+    )
+    pins = verify_wheelhouse.parse_pins(text)
+    assert pins == {
+        ("demo", "1.0"): ["a" * 64, "b" * 64],
+        ("other", "2.0"): ["c" * 64],
+    }
+    with pytest.raises(SystemExit, match="no sha256 hashes"):
+        verify_wheelhouse.parse_pins("demo==1.0\n")
+
+
+def test_wheelhouse_verify_accepts_pinned_and_rejects_tampered(tmp_path: Path) -> None:
+    payload = b"demo-pinned-bytes"
+    digest = _digest(payload)
+    lock = tmp_path / "hashes.txt"
+    lock.write_text(f"demo==1.0 --hash=sha256:{digest}\nghost==9.9 --hash=sha256:{'e' * 64}\n")
+
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+    (wheelhouse / "demo-1.0-py3-none-any.whl").write_bytes(payload)
+    # Correct name/version but bytes that are not in the lockfile.
+    (wheelhouse / "tampered-1.0-py3-none-any.whl").write_bytes(b"tampered")
+
+    result = verify_wheelhouse.verify_wheelhouse(wheelhouse, verify_wheelhouse.parse_pins(lock.read_text()))
+    assert not result.ok
+    assert result.unknown_artifacts == ["tampered-1.0-py3-none-any.whl"]
+    assert result.missing_pins == [("ghost", "9.9")]
+    assert result.covered[("demo", "1.0")] == ["demo-1.0-py3-none-any.whl"]
+
+
+def test_wheelhouse_verify_rejects_a_hash_recorded_for_another_distribution(tmp_path: Path) -> None:
+    payload = b"demo-pinned-bytes"
+    digest = _digest(payload)
+    lock = tmp_path / "hashes.txt"
+    lock.write_text(f"demo==1.0 --hash=sha256:{digest}\n")
+
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+    # The bytes are pinned for demo==1.0, but the file claims to be other-2.0.
+    (wheelhouse / "other-2.0-py3-none-any.whl").write_bytes(payload)
+
+    result = verify_wheelhouse.verify_wheelhouse(wheelhouse, verify_wheelhouse.parse_pins(lock.read_text()))
+    assert not result.ok
+    assert result.mismatched_artifacts == ["other-2.0-py3-none-any.whl"]
+    assert result.missing_pins == [("demo", "1.0")]
+
+
+def test_wheelhouse_build_command_pins_hashes_and_wheels_only() -> None:
+    command = verify_wheelhouse.build_command(Path("wh"))
+    assert "--require-hashes" in command
+    assert "--only-binary=:all:" in command
+    assert "--no-deps" in command
+    assert str(HASH_LOCKFILE) in command

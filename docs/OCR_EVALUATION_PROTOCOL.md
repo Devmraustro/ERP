@@ -250,6 +250,60 @@ is not closed by the new engine alone".
   `docs/DEPENDENCY_AND_LICENSE_REGISTER.md`.
 * The 18-document set is synthetic and regenerable; the report must keep saying so.
 
+### 9.1 Repeatable entry point
+
+```bash
+python -m dz_erp.benchmark <output_dir>
+```
+
+renders the 18 synthetic documents into `<output_dir>` and writes
+`ground_truth_and_results.json` there. The output is deterministic for a given
+host/extractor version (modulo the documented wall-clock latency variance, §10);
+no network, no external dataset, no credentials. The same harness is what the
+functional test in `tests/test_phase6_ocr_benchmark_e2e.py` exercises.
+
+### 9.2 Dataset format
+
+The dataset is *generated*, not shipped: `build_synthetic_algerian_benchmark_specs()`
+emits 18 document specifications (6 strata × 3 documents, §4.1). Each spec is a
+plain-JSON-serialisable dict whose load-bearing keys are:
+
+| key | meaning |
+|---|---|
+| `doc_id`, `stratum` | identity and stratum of the synthetic document |
+| `mime_type` | `application/pdf` (digital) or `image/png` (raster) |
+| ground-truth fields | `invoice_number`, `supplier_nif`, `supplier_rc`, `supplier_ai`, `invoice_date`, `amount_ht_dzd`, `amount_tva_dzd`, `amount_ttc_dzd`, `amount_timbre_dzd` |
+| `lines` | the item lines (description, quantity, unit price, line HT), used for the line-association and line-sum metrics |
+| rendering knobs | `skew_deg`, `blur_radius`, `add_wet_stamp`, `thermal_style` — the stratum's degradation profile |
+
+Because the specs are the ground truth, the harness can score extraction
+without a separate annotation file; a *real* corpus must use the same shape
+(specs + rendered bytes) with human-annotated ground truth replacing the
+generator (§4.3), which is exactly what makes the harness reusable.
+
+### 9.3 Metrics reported
+
+`ground_truth_and_results.json` contains a `report` object with, beyond the
+field-level accuracy, CER, latency and confidence-calibration (ECE) metrics
+already described in §3/§5:
+
+* **`arithmetic_consistency`** — how often the *extracted* values satisfy the
+  posting invariants: `HT + TVA + timbre == TTC` per header (2-decimal DZD
+  rounding), and per-document line sums reproducing the extracted header HT.
+  Documents missing a needed field are counted in `*_evaluated` only, never as
+  consistency failures. This is a separate axis from character accuracy: one
+  wrong digit can break balance while every character looks plausible.
+* **`failure_categories`** — every field outcome is classified as `missing`
+  (not extracted at all → review routing) or `mismatch` (extracted but wrong →
+  human correction of a plausible-looking value). Totals per category plus a
+  per-field breakdown in `by_field[<field>]["failures"]`; the categories sum to
+  `total − exact_match` per field (asserted by the phase-6 test).
+* **`by_language`** — roll-up of the strata into `french_digital`,
+  `bilingual_fr_ar`, `french_raster`. Groups with no documents are omitted and
+  explained by `language_coverage_note`, so an unmeasured group can never be
+  mistaken for a measured 0 % (§7: a scanned Arabic-only stratum is
+  intentionally absent — the bundled recognition head cannot read it).
+
 ---
 
 ## 10. Threats to validity

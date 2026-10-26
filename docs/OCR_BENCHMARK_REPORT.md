@@ -20,9 +20,9 @@ All metrics in this report were produced by executing `dz_erp/benchmark.py` (`ru
 | **Table Line-Item Association Accuracy** | **`100.00%`** (`18 / 18` documents matched SKU and Line HT exactly) |
 | **Expected Calibration Error (`ECE`, 5 bins)** | **`1.32%`** (`0.0132`) over **59** measured confidences |
 | Fields excluded from calibration | **85** — native PDF extraction measures no confidence |
-| **Latency Mean (`ms / document`)** | **`817.62 ms`** |
-| **Latency Median / `p50` (`ms / document`)** | **`682.05 ms`** |
-| **Latency Max (`ms / document`)** | **`1,785.24 ms`** |
+| **Latency Mean (`ms / document`)** | **`3 702.61 ms`** — host-dependent, see the note below |
+| **Latency Median / `p50` (`ms / document`)** | **`3 252.74 ms`** |
+| **Latency Max (`ms / document`)** | **`8 302.01 ms`** |
 
 ---
 
@@ -47,16 +47,41 @@ computes ECE only over fields whose path measured a confidence. The honest figur
 The field-accuracy numbers in §2–§4 are unaffected: they are computed from ground-truth
 comparison and never depended on confidence.
 
+### 2.2 New axes reported by the current harness (totals consistency, failure categories, language roll-up)
+
+The benchmark harness now also reports, per run (protocol `docs/OCR_EVALUATION_PROTOCOL.md`
+§9.2–9.3 documents the format and the CLI `python -m dz_erp.benchmark <output_dir>`):
+
+* **Arithmetic consistency of the extracted totals.** For this artefact: `18/18` headers
+  balanced (`HT + TVA + timbre == TTC` under 2-decimal DZD rounding) and `18/18` line sums
+  reproduced the extracted header HT. On this synthetic set every failure is an abstention,
+  so nothing unbalanced was ever extracted — on a real corpus this axis is expected to be
+  the first place a plausible-looking misread becomes visible.
+* **Failure categories.** `13` missing, `0` mismatch across the `144` field instances
+  (`131` exact matches; the extractor either reads a field exactly or abstains, which is the
+  documented precision-first behaviour, §10 of the protocol). Per-field breakdowns are in
+  `by_field[<field>]["failures"]`.
+* **Language roll-up (`by_language`).** `french_digital: 6`, `bilingual_fr_ar: 3`,
+  `french_raster: 9` documents. A scanned Arabic-only stratum remains absent by design —
+  the bundled recognition head cannot read it (protocol §7, risk O3); the report's
+  `language_coverage_note` states this rather than letting an absent group look like a
+  measured 0 %.
+
 ---
 
-> **Latency is host-dependent and must not be quoted as a fixed property.** These figures are the
-> committed artefact (`benchmarks/results/ground_truth_and_results.json`), regenerated during the
-> risk-closure round on the same 2-vCPU container used for the rotation drill. Successive runs of
-> identical code have differed by more than 2x in mean OCR latency
-> (ONNX Runtime/OpenCV kernel dispatch and page-cache state), so any latency claim needs its host
-> and run recorded beside it. Field accuracy is the stable, checkable metric; latency is capacity
-> data. The test now writes its output to a temporary directory, so a test run can no longer
-> overwrite this artefact with a machine's own timings.
+> **Latency is host-dependent and must not be quoted as a fixed property.** The committed
+> artefact (`benchmarks/results/ground_truth_and_results.json`) was last regenerated on the
+> local Windows host (2026-10-26) during the final evidence round: mean ≈ 3.70 s/document.
+> The earlier 2-vCPU container run measured ≈ 0.82 s/document for identical documents, and a
+> second consecutive run on this same host measured ≈ 4.16 s/document mean — variance across
+> hosts *and* successive runs of identical code (ONNX Runtime/OpenCV kernel dispatch and
+> page-cache state). Any latency claim needs its host and run recorded beside it; latency is
+> capacity data, not accuracy. **Accuracy is the stable, checkable metric:** two consecutive
+> runs of the committed harness produced identical ground-truth specs and identical
+> accuracy/consistency/calibration/failure figures (exact-match `0.9097`, CER `0.1113`, ECE
+> `0.0132`, `18/18` header and line-sum consistency, `13` missing / `0` mismatch failures);
+> only latency varied. The test writes its output to a temporary directory, so a test run can
+> never overwrite this artefact with a machine's own timings.
 
 ---
 
@@ -79,12 +104,15 @@ comparison and never depended on confidence.
 
 | Stratum | Document Count | Engine Used | Field Exact-Match Accuracy | Mean Latency (`ms`) |
 | :--- | :---: | :--- | :---: | :---: |
-| `S1_FRENCH_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `7.56 ms` |
-| `S2_BILINGUAL_FR_AR_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `7.79 ms` |
-| `S3_CASH_TIMBRE_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `7.44 ms` |
-| `S4_CLEAN_RASTER_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`70.83%`** | `1,732.39 ms` |
-| `S5_STAMPED_SKEWED_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`100.00%`** | `1,595.22 ms` |
-| `S6_THERMAL_CASH_RECEIPT_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`75.00%`** | `1,555.34 ms` |
+| `S1_FRENCH_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `33.81 ms` |
+| `S2_BILINGUAL_FR_AR_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `39.89 ms` |
+| `S3_CASH_TIMBRE_DIGITAL_PDF` | 3 | `pdfplumber` | **`100.00%`** | `35.90 ms` |
+| `S4_CLEAN_RASTER_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`70.83%`** | `7 480.25 ms` |
+| `S5_STAMPED_SKEWED_SCAN_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`100.00%`** | `7 535.79 ms` |
+| `S6_THERMAL_CASH_RECEIPT_PNG` | 3 | `RapidOCR (PP-OCRv4)` | **`75.00%`** | `7 090.01 ms` |
+
+Latency columns reflect the currently committed artefact (local Windows host, 2026-10-26);
+accuracy columns are host-independent and identical across consecutive runs.
 
 ---
 
@@ -117,8 +145,15 @@ comparison and never depended on confidence.
 The synthetic corpus is now generated with ReportLab's `invariant=True`, which fixes the document
 ID and timestamps. Two consecutive runs produce **byte-identical PDFs** (verified by SHA-256), so
 regenerating the corpus no longer rewrites committed evidence with new `/CreationDate` values.
+The PNG strata are byte-identical across consecutive runs on the same environment as well
+(SHA-256 verified in the final evidence round, PIL 11.1.0); the PNG bytes currently in git differ
+from the ones committed by earlier rounds only because those were rendered under a different
+toolchain — the first regeneration under the current pinned environment is the one-time
+transition, and runs are stable from there.
 
 What remains host-dependent is the *measurement*, not the artefact: latencies vary between runs,
-so the JSON's timing fields describe the run that produced them. The test suite therefore writes
-its benchmark output to a temporary directory and asserts metrics, never timings
-(`tests/test_phase6_ocr_benchmark_e2e.py`).
+so the JSON's timing fields describe the run that produced them. Every accuracy, consistency,
+calibration and failure-category figure is identical across consecutive runs (verified twice:
+exact-match `0.9097`, ECE `0.0132`, `18/18` totals consistent, `13` missing / `0` mismatch).
+The test suite therefore writes its benchmark output to a temporary directory and asserts
+metrics, never timings (`tests/test_phase6_ocr_benchmark_e2e.py`).

@@ -221,6 +221,30 @@ def build_synthetic_algerian_benchmark_specs() -> List[Dict[str, Any]]:
     return specs
 
 
+def _parse_money(text: Any) -> Optional[Decimal]:
+    """Parse an extracted monetary string into an exact Decimal, or None."""
+    if text is None:
+        return None
+    try:
+        return to_decimal(str(text).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+# Language groups for the per-language roll-up. The synthetic dataset contains
+# French and bilingual FR/AR documents; a *scanned* Arabic-only stratum is
+# deliberately absent because the bundled recognition head cannot read it
+# (protocol §7, risk O3). The roll-up must show that absence, not hide it.
+LANGUAGE_GROUP_BY_STRATUM: Dict[str, str] = {
+    "S1_FRENCH_DIGITAL_PDF": "french_digital",
+    "S2_BILINGUAL_FR_AR_DIGITAL_PDF": "bilingual_fr_ar",
+    "S3_CASH_TIMBRE_DIGITAL_PDF": "french_digital",
+    "S4_CLEAN_RASTER_SCAN_PNG": "french_raster",
+    "S5_STAMPED_SKEWED_SCAN_PNG": "french_raster",
+    "S6_THERMAL_CASH_RECEIPT_PNG": "french_raster",
+}
+
+
 def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
     """Generate benchmark dataset files and execute real extraction across all strata."""
     output_dir = Path(output_dir)
@@ -247,6 +271,10 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
     calibration_excluded = 0
     line_assoc_matches = 0
     line_assoc_total = len(specs)
+    # Keep the per-document extraction results so the arithmetic-consistency
+    # axis below can be computed from the *extracted* values without re-running
+    # OCR (the runner is deliberately deterministic but not free).
+    ocr_by_doc: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
 
     for spec in specs:
         if spec["mime_type"] == "application/pdf":
@@ -267,6 +295,7 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
 
         ocr_res = extract_document_ocr(raw_bytes, spec["mime_type"])
         latencies_ms.append(ocr_res["latency_ms"])
+        ocr_by_doc.append((spec, ocr_res))
 
         s_name = spec["stratum"]
         if s_name not in stratum_stats:
@@ -326,6 +355,49 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
                 avg_acc = sum(x[1] for x in bucket) / len(bucket)
                 ece += (len(bucket) / n_total) * abs(avg_acc - avg_conf)
 
+    # Arithmetic / tax consistency of the *extracted* values. This is a
+    # separate axis from character accuracy: a document whose digits are all
+    # slightly wrong can still balance, and a single wrong digit can break
+    # balance, so both must be reported independently. A header counts as
+    # consistent only when HT + TVA (+ a recognised timbre) reproduces the
+    # extracted TTC under 2-decimal DZD rounding; a document is counted in the
+    # evaluated set only when the needed fields were actually extracted.
+    headers_evaluated = headers_consistent = 0
+    line_sums_evaluated = line_sums_consistent = 0
+    for spec, ocr_res in ocr_by_doc:
+        fields = ocr_res["fields"]
+
+        def _value(name: str) -> Optional[Decimal]:
+            obj = fields.get(name)
+            return _parse_money(obj["normalized_value"]) if obj else None
+
+        ht_dec, tva_dec, ttc_dec = _value("amount_ht_dzd"), _value("amount_tva_dzd"), _value("amount_ttc_dzd")
+        if None not in (ht_dec, tva_dec, ttc_dec):
+            headers_evaluated += 1
+            timbre_dec = _value("amount_timbre_dzd") or Decimal("0.00")
+            if round_dzd(ht_dec + tva_dec + timbre_dec) == round_dzd(ttc_dec):
+                headers_consistent += 1
+
+        extracted_lines = ocr_res.get("lines") or []
+        if (
+            len(extracted_lines) == len(spec["lines"])
+            and ht_dec is not None
+            and tva_dec is not None
+            and extracted_lines
+        ):
+            line_ht = [_parse_money(line.get("line_ht_dzd")) for line in extracted_lines]
+            if all(v is not None for v in line_ht):
+                line_sums_evaluated += 1
+                if round_dzd(sum(line_ht)) == round_dzd(ht_dec):
+                    line_sums_consistent += 1
+
+    # Failure categories. "missing" means the field was not extracted at all;
+    # "mismatch" means it was extracted but does not equal the ground truth.
+    # Both are reported separately because they demand different remedies
+    # (review routing vs. human correction of a plausible-looking value).
+    failures_missing = sum(s["total"] - s["extracted"] for s in field_stats.values())
+    failures_mismatch = sum(s["extracted"] - s["exact_match"] for s in field_stats.values())
+
     summary_by_field: Dict[str, Any] = {}
     for fname, st in field_stats.items():
         tot = st["total"]
@@ -342,6 +414,10 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
             "precision": round(precision, 4),
             "recall": round(recall, 4),
             "cer": round(cer, 4),
+            "failures": {
+                "missing": tot - ext_c,
+                "mismatch": ext_c - em,
+            },
         }
 
     summary_by_stratum: Dict[str, Any] = {}
@@ -350,6 +426,29 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
             "docs": st["docs"],
             "field_accuracy": round(st["field_matches"] / st["field_total"], 4),
             "mean_latency_ms": round(statistics.mean(st["latencies_ms"]), 2),
+        }
+
+    # Per-language roll-up over the strata above. Groups with no documents are
+    # omitted here and explained by `language_coverage_note`, so an absent
+    # group cannot be mistaken for a measured 0%.
+    language_groups: Dict[str, Dict[str, Any]] = {}
+    for s_name, st in stratum_stats.items():
+        group = LANGUAGE_GROUP_BY_STRATUM.get(s_name)
+        if group is None:
+            continue
+        agg = language_groups.setdefault(
+            group, {"docs": 0, "field_matches": 0, "field_total": 0, "latencies_ms": []}
+        )
+        agg["docs"] += st["docs"]
+        agg["field_matches"] += st["field_matches"]
+        agg["field_total"] += st["field_total"]
+        agg["latencies_ms"].extend(st["latencies_ms"])
+    summary_by_language: Dict[str, Any] = {}
+    for group, agg in language_groups.items():
+        summary_by_language[group] = {
+            "docs": agg["docs"],
+            "field_accuracy": round(agg["field_matches"] / agg["field_total"], 4),
+            "mean_latency_ms": round(statistics.mean(agg["latencies_ms"]), 2),
         }
 
     report = {
@@ -364,6 +463,31 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
             4,
         ),
         "table_line_association_accuracy": round(line_assoc_matches / line_assoc_total, 4),
+        # Consistency of the extracted totals under the SCF/DZD rules. These
+        # are the same invariants the posting path enforces; measuring them
+        # here shows how often an *extraction error alone* would break balance.
+        "arithmetic_consistency": {
+            "documents": len(specs),
+            "headers_evaluated": headers_evaluated,
+            "headers_consistent": headers_consistent,
+            "line_sums_evaluated": line_sums_evaluated,
+            "line_sums_consistent": line_sums_consistent,
+            "note": (
+                "Header consistency requires HT + TVA (+ a recognised droit de "
+                "timbre) to reproduce TTC under 2-decimal DZD rounding; "
+                "documents missing a needed field are excluded from the "
+                "evaluated count, not scored as failures."
+            ),
+        },
+        "failure_categories": {
+            "missing": failures_missing,
+            "mismatch": failures_mismatch,
+            "note": (
+                "missing = field not extracted at all; mismatch = extracted "
+                "value differs from the ground truth. Per-field counts are in "
+                "by_field[<field>]['failures']."
+            ),
+        },
         # None when no extracted field carried a measured confidence, and
         # reported with its own observation count so it cannot be read as a
         # statement about the whole dataset.
@@ -380,9 +504,49 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
         "latency_max_ms": round(max(latencies_ms), 2),
         "by_field": summary_by_field,
         "by_stratum": summary_by_stratum,
+        "by_language": summary_by_language,
+        "language_coverage_note": (
+            "Groups measured on this synthetic set: french_digital, "
+            "bilingual_fr_ar and french_raster. A scanned Arabic-only stratum "
+            "is intentionally absent: the bundled recognition head cannot read "
+            "it (docs/OCR_EVALUATION_PROTOCOL.md §7, risk O3); such documents "
+            "are routed to manual transcription rather than mis-read."
+        ),
     }
     (output_dir / "ground_truth_and_results.json").write_text(
         json.dumps({"specs": specs, "report": report}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     return report
+
+
+def _cli(argv: Optional[List[str]] = None) -> int:
+    """Repeatable entry point: `python -m dz_erp.benchmark <output_dir>`."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the 18-document synthetic Algerian invoice OCR benchmark "
+            "(field accuracy, totals/tax consistency, confidence calibration, "
+            "failure categories, language roll-up)."
+        )
+    )
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        help="Directory that receives the rendered documents and ground_truth_and_results.json.",
+    )
+    args = parser.parse_args(argv)
+    report = run_empirical_ocr_benchmark(args.output_dir)
+    print(
+        f"overall field exact-match: {report['overall_field_exact_match_rate']}\n"
+        f"totals consistent (headers): "
+        f"{report['arithmetic_consistency']['headers_consistent']}/{report['arithmetic_consistency']['headers_evaluated']}\n"
+        f"ECE: {report['expected_calibration_error_ece']}\n"
+        f"report: {(Path(args.output_dir) / 'ground_truth_and_results.json')}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

@@ -6,8 +6,13 @@ from typing import Any, Dict
 
 import pytest
 
-from dz_erp.benchmark import render_synthetic_invoice_pdf, run_empirical_ocr_benchmark
+from dz_erp.benchmark import (
+    build_synthetic_algerian_benchmark_specs,
+    render_synthetic_invoice_pdf,
+    run_empirical_ocr_benchmark,
+)
 from dz_erp.database import ERPDatabase
+from dz_erp.decimal_utils import round_dzd, to_decimal
 from dz_erp.intake_ocr import (
     PrivateDocumentVault,
     update_extracted_field_by_human,
@@ -55,6 +60,49 @@ def test_empirical_ocr_benchmark_across_6_algerian_invoice_strata(tmp_path: Path
     assert report["table_line_association_accuracy"] >= 0.85
     assert report["expected_calibration_error_ece"] <= 0.15
     assert (bench_dir / "ground_truth_and_results.json").exists()
+
+    # --- arithmetic / tax consistency of the extracted totals ---------------
+    # The extraction itself is already asserted above; this asserts that the
+    # *reported consistency figures* are internally coherent and that the
+    # ground-truth invoices balance (a broken fixture would otherwise make a
+    # 0% consistency rate look like an extraction problem).
+    consistency = report["arithmetic_consistency"]
+    assert consistency["documents"] == 18
+    assert 0 <= consistency["headers_consistent"] <= consistency["headers_evaluated"] <= 18
+    assert 0 <= consistency["line_sums_consistent"] <= consistency["line_sums_evaluated"] <= 18
+    # Every synthetic ground-truth document must balance: HT + TVA + timbre == TTC.
+    for spec in build_synthetic_algerian_benchmark_specs():
+        expected = (
+            to_decimal(spec["amount_ht_dzd"])
+            + to_decimal(spec["amount_tva_dzd"])
+            + to_decimal(spec["amount_timbre_dzd"])
+        )
+        assert round_dzd(expected) == round_dzd(to_decimal(spec["amount_ttc_dzd"])), spec["doc_id"]
+
+    # --- failure categories --------------------------------------------------
+    failures = report["failure_categories"]
+    per_field = report["by_field"]
+    assert (
+        failures["missing"]
+        == sum(f["failures"]["missing"] for f in per_field.values())
+    )
+    assert (
+        failures["mismatch"]
+        == sum(f["failures"]["mismatch"] for f in per_field.values())
+    )
+    total_fields = sum(f["total"] for f in per_field.values())
+    assert failures["missing"] + failures["mismatch"] == total_fields - sum(
+        f["exact_match"] for f in per_field.values()
+    )
+
+    # --- language roll-up ----------------------------------------------------
+    by_language = report["by_language"]
+    assert sum(group["docs"] for group in by_language.values()) == 18
+    assert {"french_digital", "bilingual_fr_ar", "french_raster"} == set(by_language)
+    # The Arabic-only scanned stratum is deliberately absent, and the report
+    # must say so rather than presenting a measured 0%.
+    assert "arabic" not in by_language
+    assert "arabic" in report["language_coverage_note"].lower()
 
 
 def test_complete_14_step_end_to_end_supplier_invoice_workflow(tmp_path: Path) -> None:

@@ -276,8 +276,9 @@ the security configuration rather than an implementation detail.
 * **51 distributions, 1 277 SHA-256 digests, sha256 only.** Every authentic file for each pinned
   version is listed, so the same lockfile is valid on Linux and Windows.
 * **Drift is detected, not assumed.** `python tools/generate_hash_lock.py --check` runs in CI and
-  fails if the hash lockfile and the version lockfile disagree; 15 tests in
-  `tests/test_phase19_dependency_integrity.py` assert the same, plus the validator rules.
+  fails if the hash lockfile and the version lockfile disagree; 19 tests in
+  `tests/test_phase19_dependency_integrity.py` assert the same, plus the validator rules and
+  the offline-wheelhouse builder/verifier.
 * **The documented OpenCV substitution stays visible.** `pip check` reports one line about
   `opencv-python`; `tools/verify_dependency_graph.py` allow-lists exactly that substitution and
   fails on any other.
@@ -285,9 +286,14 @@ the security configuration rather than an implementation detail.
   stood at that commit passed inside that environment (435 tests; the repository suite has since
   grown to 531), and an install with one altered digest was rejected with exit 1.
 
-**Not in place:** no internal mirror or offline wheelhouse is provisioned, and no publisher
-provenance (sigstore/PEP 740) is verified. Both are documented prerequisites
-(`docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §4.2–4.3), not claimed controls.
+**Not in place:** no offline wheelhouse or internal mirror is *provisioned* here — nothing in
+this repository ships one. What now exists is the repeatable procedure and its verifier:
+`tools/verify_wheelhouse.py` prints the hash-enforced build command
+(`pip download --require-hashes --only-binary=:all:`), verifies an existing wheelhouse offline
+(hash + name/version per file, exit 1 on any unknown/tampered/mismatched artifact or missing
+pin), and documents the air-gapped install command (`--no-index --find-links`).
+Publisher provenance (sigstore/PEP 740) is still not verified and remains an accepted residual
+risk (B2); see `docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §4.2–4.3.
 
 ---
 

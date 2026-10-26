@@ -23,7 +23,7 @@ lack the tarfile security fixes plus the independent archive preflight.
 (The retired `/tmp/glstub` workaround is unsupported — see the note in
 `docs/QA_TEST_MATRIX_AND_RESULTS.md` §1.)
 
-**Production Readiness Phase 1 evidence round (2026-10-26, local — not pushed).**
+**Production Readiness Phase 1 evidence round (2026-10-26, commit `ccc874b`).**
 Full suite on Windows/CPython 3.12.10: **602 passed, 20 skipped, 0 failed**
 (20 min 09 s; one benign third-party `DeprecationWarning` from
 starlette/anyio), coverage **87 %** (4,575 statements, 589 missed; `serve.py`
@@ -46,13 +46,37 @@ non-zero. On a real deployment host the same command exercises `key-status`
 and checkpoint verification; the eight external-evidence items (off-host
 storage, scheduler, alerting, DR drill, KMS/HSM, provenance, OCR corpus,
 professional approvals) are reported as required and never affect the exit
-code. GitHub Actions has **not** run for these local commits (not pushed, no
-workflow-dispatch authorization); the green runs quoted above remain attached
-to `4225f36` and `62a4bf9` only.
+code.
+
+**First CI verdict on this phase (run #103, `40370500808`, on `ccc874b`).**
+`ccc874b` was pushed to both working branches (`arena/6c474c64-erp` and
+`arena/5c240e1d-erp`, head of PR #2) as pure fast-forwards from `8dd53fc`.
+The Windows job (rotation, backup, recovery, staging acceptance) passed. Both
+Linux jobs (Python 3.11 and 3.12) failed at the test-suite step — a
+*test-fixture* defect, not a product one: `_good_env` wrote key files without
+`chmod`, so under the runners' umask they landed `0644` and the checker's
+POSIX permission gate correctly refused them (on Windows that gate only
+warns, which is why local runs had passed). The checker was right; the
+fixture was incomplete on POSIX. This commit fixes it: key files written
+`0600`, the vault directory `0700` on POSIX, and a cross-platform test
+pinning the gate's fail direction (phase 24 = 20 tests). The earlier green
+runs quoted above remain attached to `4225f36` and `62a4bf9` only.
+
+Full suite at this commit (Windows/CPython 3.12.10): **603 passed, 20
+skipped, 0 failed** (17 min 34 s; the same single benign starlette/anyio
+warning), coverage **89 %** (4,575 statements, 515 missed; `tools/` stays
+outside `--cov=dz_erp`). The two points above the `ccc874b` round's 87 % are
+a measured capture artifact, not a code or test change: that round's
+coverage combine ran before one OCR-benchmark subprocess wrote its
+parallel-data file, so its report missed the subprocess's `dz_erp/benchmark.py`
+lines; this run's combine consumed the straggler, and the entire difference
+sits in `dz_erp/benchmark.py` (module-entry and `main()` lines executed only
+by the suite's own OCR-benchmark subprocess). Subprocess coverage can
+therefore move a point or two between runs; test outcomes do not.
 
 New in this round: `tools/operational_readiness.py` (deterministic deployed-
 configuration checker, exit codes 0/1/2, external evidence reported as
-required, phase 24 = 19 tests), the fail-closed `ERP_KEY_PROVIDER` gate
+required, phase 24 = 20 tests), the fail-closed `ERP_KEY_PROVIDER` gate
 (`kms`/`hsm` declarations refuse start-up; phase 17 = 31 collected items),
 wheelhouse verifier hardening — nested directories and non-artifact files
 flagged, ambiguous digests refused, offline install flags pinned by test
@@ -87,7 +111,7 @@ python -m ruff check dz_erp tests tools        # static check
 6. [`docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`](docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md) — Phase 5 server-side RBAC, Segregation of Duties (`creator != approver`), multi-company isolation, trigger-protected HMAC-SHA256 audit hash-chain, secret/PII log redaction, and encrypted backup/restore verification.
 7. [`docs/OCR_BENCHMARK_REPORT.md`](docs/OCR_BENCHMARK_REPORT.md) — Phase 6 empirical OCR benchmark report across 18 synthetic Algerian invoices in 6 strata (`benchmarks/results/ground_truth_and_results.json`).
 8. **[`docs/AUTHENTICATION_HARDENING_SPEC.md`](docs/AUTHENTICATION_HARDENING_SPEC.md)** — **Phase 7** remediation of the `X-User-Id`/`X-Company-Id` impersonation vulnerability (`CWE-287`/`CWE-639`): opaque revocable bearer tokens, PBKDF2 password hashing, brute-force lockout, schema migration, and the denial-audit rollback defect.
-9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (622 collected tests at the current head: 602 passed, 20 skipped; earlier counts retained as dated history).
+9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (623 collected tests at the current head: 603 passed, 20 skipped; earlier counts retained as dated history).
 10. [`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`](docs/PRODUCTION_READINESS_AND_GO_NO_GO.md) — Final production-readiness assessment and Go/No-Go decision.
 11. [`docs/KEY_PROVIDER_CONTRACT.md`](docs/KEY_PROVIDER_CONTRACT.md) — The contract between the application and any key source: provider protocol, auditable `describe()` surface, failure modes (raise, never fall back), rotation behaviour, Windows ACL limitation, and the acceptance criteria a real KMS/HSM integration must meet (none is bundled; `KmsKeyProvider` reports `implemented: False`, `hsm_equivalent: False`). Includes the fail-closed `ERP_KEY_PROVIDER` selection gate and per-provider outage behaviour.
 12. [`docs/RELEASE_READINESS_MATRIX.md`](docs/RELEASE_READINESS_MATRIX.md) — The single release-gate table: requirement/risk ID, owner, required evidence, verification command, status (Verified vs. Blocked-external), external dependency and explicit pass criteria for KMS/HSM custody, publisher provenance, off-host checkpoints, alerting, DR, production-scale concurrency, OCR validation, Algerian accounting/tax review and Law 18-07/ANPDP. Companion tool: `tools/operational_readiness.py`, the deterministic deployed-configuration checker whose exit code covers only what it can actually see.

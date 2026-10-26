@@ -31,7 +31,12 @@ def _good_env(tmp_path: Path) -> dict:
     """A complete, minimal deployment configuration inside tmp_path.
 
     Idempotent: calling it twice in one test must not raise, so a test can
-    rebuild a clean environment after mutating its first copy.
+    rebuild a clean environment after mutating its first copy. Key files are
+    written owner-only (0600) and the vault directory 0700, because the
+    checker's POSIX permission gate refuses anything the service account's
+    peers could read - exactly like ``FileKeyProvider`` does at read time. A
+    fixture that handed the checker a 0644 key file would be a fixture bug,
+    not a checker bug.
     """
     db = tmp_path / "erp.sqlite3"
     db.write_bytes(b"SQLite format 3\x00")  # existence is all the checker inspects
@@ -39,8 +44,14 @@ def _good_env(tmp_path: Path) -> dict:
     vault.mkdir(exist_ok=True)
     log_dir = tmp_path / "logs"
     log_dir.mkdir(exist_ok=True)
-    (vault.parent / (vault.name + ".vault.key")).write_bytes(b"k" * 32)
-    (db.parent / (db.name + ".audit.key")).write_bytes(b"a" * 32)
+    vault_key = vault.parent / (vault.name + ".vault.key")
+    vault_key.write_bytes(b"k" * 32)
+    os.chmod(vault_key, 0o600)
+    audit_key = db.parent / (db.name + ".audit.key")
+    audit_key.write_bytes(b"a" * 32)
+    os.chmod(audit_key, 0o600)
+    if os.name == "posix":
+        vault.chmod(0o700)
     return {
         "ERP_DB_PATH": str(db),
         "ERP_VAULT_PATH": str(vault),
@@ -134,6 +145,33 @@ def test_unwritable_security_log_parent_fails(tmp_path: Path) -> None:
         assert "ERP_SECURITY_LOG_PATH" in "\n".join(report["failures"])
     finally:
         log_dir.chmod(0o755)
+
+
+def test_posix_permission_gate_refuses_peer_readable_key_files(tmp_path, monkeypatch) -> None:
+    """The POSIX mode gate must fail a peer-readable key file, naming the fix.
+
+    The checker module's ``os`` binding is replaced with a posix-declaring shim
+    (everything else delegated to the real module) so the gate - otherwise only
+    a warn on Windows - is pinned cross-platform; on Linux CI the same gate is
+    additionally exercised for real by every test that builds a complete
+    configuration through ``_good_env`` (whose key files are 0600 for exactly
+    this reason).
+    """
+
+    class _PosixOS:
+        name = "posix"
+
+        def __getattr__(self, item: str):
+            return getattr(os, item)
+
+    env = _good_env(tmp_path)
+    audit_key = Path(env["ERP_DB_PATH"]).with_name(Path(env["ERP_DB_PATH"]).name + ".audit.key")
+    monkeypatch.setattr(operational_readiness, "os", _PosixOS())
+    audit_key.chmod(0o664)
+    report = operational_readiness.evaluate(env)
+    check = report["permissions"]["permissions:erp.sqlite3.audit.key"]
+    assert check["status"] == "fail"
+    assert "chmod 600" in check["remediation"]
 
 
 # ----------------------------------------------------------------------

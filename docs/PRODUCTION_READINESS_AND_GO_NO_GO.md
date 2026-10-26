@@ -68,7 +68,7 @@ alerting, scheduling, DR or custody functionality):
 
 | Deliverable | Status | Evidence |
 |---|---|---|
-| Deterministic deployed-configuration checker (config presence ≠ functionality; external evidence never affects its exit code) | `Verified` | `tools/operational_readiness.py`; 19 tests (`tests/test_phase24_operational_readiness.py`); exit codes 0/1/2 |
+| Deterministic deployed-configuration checker (config presence ≠ functionality; external evidence never affects its exit code) | `Verified` | `tools/operational_readiness.py`; 20 tests (`tests/test_phase24_operational_readiness.py`); exit codes 0/1/2 |
 | Fail-closed key-provider selection (`ERP_KEY_PROVIDER=kms\|hsm` refuses start-up; no silent file fallback) + per-provider outage behaviour | `Verified` | `dz_erp/key_provider.py` `configured_provider()` enforced by `dz_erp/serve.build_app()`; 7 new tests (`tests/test_phase17_key_providers.py`); `docs/KEY_PROVIDER_CONTRACT.md` §7.1–7.2 |
 | Wheelhouse verifier hardened: nested directories and non-artifact files flagged; ambiguous digests refused; documented offline install pinned to `--no-index --find-links --require-hashes` | `Verified` | `tools/verify_wheelhouse.py`; 6 new tests (`tests/test_phase19_dependency_integrity.py`) |
 | Authorized real-world OCR dataset interface (manifest = custody statement; refused without authorization/ground truth/contained paths) + two-run clean-dir reproducibility of the synthetic benchmark | `Verified` (interface; no real-world corpus exists yet) | `dz_erp/benchmark.py` `load_external_dataset` / `evaluate_external_dataset`; `docs/OCR_EVALUATION_PROTOCOL.md` §12; tests in `tests/test_phase6_ocr_benchmark_e2e.py` |

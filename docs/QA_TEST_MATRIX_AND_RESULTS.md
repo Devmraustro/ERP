@@ -362,11 +362,11 @@ documentation could previously not be checked by running anything.
 | `tests/test_phase21_arabic_review_routing.py` | 19 | `ARABIC_RECOGNITION_HEAD_AVAILABLE = False`; native Arabic keeps `standard_review`; declared or dominant Arabic scans route to `manual_transcription`; a scan yielding nothing is not reported as a parsing success; route/reason persisted on `source_documents` and in the audit event; API `declared_language` round trip; schema rejects an out-of-vocabulary route; migration is idempotent and leaves old rows `NULL`. |
 | `tests/test_phase22_register_and_docs_consistency.py` | 15 | The risk-register summary equals the derived counts; identifiers unique; every cited file resolves; runbook names existing units and flags; exit-code table matches the CLI; the mechanisms behind the mitigated rows still exist in code; the key-provider contract document describes a surface the code really has (describe() keys, exceptions, env vars, no hardware-custody claim), including the fail-closed `ERP_KEY_PROVIDER` gate and the outage-behaviour section; the release-readiness matrix is machine-checked (unique IDs, required coverage, fixed status vocabulary, blocked rows name their external dependency, cited paths exist) and the readiness checker cites only existing matrix rows. |
 | `tests/test_phase23_staging_acceptance.py` | 1 | Runs `tools/staging_acceptance.py` end to end and requires the full 37-check functional acceptance to pass. |
-| `tests/test_phase24_operational_readiness.py` | 19 | The deployment readiness checker: complete configuration passes; missing/invalid paths, enabled API docs and non-loopback binds fail with named remediations; exactly-one key source per key; checkpoint existence/shape/freshness; verification commands listed but executed only on request, with exit codes folded into the result; exit codes 0/1/2; external-evidence items reported as required, never as satisfied; Windows custody honestly warns about ACLs. |
+| `tests/test_phase24_operational_readiness.py` | 20 | The deployment readiness checker: complete configuration passes; missing/invalid paths, enabled API docs and non-loopback binds fail with named remediations; exactly-one key source per key; checkpoint existence/shape/freshness; verification commands listed but executed only on request, with exit codes folded into the result; exit codes 0/1/2; external-evidence items reported as required, never as satisfied; the POSIX permission gate refuses peer-readable key files (fixture key files are `0600`; the gate's fail direction is pinned cross-platform); Windows custody honestly warns about ACLs. |
 
-### 2B.1 Two defects these tests caught in their own implementation
+### 2B.1 Defects these tests caught in their own implementation
 
-Both are worth recording because in each case the code *looked* right:
+Each is worth recording because in each case the code *looked* right:
 
 1. **The hash lockfile enforced one digest per package.** `pip` treats a `--hash` line without a
    trailing backslash as the end of the requirement, so ~1250 lines were discarded as "has
@@ -394,6 +394,20 @@ joins continuations the way systemd does, and a test asserts that behaviour dire
    lesson recorded here: a read-only command must be proved read-only by *asserting the absence of
    side effects*, not by reading its own docstring - which is what
    `test_monitor_does_not_initialise_a_missing_deployment` does.
+
+4. **The CI failure that proved the fixture, not the checker, was wrong.** CI run #103
+   (`40370500808`, on `ccc874b`) failed both Linux jobs at the test-suite step: every
+   "complete configuration is ready" test failed because the checker refused the key files.
+   Cause: `_good_env` wrote the key files with `write_bytes` and no `chmod`, so under the
+   runners' umask they landed `0644` — and the checker's POSIX permission gate, doing exactly
+   its job, refused them (`mode & 0o077`). On Windows that gate only warns, which is why every
+   local run had passed: the checker was right and the fixture was incomplete on POSIX. Fixed
+   by writing key files `0600` (vault directory `0700` on POSIX) and adding
+   `test_posix_permission_gate_refuses_peer_readable_key_files`, which pins the gate's fail
+   direction cross-platform (a posix-declaring shim of the checker module's `os` binding —
+   patching `os.name` globally breaks `pathlib` on Windows). The lesson: a fixture must be
+   held to the same discipline the assertions enforce, and "passes locally" is not "passes on
+   POSIX" while a check is platform-conditional.
 
 ### 2B.2 Mutation check (each protection removed, the matching test expected to fail)
 

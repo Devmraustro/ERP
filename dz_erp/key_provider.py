@@ -48,7 +48,7 @@ import binascii
 import os
 import stat
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, Mapping, Optional, Protocol, runtime_checkable
 
 from .key_rotation import (
     KeyConfigurationError,
@@ -58,6 +58,46 @@ from .key_rotation import (
 
 KEY_DIR_MODE = 0o700
 _KEY_FILE_MODE = 0o600
+
+# Environment variable that declares which key-provider custody a deployment
+# claims.  Declaring is not cosmetic: a deployment that *says* it runs on a
+# KMS/HSM must not be served by file-backed material under that label.
+PROVIDER_ENV = "ERP_KEY_PROVIDER"
+
+# Provider names this build can actually honour end to end.  "kms" and "hsm"
+# are deliberately *not* in this set: they are recognised words with no
+# implementation behind them, so a deployment that names them must fail
+# closed - loudly, at start-up - rather than silently fall back to files.
+_RECOGNISED_PROVIDERS = {"file", "environment"}
+
+
+def configured_provider(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """Resolve ``ERP_KEY_PROVIDER`` fail-closed.
+
+    Returns the declared provider name (lowercased), or ``None`` when the
+    variable is unset - the honest default, since this build's custody is
+    file-based and pretending otherwise is what this resolver exists to
+    prevent.  A declared name this build cannot honour (``kms``, ``hsm`` or
+    anything unrecognised) raises :class:`KeyConfigurationError`: the
+    deployment must not start with file-backed material answering to a
+    hardware-custody configuration it does not have.
+
+    The ``environ`` parameter is injectable so tests never touch the real
+    process environment.
+    """
+    source = os.environ if environ is None else environ
+    declared = (source.get(PROVIDER_ENV) or "").strip().lower()
+    if not declared:
+        return None
+    if declared in _RECOGNISED_PROVIDERS:
+        return declared
+    raise KeyConfigurationError(
+        f"{PROVIDER_ENV}={declared!r} cannot be honoured by this build: no KMS/HSM "
+        "client is bundled (docs/KEY_PROVIDER_CONTRACT.md §4). Refusing to start "
+        f"with file-based material answering to a {declared!r} configuration; "
+        f"remove {PROVIDER_ENV}, or set it to one of "
+        f"{sorted(_RECOGNISED_PROVIDERS)}, or integrate a real provider first."
+    )
 
 
 class KeyMaterialUnavailable(KeyConfigurationError):

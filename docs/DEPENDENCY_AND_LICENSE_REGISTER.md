@@ -268,8 +268,10 @@ install time.
 **Verified behaviour** (smoke test on the real tool): a wheelhouse containing
 the authentic `six-1.17.0` wheel against a matching mini-lockfile verifies OK;
 the same wheel with one bit flipped is rejected as an unknown artifact, exit 1.
-The parser, verifier decision logic and build command are covered by four tests
-in `tests/test_phase19_dependency_integrity.py` (no network required).
+The parser, verifier decision logic, build command and every refusal category
+(unparseable/empty lockfiles, unknown artifacts, nested directories, ambiguous
+digests, tampered bytes, missing pins) are covered by ten tests in
+`tests/test_phase19_dependency_integrity.py` (no network required).
 
 **Still not covered:** publisher provenance (§4.2) — a wheelhouse proves the
 *bytes* are the pinned ones, not who published them. PEP 740/sigstore

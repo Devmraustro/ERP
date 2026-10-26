@@ -156,6 +156,23 @@ The report embeds the result:
 }
 ```
 
+### 4.1 Readiness gating for this control
+
+`python tools/operational_readiness.py --checkpoint <file> --max-checkpoint-age-days <n>`
+checks, deterministically and with exit code 1 on any failure: the checkpoint
+file exists, parses as JSON, carries a `head_hash`, and is fresher than the
+age limit — plus the full deployment-configuration set (keys, log, docs,
+bind posture). The deep verification (the checkpoint actually matching the
+live ledger) remains this section's `monitor --checkpoint-verify` command
+above; the checker lists it as a verification command and only executes it
+with `--run-checks`.
+
+The measurable acceptance line for the whole control is
+`docs/RELEASE_READINESS_MATRIX.md` R-OFFHOST: a scheduler *installed and
+firing* and an off-host copy *retrievable with independent credentials*. Those
+are deployment acts this runbook describes but cannot demonstrate from the
+repository; they stay blocked until the operations owner supplies the evidence.
+
 ---
 
 ## 5. Responding to an alarm

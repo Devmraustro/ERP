@@ -165,9 +165,48 @@ R8 in `docs/KEY_CUSTODY_THREAT_MODEL.md`.
 |---|---|---|
 | `ERP_VAULT_KEY` | `dz_erp/intake_ocr.py` (`VAULT_KEY_ENV`) | explicit argument, then `ERP_VAULT_KEY`, then a key file beside the vault |
 | `ERP_AUDIT_HMAC_SECRET` | `dz_erp/database.py` (`AUDIT_KEY_ENV`) | key ring's active version first; the environment value must *agree* with it or startup refuses (`docs/` phase-8 evidence) |
+| `ERP_KEY_PROVIDER` | `dz_erp/key_provider.py` (`PROVIDER_ENV`), enforced at start-up by `dz_erp/serve.build_app()` | declares the custody the deployment claims; unset means the file-based default, *declared nowhere* |
 
-`tools/staging_acceptance.py` unsets both variables at startup so acceptance
+`tools/staging_acceptance.py` unsets all three variables at startup so acceptance
 always exercises the file-based path, never an inherited shell environment.
+
+### 7.1 Fail-closed provider selection
+
+`ERP_KEY_PROVIDER` is a *claim*, and a claim this build cannot honour must stop
+start-up rather than be silently downgraded. `dz_erp.key_provider.
+configured_provider()` resolves it as follows:
+
+| declared value | behaviour |
+|---|---|
+| unset / empty | `None` — the honest default: file-based custody, declared nowhere |
+| `file` | accepted: file-backed custody, exactly what the build provides |
+| `environment` | accepted: orchestrator-injected material (§3.2 caveats still apply) |
+| `kms`, `hsm`, or anything else | **`KeyConfigurationError` at start-up.** No KMS/HSM client is bundled (§4), so honouring the declaration is impossible and *silently serving file-backed material under a hardware-custody label* is the failure this gate exists to prevent. |
+
+This is the fail-closed rule in one sentence: **a deployment either runs with
+custody it actually has, or it does not run.** Removing the variable restores
+the (honest) file-based default; integrating a real provider per §4 is the only
+way to make a `kms`/`hsm` declaration startable.
+
+### 7.2 Provider outage behaviour
+
+What each provider's failure looks like, and what the operator must do. The
+invariant across all of them: **the service refuses to proceed rather than
+falling back** — a fallback would either forge audit chains (audit key) or
+silently re-key documents (vault key).
+
+| provider | outage | observable behaviour | operator action |
+|---|---|---|---|
+| `file` (vault or audit key) | file missing, empty, unreadable, or a symlink/reparse point | `KeyMaterialUnavailable` or `KeyConfigurationError` on the next `read()`; start-up or the affected operation fails with the path named | restore the exact key material from the offline custody backup (`docs/KEY_MIGRATION_AND_RECOVERY_GUIDE.md`); **do not generate a replacement** — existing ciphertext/audit chains would become unreadable or read as tampered |
+| `file` (POSIX mode too open) | mode grants access beyond owner | `KeyCustodyError` naming the path and the `chmod 600` fix | restrict the mode, re-verify with the readiness checker |
+| `environment` | variable unset/empty, or malformed base64/hex | `KeyMaterialUnavailable` / `KeyConfigurationError` naming the variable | restore the secret in the orchestrator's store and restart; no local fallback exists by design |
+| `ERP_KEY_PROVIDER` misdeclaration | `kms`/`hsm`/unknown while no such provider exists | start-up refuses (`KeyConfigurationError`) before any database or vault is opened | remove the declaration or complete the §4 integration; this is a configuration error, not a runtime outage |
+| KMS/HSM (future, §4) | provider unreachable, throttled, or the key is disabled | *not defined by this build* — a real integration must define them and add them to the recovery runbook (§4 item 5) before claiming production readiness | undefined here by construction; no outage behaviour is claimed for a provider that does not exist |
+
+Monitoring hooks for the file/environment outages above are already wired:
+`python -m dz_erp.rotate_keys status` reports key availability, and the
+checkpoint monitor (exit code 3) reports ledger health
+(`docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md`).
 
 ## 8. What is explicitly *not* claimed
 

@@ -7,7 +7,10 @@ from typing import Any, Dict
 import pytest
 
 from dz_erp.benchmark import (
+    ExternalDatasetError,
     build_synthetic_algerian_benchmark_specs,
+    evaluate_external_dataset,
+    load_external_dataset,
     render_synthetic_invoice_pdf,
     run_empirical_ocr_benchmark,
 )
@@ -365,3 +368,243 @@ def test_ocr_engine_actually_loads_and_recognises_text() -> None:
     result = extract_document_ocr(png_bytes, "image/png")
     assert result["engine_name"] == "rapidocr-onnxruntime"
     assert result["raw_lines"], "the OCR engine produced no recognised lines"
+
+
+# ----------------------------------------------------------------------
+# Externally authorized (real-world) dataset interface (protocol §12)
+# ----------------------------------------------------------------------
+
+_EXTERNAL_AUTH = {
+    "authorized_by": "DPO (test fixture)",
+    "authorization_date": "2026-01-31",
+    "source_description": "fixture corpus standing in for an authorized supplier set",
+    "redaction_status": "supplier names redacted before assembly",
+    "access_control": "read restricted to the evaluation service account",
+}
+
+
+def _write_external_manifest(
+    tmp_path: Path, documents: list, authorization: dict | None = None
+) -> Path:
+    manifest = {
+        "authorization": dict(authorization if authorization is not None else _EXTERNAL_AUTH),
+        "documents": documents,
+    }
+    manifest_path = tmp_path / "manifest.json"
+    import json
+
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest_path
+
+
+def _external_entry(doc_id: str = "INV-1", path: str = "corpus/INV-1.png") -> dict:
+    return {
+        "doc_id": doc_id,
+        "path": path,
+        "mime_type": "image/png",
+        "stratum": "supplier_group_a",
+        "invoice_number": "FAC-2026-0001",
+        "supplier_nif": "001216099123456",
+        "supplier_rc": "16/00-0991234B12",
+        "supplier_ai": "16019912345",
+        "invoice_date": "2026-01-15",
+        "amount_ht_dzd": "10000.00",
+        "amount_tva_dzd": "1900.00",
+        "amount_ttc_dzd": "11900.00",
+    }
+
+
+def test_external_dataset_loader_accepts_a_complete_authorized_manifest(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "INV-1.png").write_bytes(b"fake-png")
+    manifest = _write_external_manifest(tmp_path, [_external_entry()])
+
+    dataset = load_external_dataset(manifest)
+    assert dataset["authorization"]["authorized_by"] == _EXTERNAL_AUTH["authorized_by"]
+    assert len(dataset["documents"]) == 1
+    resolved = dataset["documents"][0]
+    assert resolved["doc_id"] == "INV-1"
+    assert resolved["path"] == str((corpus / "INV-1.png").resolve())
+    assert resolved["invoice_number"] == "FAC-2026-0001"
+
+
+def test_external_dataset_loader_refuses_missing_or_invalid_manifests(tmp_path: Path) -> None:
+    with pytest.raises(ExternalDatasetError, match="manifest not found"):
+        load_external_dataset(tmp_path / "absent.json")
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ExternalDatasetError, match="not valid JSON"):
+        load_external_dataset(broken)
+
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+    with pytest.raises(ExternalDatasetError, match="JSON object"):
+        load_external_dataset(empty)
+
+    bad_date = _write_external_manifest(
+        tmp_path, [_external_entry()],
+        {**_EXTERNAL_AUTH, "authorization_date": "31/01/2026"},
+    )
+    with pytest.raises(ExternalDatasetError, match="ISO date"):
+        load_external_dataset(bad_date)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["authorized_by", "authorization_date", "source_description", "redaction_status", "access_control"],
+)
+def test_external_dataset_requires_every_authorization_field(tmp_path: Path, field_name: str) -> None:
+    """A corpus that cannot state its custody must not be evaluated."""
+    authorization = dict(_EXTERNAL_AUTH)
+    del authorization[field_name]
+    manifest = _write_external_manifest(tmp_path, [_external_entry()], authorization)
+    with pytest.raises(ExternalDatasetError, match=field_name):
+        load_external_dataset(manifest)
+
+
+@pytest.mark.parametrize(
+    "field_name", ["invoice_number", "supplier_nif", "amount_ttc_dzd", "invoice_date"]
+)
+def test_external_dataset_requires_ground_truth_for_every_document(tmp_path: Path, field_name: str) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "INV-1.png").write_bytes(b"fake-png")
+    entry = _external_entry()
+    del entry[field_name]
+    manifest = _write_external_manifest(tmp_path, [entry])
+    with pytest.raises(ExternalDatasetError, match=field_name):
+        load_external_dataset(manifest)
+
+
+def test_external_dataset_refuses_paths_that_escape_the_manifest_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"fake")
+    secret_dir = tmp_path / "secret"
+    secret_dir.mkdir()
+    (secret_dir / "INV-1.png").write_bytes(b"fake")
+
+    for bad_path in ("../outside.png", "secret/../../outside.png", "corpus/missing.png", str(outside)):
+        manifest = _write_external_manifest(tmp_path, [_external_entry(path=bad_path)])
+        with pytest.raises(ExternalDatasetError, match="manifest directory"):
+            load_external_dataset(manifest)
+
+
+def test_external_dataset_refuses_duplicate_ids_unsupported_types_and_empty_lists(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "INV-1.png").write_bytes(b"fake")
+
+    duplicate = _write_external_manifest(tmp_path, [_external_entry(), _external_entry("INV-1")])
+    with pytest.raises(ExternalDatasetError, match="duplicate doc_id"):
+        load_external_dataset(duplicate)
+
+    bad_mime = _write_external_manifest(
+        tmp_path, [_external_entry(path="corpus/INV-1.png", doc_id="A")]
+    )
+    import json as _json
+
+    payload = _json.loads(bad_mime.read_text(encoding="utf-8"))
+    payload["documents"][0]["mime_type"] = "image/tiff"
+    bad_mime.write_text(_json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ExternalDatasetError, match="mime_type"):
+        load_external_dataset(bad_mime)
+
+    empty_docs = tmp_path / "empty_docs.json"
+    empty_docs.write_text(_json.dumps({"authorization": _EXTERNAL_AUTH, "documents": []}), encoding="utf-8")
+    with pytest.raises(ExternalDatasetError, match="non-empty 'documents'"):
+        load_external_dataset(empty_docs)
+
+
+def test_external_dataset_evaluation_runs_the_real_engine_and_carries_the_authorization(
+    tmp_path: Path,
+) -> None:
+    """The loader is not decoration: an authorized corpus scores end-to-end.
+
+    The documents here are synthetic stand-ins; what is under test is the
+    *pipeline* - manifest custody statement in, per-field scores out, engine
+    identical to the synthetic benchmark's.
+    """
+    import json
+
+    from dz_erp.benchmark import render_synthetic_invoice_image
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    spec = {
+        "supplier_name": "Supplier Alpha",
+        "invoice_number": "FAC-2026-0001",
+        "invoice_date": "2026-01-15",
+        "supplier_nif": "001216099123456",
+        "supplier_rc": "16/00-0991234B12",
+        "supplier_ai": "16019912345",
+        "payment_method": "BANK_TRANSFER",
+        "amount_ht_dzd": "10000.00",
+        "amount_tva_dzd": "1900.00",
+        "amount_timbre_dzd": "0.00",
+        "amount_ttc_dzd": "11900.00",
+        "lines": [
+            {"sku": "S1", "description": "Service", "qty": "1.00",
+             "unit_price_dzd": "10000.00", "tax_rate": "19.0", "line_ht_dzd": "10000.00"}
+        ],
+    }
+    (corpus / "INV-1.png").write_bytes(render_synthetic_invoice_image(spec))
+    spec2 = dict(spec, invoice_number="FAC-2026-0002")
+    (corpus / "INV-2.png").write_bytes(render_synthetic_invoice_image(spec2))
+
+    entry = _external_entry()
+    entry2 = _external_entry("INV-2", "corpus/INV-2.png")
+    entry2["invoice_number"] = "FAC-2026-0002"
+    manifest = _write_external_manifest(tmp_path, [entry, entry2])
+
+    report = evaluate_external_dataset(manifest, tmp_path / "results")
+    assert report["dataset_size_documents"] == 2
+    assert report["authorization"] == _EXTERNAL_AUTH
+    total = sum(f["total"] for f in report["by_field"].values())
+    assert total == 16  # 2 documents x 8 tracked fields
+    accounted = total - sum(
+        f["exact_match"] for f in report["by_field"].values()
+    )
+    failures = report["failure_categories"]
+    assert failures["missing"] + failures["mismatch"] == accounted
+    assert 0.0 <= report["overall_field_exact_match_rate"] <= 1.0
+    assert "human review" in report["human_approval_note"].lower()
+    assert (tmp_path / "results" / "external_dataset_results.json").exists()
+    on_disk = json.loads(
+        (tmp_path / "results" / "external_dataset_results.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["authorization"] == _EXTERNAL_AUTH
+
+
+# ----------------------------------------------------------------------
+# Reproducibility: the benchmark is a measurement instrument
+# ----------------------------------------------------------------------
+def test_benchmark_report_is_reproducible_from_a_clean_output_directory(tmp_path: Path) -> None:
+    """Two clean-directory runs must agree on every non-latency report key.
+
+    The harness is deterministic by construction (pinned threads, vendored
+    font, fixed seeds nowhere relied upon); this test *observes* it. Latency
+    keys are excluded because wall-clock time is a property of the host, not
+    of the pipeline - exactly which keys may vary is itself pinned here, so a
+    future code change cannot quietly make accuracy host-dependent.
+    """
+    run_a = run_empirical_ocr_benchmark(tmp_path / "run_a")
+    run_b = run_empirical_ocr_benchmark(tmp_path / "run_b")
+
+    def strip_latency(report: Dict[str, Any]) -> Dict[str, Any]:
+        trimmed = {k: v for k, v in report.items() if not k.startswith("latency_")}
+        trimmed["by_stratum"] = {
+            name: {k: v for k, v in stats.items() if k != "mean_latency_ms"}
+            for name, stats in report["by_stratum"].items()
+        }
+        trimmed["by_language"] = {
+            name: {k: v for k, v in stats.items() if k != "mean_latency_ms"}
+            for name, stats in report["by_language"].items()
+        }
+        return trimmed
+
+    assert strip_latency(run_a) == strip_latency(run_b)
+    # The stripped keys are exactly the timing set: nothing else may drift.
+    assert {"latency_mean_ms", "latency_p50_ms", "latency_max_ms"} <= set(run_a)
+    assert all("mean_latency_ms" in stats for stats in run_a["by_stratum"].values())

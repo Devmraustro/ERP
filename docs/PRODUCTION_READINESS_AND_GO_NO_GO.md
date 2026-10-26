@@ -61,6 +61,19 @@ The architecture preserves complete deployment flexibility:
 | OCR evaluation protocol | `Verified` (protocol only; no engine change) | `docs/OCR_EVALUATION_PROTOCOL.md` |
 | Production-scale drill, HSM/KMS, scheduler | **`Open`** | `docs/RISK_REGISTER.md` S1, S3, D4, D6 |
 
+### 3.2 Production Readiness Phase 1 — operational controls and release gates
+
+Delivered at this commit (all locally verified; nothing below claims off-host,
+alerting, scheduling, DR or custody functionality):
+
+| Deliverable | Status | Evidence |
+|---|---|---|
+| Deterministic deployed-configuration checker (config presence ≠ functionality; external evidence never affects its exit code) | `Verified` | `tools/operational_readiness.py`; 19 tests (`tests/test_phase24_operational_readiness.py`); exit codes 0/1/2 |
+| Fail-closed key-provider selection (`ERP_KEY_PROVIDER=kms\|hsm` refuses start-up; no silent file fallback) + per-provider outage behaviour | `Verified` | `dz_erp/key_provider.py` `configured_provider()` enforced by `dz_erp/serve.build_app()`; 7 new tests (`tests/test_phase17_key_providers.py`); `docs/KEY_PROVIDER_CONTRACT.md` §7.1–7.2 |
+| Wheelhouse verifier hardened: nested directories and non-artifact files flagged; ambiguous digests refused; documented offline install pinned to `--no-index --find-links --require-hashes` | `Verified` | `tools/verify_wheelhouse.py`; 6 new tests (`tests/test_phase19_dependency_integrity.py`) |
+| Authorized real-world OCR dataset interface (manifest = custody statement; refused without authorization/ground truth/contained paths) + two-run clean-dir reproducibility of the synthetic benchmark | `Verified` (interface; no real-world corpus exists yet) | `dz_erp/benchmark.py` `load_external_dataset` / `evaluate_external_dataset`; `docs/OCR_EVALUATION_PROTOCOL.md` §12; tests in `tests/test_phase6_ocr_benchmark_e2e.py` |
+| Single release-readiness matrix: 10 rows (KMS/HSM, provenance, off-host checkpoints, alerting, DR, production concurrency, OCR corpus, SCF/tax review, Law 18-07/ANPDP, operational gate), statuses machine-checked, 9 of 10 blocked-external | `Verified` (as a gate table) | `docs/RELEASE_READINESS_MATRIX.md`; consistency tests in `tests/test_phase22_register_and_docs_consistency.py` |
+
 ---
 
 ## 4. Residual Risks & Pre-Production Sign-Off Checklist

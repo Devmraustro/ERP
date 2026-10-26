@@ -92,6 +92,12 @@ def build_app(
 ):
     """Construct the ASGI application from environment-configured paths."""
     from .database import ERPDatabase
+    from .key_provider import configured_provider
+
+    # Fail closed on a key-provider declaration this build cannot honour
+    # (docs/KEY_PROVIDER_CONTRACT.md §7): ERP_KEY_PROVIDER=kms|hsm must stop
+    # start-up here, never serve file-backed material under that label.
+    configured_provider()
 
     db_path = db_path or _required_path("ERP_DB_PATH")
     vault_path = vault_path or _required_path("ERP_VAULT_PATH")

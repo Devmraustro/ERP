@@ -190,6 +190,15 @@ def test_key_provider_contract_documentation_matches_the_code() -> None:
     assert 'AUDIT_KEY_ENV = "ERP_AUDIT_HMAC_SECRET"' in database
     assert "ERP_VAULT_KEY" in text and "ERP_AUDIT_HMAC_SECRET" in text
 
+    # The fail-closed provider selection must be real code and documented as such.
+    serve = (REPO / "dz_erp" / "serve.py").read_text(encoding="utf-8")
+    assert 'PROVIDER_ENV = "ERP_KEY_PROVIDER"' in provider
+    assert "def configured_provider" in provider
+    assert "configured_provider()" in serve, "start-up must enforce the provider gate"
+    assert "ERP_KEY_PROVIDER" in text
+    assert "Fail-closed provider selection" in text
+    assert "Provider outage behaviour" in text
+
     # The Windows ACL limitation must be stated, pointing at the real records.
     assert "mode bits are not access control" in text
     assert "STAGING_SECURITY_CONFIGURATION.md" in text
@@ -197,6 +206,10 @@ def test_key_provider_contract_documentation_matches_the_code() -> None:
 
     # A correct KMS integration must keep every object decryptable after rotation.
     assert "remains decryptable after rotation" in text
+
+    # Outage documentation must not describe a KMS/HSM failure mode as if it
+    # were implemented: the absence must stay explicit.
+    assert "not defined by this build" in text
 
 
 def test_counts_tool_runs_as_a_command() -> None:
@@ -206,3 +219,70 @@ def test_counts_tool_runs_as_a_command() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "consistent" in result.stdout
+
+
+def test_release_readiness_matrix_rows_are_complete_and_cite_real_paths() -> None:
+    """docs/RELEASE_READINESS_MATRIX.md is the single release gate table.
+
+    Machine-checked here so the matrix cannot rot: IDs unique, required
+    coverage present, statuses from the fixed vocabulary, every blocked row
+    names its external dependency, and every repository path it cites exists.
+    """
+    matrix = REPO / "docs" / "RELEASE_READINESS_MATRIX.md"
+    assert matrix.is_file(), "the release readiness matrix must exist"
+    text = matrix.read_text(encoding="utf-8")
+
+    rows = []
+    for line in text.splitlines():
+        if line.startswith("| R-"):
+            cells = [c.strip() for c in line.split("|")[1:-1]]
+            assert len(cells) == 8, f"matrix row must have 8 columns: {line[:80]}"
+            rows.append(cells)
+    assert rows, "the matrix table has no rows"
+
+    ids = [cells[0] for cells in rows]
+    assert len(ids) == len(set(ids)), "matrix IDs must be unique"
+    required = {"R-KMS", "R-PROV", "R-OFFHOST", "R-ALERT", "R-DR", "R-CONC", "R-OCR", "R-SCF", "R-LAW", "R-OPS"}
+    assert required <= set(ids), f"matrix is missing coverage: {sorted(required - set(ids))}"
+
+    verified, blocked = "Verified", "Blocked (external evidence required)"
+    for cells in rows:
+        row_id, status_cell, external_cell = cells[0], cells[5], cells[6]
+        status = status_cell.strip("*")
+        assert status in (verified, blocked), (
+            f"{row_id}: status {status_cell!r} is outside the fixed vocabulary"
+        )
+        if status == blocked:
+            assert external_cell.strip("* "), (
+                f"{row_id} is blocked but names no external dependency"
+            )
+
+    # Every repository path the matrix cites must exist - a verification
+    # command pointing at an absent file is not a gate. Paths are matched
+    # inside backticked spans too, so a command like
+    # `python -m pytest tests/test_x.py -q` is checked as well.
+    cited = set()
+    for span in re.findall(r"`([^`]+)`", text):
+        cited.update(re.findall(r"(?:docs|tests|tools)/[A-Za-z0-9_./-]+", span))
+    cited.update(re.findall(r"`((?:docs|tests|tools)/[A-Za-z0-9_./-]+)`", text))
+    assert cited, "the matrix must cite repository paths"
+    for path in sorted(cited):
+        assert (REPO / path).exists(), f"matrix cites a path that does not exist: {path}"
+
+    # The vocabulary section must keep documenting exactly these two statuses.
+    assert verified in text and blocked in text
+
+
+def test_operational_readiness_cites_only_existing_matrix_rows() -> None:
+    """The checker's external-evidence section and the matrix must agree.
+
+    Every R-* identifier the readiness checker cites must resolve to a row of
+    the release matrix, so the tool's "what this cannot verify" list and the
+    release gate table cannot drift apart.
+    """
+    matrix_text = (REPO / "docs" / "RELEASE_READINESS_MATRIX.md").read_text(encoding="utf-8")
+    matrix_ids = set(re.findall(r"\bR-[A-Z]+\b", matrix_text))
+    checker_text = (REPO / "tools" / "operational_readiness.py").read_text(encoding="utf-8")
+    cited = set(re.findall(r"RELEASE_READINESS_MATRIX\.md (R-[A-Z]+)", checker_text))
+    assert cited, "the readiness checker must cite the release matrix"
+    assert cited <= matrix_ids, f"checker cites unknown matrix rows: {sorted(cited - matrix_ids)}"

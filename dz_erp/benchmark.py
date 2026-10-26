@@ -4,6 +4,7 @@
 import io
 import json
 import statistics
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -516,6 +517,312 @@ def run_empirical_ocr_benchmark(output_dir: Path) -> Dict[str, Any]:
     (output_dir / "ground_truth_and_results.json").write_text(
         json.dumps({"specs": specs, "report": report}, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    return report
+
+
+# ----------------------------------------------------------------------------
+# Externally authorized (real-world) evaluation datasets
+#
+# The synthetic benchmark above is repeatable but says nothing about production
+# accuracy on real invoices. Real corpora are a custody question as much as an
+# evaluation question - the documents contain supplier identifiers, amounts and
+# personal data - so a dataset may only enter this harness through a manifest
+# that *states who authorized it, what was redacted, and where access control
+# lives*. The loader below refuses anything that does not carry that statement,
+# so "we ran the benchmark on some real invoices" cannot happen silently and
+# without an owner. See docs/OCR_EVALUATION_PROTOCOL.md §12.
+# ----------------------------------------------------------------------------
+
+EXTERNAL_AUTHORIZATION_FIELDS = (
+    "authorized_by",
+    "authorization_date",
+    "source_description",
+    "redaction_status",
+    "access_control",
+)
+
+EXTERNAL_GROUND_TRUTH_FIELDS = (
+    "invoice_number",
+    "supplier_nif",
+    "supplier_rc",
+    "supplier_ai",
+    "invoice_date",
+    "amount_ht_dzd",
+    "amount_tva_dzd",
+    "amount_ttc_dzd",
+)
+
+EXTERNAL_SUPPORTED_MIME_TYPES = ("application/pdf", "image/png")
+
+
+class ExternalDatasetError(ValueError):
+    """A manifest for a real-world evaluation dataset is absent or invalid."""
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ExternalDatasetError(message)
+
+
+def load_external_dataset(manifest_path: Path) -> Dict[str, Any]:
+    """Load and validate a manifest for an authorized real-world OCR dataset.
+
+    The manifest is JSON of the shape::
+
+        {
+          "authorization": {
+            "authorized_by": "role or person that approved this corpus",
+            "authorization_date": "2026-01-31",
+            "source_description": "where the documents came from",
+            "redaction_status": "what was redacted before assembly",
+            "access_control": "where the corpus lives and who can read it"
+          },
+          "documents": [
+            {
+              "doc_id": "INV-2026-0001",
+              "path": "documents/INV-2026-0001.pdf",   # relative to the manifest
+              "mime_type": "application/pdf",
+              "stratum": "supplier_group_a",
+              "invoice_number": "...", "supplier_nif": "...", "supplier_rc": "...",
+              "supplier_ai": "...", "invoice_date": "...",
+              "amount_ht_dzd": "...", "amount_tva_dzd": "...", "amount_ttc_dzd": "...",
+              "lines": [{"sku": "...", "line_ht_dzd": "..."}]   # optional
+            }
+          ]
+        }
+
+    Returns ``{"manifest_dir", "authorization", "documents"}`` with each
+    document's ``path`` resolved. Raises :class:`ExternalDatasetError` on any
+    missing authorization field, unsupported type, escaping path, duplicate id,
+    or absent ground truth - a corpus that cannot state its custody does not
+    get evaluated.
+    """
+    manifest_path = Path(manifest_path)
+    if not manifest_path.is_file():
+        raise ExternalDatasetError(f"dataset manifest not found: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ExternalDatasetError(f"dataset manifest is not valid JSON: {exc}") from exc
+    _require(isinstance(manifest, dict), "dataset manifest must be a JSON object")
+
+    authorization = manifest.get("authorization")
+    _require(
+        isinstance(authorization, dict), "manifest must carry an 'authorization' object"
+    )
+    for field_name in EXTERNAL_AUTHORIZATION_FIELDS:
+        value = authorization.get(field_name)
+        _require(
+            isinstance(value, str) and value.strip(),
+            f"authorization.{field_name} must be a non-empty string; a corpus "
+            "without a stated owner, date, source, redaction status and access "
+            "control must not be evaluated",
+        )
+    try:
+        date.fromisoformat(str(authorization["authorization_date"]).strip())
+    except ValueError as exc:
+        raise ExternalDatasetError(
+            f"authorization.authorization_date must be an ISO date "
+            f"(YYYY-MM-DD), got {authorization['authorization_date']!r}"
+        ) from exc
+
+    documents_raw = manifest.get("documents")
+    _require(
+        isinstance(documents_raw, list) and documents_raw,
+        "manifest must contain a non-empty 'documents' list",
+    )
+
+    manifest_dir = manifest_path.resolve().parent
+    documents: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    for index, entry in enumerate(documents_raw):
+        where = f"documents[{index}]"
+        _require(isinstance(entry, dict), f"{where} must be a JSON object")
+        doc_id = str(entry.get("doc_id", "")).strip()
+        _require(doc_id, f"{where} is missing 'doc_id'")
+        _require(
+            all(ch.isalnum() or ch in "-_." for ch in doc_id),
+            f"{where}: doc_id {doc_id!r} must be a safe path component",
+        )
+        _require(doc_id not in seen_ids, f"{where}: duplicate doc_id {doc_id!r}")
+        seen_ids.add(doc_id)
+
+        relative = str(entry.get("path", "")).strip()
+        _require(relative, f"{where} ({doc_id}) is missing 'path'")
+        candidate = (manifest_dir / relative).resolve()
+        _require(
+            not Path(relative).is_absolute() and ".." not in Path(relative).parts,
+            f"{where} ({doc_id}): 'path' must be relative to the manifest directory",
+        )
+        _require(
+            candidate.is_file()
+            and (candidate.parent == manifest_dir or manifest_dir in candidate.parents),
+            f"{where} ({doc_id}): document {relative!r} not found inside the "
+            "manifest directory (or its path escapes it)",
+        )
+        mime_type = str(entry.get("mime_type", "")).strip()
+        _require(
+            mime_type in EXTERNAL_SUPPORTED_MIME_TYPES,
+            f"{where} ({doc_id}): mime_type {mime_type!r} is not supported; use one "
+            f"of {list(EXTERNAL_SUPPORTED_MIME_TYPES)}",
+        )
+        stratum = str(entry.get("stratum", "")).strip()
+        _require(stratum, f"{where} ({doc_id}) is missing 'stratum'")
+        for field_name in EXTERNAL_GROUND_TRUTH_FIELDS:
+            value = entry.get(field_name)
+            _require(
+                value is not None and str(value).strip() != "",
+                f"{where} ({doc_id}): ground-truth field {field_name!r} is missing "
+                "or empty; without it the document cannot be scored",
+            )
+        lines = entry.get("lines", [])
+        _require(isinstance(lines, list), f"{where} ({doc_id}): 'lines' must be a list")
+        for line_index, line in enumerate(lines):
+            _require(
+                isinstance(line, dict) and str(line.get("sku", "")).strip()
+                and str(line.get("line_ht_dzd", "")).strip(),
+                f"{where} ({doc_id}) lines[{line_index}] needs non-empty 'sku' and 'line_ht_dzd'",
+            )
+
+        documents.append(
+            {
+                "doc_id": doc_id,
+                "path": str(candidate),
+                "mime_type": mime_type,
+                "stratum": stratum,
+                **{name: str(entry[name]).strip() for name in EXTERNAL_GROUND_TRUTH_FIELDS},
+                "lines": [
+                    {"sku": str(line["sku"]).strip(), "line_ht_dzd": str(line["line_ht_dzd"]).strip()}
+                    for line in lines
+                ],
+            }
+        )
+
+    return {
+        "manifest_dir": str(manifest_dir),
+        "authorization": {name: authorization[name].strip() for name in EXTERNAL_AUTHORIZATION_FIELDS},
+        "documents": documents,
+    }
+
+
+def evaluate_external_dataset(manifest_path: Path, output_dir: Path) -> Dict[str, Any]:
+    """Score an authorized real-world dataset with the same engine and metrics.
+
+    Documents are read from the manifest's own directory (never re-rendered),
+    run through :func:`extract_document_ocr`, and scored on exactly the same
+    axes as the synthetic benchmark: per-field exact match and character error
+    rate, missing/mismatch failure categories, stratum roll-up, and arithmetic
+    consistency of the extracted totals. The authorization statement is carried
+    into the report so the numbers cannot circulate without their owner.
+
+    This is an *interface*, not a claim: until a real authorized corpus is
+    loaded through it and a report is produced under that corpus's own
+    authorization, no real-world accuracy figure exists (protocol §12).
+    """
+    dataset = load_external_dataset(manifest_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    field_stats: Dict[str, Dict[str, int]] = {
+        name: {"total": 0, "extracted": 0, "exact_match": 0, "char_edits": 0, "char_total": 0}
+        for name in EXTERNAL_GROUND_TRUTH_FIELDS
+    }
+    stratum_stats: Dict[str, Dict[str, Any]] = {}
+    headers_evaluated = headers_consistent = 0
+    failures_missing = failures_mismatch = 0
+
+    for entry in dataset["documents"]:
+        raw = Path(entry["path"]).read_bytes()
+        ocr_res = extract_document_ocr(raw, entry["mime_type"])
+        s_name = entry["stratum"]
+        stratum = stratum_stats.setdefault(
+            s_name, {"docs": 0, "field_matches": 0, "field_total": 0}
+        )
+        stratum["docs"] += 1
+        for name in EXTERNAL_GROUND_TRUTH_FIELDS:
+            gt_val = entry[name]
+            field_stats[name]["total"] += 1
+            field_stats[name]["char_total"] += len(gt_val)
+            stratum["field_total"] += 1
+            extracted_obj = ocr_res["fields"].get(name)
+            if extracted_obj:
+                field_stats[name]["extracted"] += 1
+                pred_val = str(extracted_obj["normalized_value"]).strip()
+                is_match = int(pred_val == gt_val)
+                field_stats[name]["exact_match"] += is_match
+                stratum["field_matches"] += is_match
+                field_stats[name]["char_edits"] += levenshtein_distance(gt_val, pred_val)
+            else:
+                field_stats[name]["char_edits"] += len(gt_val)
+
+        def _money(field: str) -> Optional[Decimal]:
+            obj = ocr_res["fields"].get(field)
+            return _parse_money(obj["normalized_value"]) if obj else None
+
+        ht, tva, ttc = _money("amount_ht_dzd"), _money("amount_tva_dzd"), _money("amount_ttc_dzd")
+        if None not in (ht, tva, ttc):
+            headers_evaluated += 1
+            timbre = _money("amount_timbre_dzd") or Decimal("0.00")
+            if round_dzd(ht + tva + timbre) == round_dzd(ttc):
+                headers_consistent += 1
+
+    for stats in field_stats.values():
+        failures_missing += stats["total"] - stats["extracted"]
+        failures_mismatch += stats["extracted"] - stats["exact_match"]
+
+    total_fields = sum(s["total"] for s in field_stats.values())
+    total_matches = sum(s["exact_match"] for s in field_stats.values())
+    total_chars = sum(s["char_total"] for s in field_stats.values())
+    total_edits = sum(s["char_edits"] for s in field_stats.values())
+    auth = dataset["authorization"]
+    report = {
+        "dataset_size_documents": len(dataset["documents"]),
+        "dataset_provenance": f"Externally authorized dataset: {auth['source_description']}",
+        "authorization": auth,
+        "overall_field_exact_match_rate": round(total_matches / total_fields, 4) if total_fields else 0.0,
+        "overall_cer": round(total_edits / total_chars, 4) if total_chars else 0.0,
+        "arithmetic_consistency": {
+            "headers_evaluated": headers_evaluated,
+            "headers_consistent": headers_consistent,
+        },
+        "failure_categories": {
+            "missing": failures_missing,
+            "mismatch": failures_mismatch,
+        },
+        "by_field": {
+            name: {
+                "total": s["total"],
+                "exact_match": s["exact_match"],
+                "exact_match_rate": round(s["exact_match"] / s["total"], 4) if s["total"] else 0.0,
+                "cer": round(s["char_edits"] / s["char_total"], 4) if s["char_total"] else 0.0,
+                "failures": {
+                    "missing": s["total"] - s["extracted"],
+                    "mismatch": s["extracted"] - s["exact_match"],
+                },
+            }
+            for name, s in field_stats.items()
+        },
+        "by_stratum": {
+            name: {
+                "docs": s["docs"],
+                "field_accuracy": round(s["field_matches"] / s["field_total"], 4) if s["field_total"] else 0.0,
+            }
+            for name, s in stratum_stats.items()
+        },
+        "human_approval_note": (
+            "Extraction scores never approve a posting: every document, whatever "
+            "this report says, still passes through mandatory human review "
+            "before accounting posting."
+        ),
+        "scope_note": (
+            "These numbers describe this corpus only. They are not production "
+            "accuracy beyond it, and the synthetic benchmark's figures remain a "
+            "separate, synthetic-only result."
+        ),
+    }
+    (output_dir / "external_dataset_results.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return report
 

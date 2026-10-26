@@ -328,3 +328,92 @@ already described in §3/§5:
 * It does not replace the financial controls: even a perfect OCR cannot prevent a valid-looking
   invoice for a fictitious supplier. Cross-footing, 3-way match and approval remain the
   controls that matter.
+
+---
+
+## 12. Real-world evaluation corpora: authorization, redaction, and access control
+
+Everything above measures the **synthetic** dataset. The synthetic benchmark is
+repeatable and its numbers are honest *for synthetic documents*; they are not
+production accuracy, and §10/§11 say why. This section defines the only path by
+which a real-world corpus may enter the harness — as code, not as aspiration:
+`dz_erp/benchmark.py` exposes `load_external_dataset(manifest_path)` and
+`evaluate_external_dataset(manifest_path, output_dir)`, both covered by tests in
+`tests/test_phase6_ocr_benchmark_e2e.py`.
+
+### 12.1 The manifest is the custody statement
+
+A real-world corpus is admitted only through a JSON manifest that **states who
+authorized it, what was redacted, and where access control lives**:
+
+```json
+{
+  "authorization": {
+    "authorized_by": "role or person who approved this corpus (e.g. DPO, engagement owner)",
+    "authorization_date": "2026-03-31",
+    "source_description": "which clients/suppliers/period the documents come from",
+    "redaction_status": "what was redacted before assembly and by whom",
+    "access_control": "where the corpus is stored and who can read it"
+  },
+  "documents": [ { "doc_id": "...", "path": "documents/....pdf", "mime_type": "application/pdf",
+                   "stratum": "...", "...ground truth per §4.3": "..." } ]
+}
+```
+
+The loader refuses - with a named error, not a warning - any manifest missing an
+authorization field, any document missing ground truth, any path that escapes
+the manifest's directory, any duplicate id, and any MIME type the extraction
+engine does not actually support (`application/pdf`, `image/png`). A corpus
+that cannot state its custody does not get evaluated. **Until a manifest
+satisfying these rules has been loaded and an owner has signed off, no
+real-world accuracy figure exists and none may be quoted.**
+
+### 12.2 Redaction before assembly
+
+Real invoices carry supplier identities, NIF/RC/AI numbers, amounts and
+sometimes personal data. Before a document joins an evaluation corpus:
+
+1. **Minimize**: prefer already-anonymized documents (training files, dummy
+   suppliers) where the evaluation goal permits; use real documents only when
+   the strata of §4.1 cannot be represented otherwise.
+2. **Redact what the metric does not need**: the scorer compares *field values
+   against ground truth*; supplier names in the rendered body may be replaced
+   with redaction bars as long as the ground-truth manifest records the true
+   value. Never redact the ground truth itself - that would falsify the
+   measurement rather than protect the data.
+3. **Record it**: the manifest's `redaction_status` must say what was removed,
+   by whom, and with what tool. An undocumented "redacted" corpus is not
+   redacted as far as this protocol is concerned.
+4. **Law 18-07 note**: an evaluation corpus of client documents is processing
+   of personal data; its retention period and legal basis belong in the
+   deployment's ANPDP register (docs/RELEASE_READINESS_MATRIX.md, R-LAW), not
+   only in this file.
+
+### 12.3 Access control for evaluation artifacts
+
+* The corpus and its ground truth live **outside the repository**, under the
+  access control named in the manifest. Nothing real-world is committed.
+* Evaluation outputs (`external_dataset_results.json`, rendered copies) inherit
+  the corpus's sensitivity: store them where the corpus lives, not in a shared
+  or public location, and delete rendered copies when the evaluation window
+  closes.
+* The report embeds the authorization statement on purpose: a result file
+  without its authorization block must be treated as uncontrolled.
+
+### 12.4 Human approval is not renegotiated by a score
+
+Whatever any evaluation reports, the production workflow is unchanged: an
+extracted document enters `NeedsReview`, and posting requires an explicit
+human approval step (`decide_invoice_approval`) by an authorized role.
+Evaluation metrics tune *routing and review effort*; they never replace the
+approval control. The external report states this itself
+(`human_approval_note`), so a copied results file cannot argue otherwise.
+
+### 12.5 What would count as evidence
+
+A completed §12 execution is: an authorized, redacted corpus under stated
+access control; a report produced by `evaluate_external_dataset`; owner
+sign-off recorded against that report (per-stratum sample sizes at §4.2 scale
+or larger). Until then, the release matrix (R-OCR) stays blocked-external, and
+the only accuracy numbers this repository may quote are the synthetic ones of
+§9 with their stated limits.

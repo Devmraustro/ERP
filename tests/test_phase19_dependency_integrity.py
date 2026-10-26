@@ -320,3 +320,108 @@ def test_wheelhouse_build_command_pins_hashes_and_wheels_only() -> None:
     assert "--only-binary=:all:" in command
     assert "--no-deps" in command
     assert str(HASH_LOCKFILE) in command
+
+
+# ----------------------------------------------------------------------
+# 5. Wheelhouse failure modes: every refusal is observed, not assumed
+# ----------------------------------------------------------------------
+def test_wheelhouse_parser_refuses_unparseable_and_empty_lockfiles() -> None:
+    with pytest.raises(SystemExit, match="unparseable lockfile entry"):
+        verify_wheelhouse.parse_pins("this line is not a requirement at all\n")
+    with pytest.raises(SystemExit, match="no pinned distributions"):
+        verify_wheelhouse.parse_pins("# only comments\n\n")
+    with pytest.raises(SystemExit, match="no pinned distributions"):
+        verify_wheelhouse.parse_pins("")
+
+
+def test_wheelhouse_flags_unexpected_non_artifact_files(tmp_path: Path) -> None:
+    """A README or manifest dropped into the wheelhouse is not pinned bytes."""
+    payload = b"demo-pinned-bytes"
+    lock = tmp_path / "hashes.txt"
+    lock.write_text(f"demo==1.0 --hash=sha256:{_digest(payload)}\n")
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+    (wheelhouse / "demo-1.0-py3-none-any.whl").write_bytes(payload)
+    (wheelhouse / "README.txt").write_bytes(b"drop these files into pip")
+
+    result = verify_wheelhouse.verify_wheelhouse(
+        wheelhouse, verify_wheelhouse.parse_pins(lock.read_text())
+    )
+    assert not result.ok
+    assert result.unknown_artifacts == ["README.txt"]
+
+
+def test_wheelhouse_flags_nested_directories_instead_of_skipping_them(tmp_path: Path) -> None:
+    """A subdirectory must fail verification, not vanish from the report.
+
+    pip's ``--find-links`` does not recurse; a wheelhouse that hides artifacts
+    in a subdirectory would verify OK and then fail at install time with
+    missing pins. The verifier reports the directory as an unknown artifact so
+    the operator fixes the layout before the air-gapped install.
+    """
+    payload = b"demo-pinned-bytes"
+    lock = tmp_path / "hashes.txt"
+    lock.write_text(f"demo==1.0 --hash=sha256:{_digest(payload)}\n")
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+    (wheelhouse / "demo-1.0-py3-none-any.whl").write_bytes(payload)
+    nested = wheelhouse / "unpacked-bundle"
+    nested.mkdir()
+    (nested / "demo-1.0-py3-none-any.whl").write_bytes(payload)  # even the *right* bytes
+
+    result = verify_wheelhouse.verify_wheelhouse(
+        wheelhouse, verify_wheelhouse.parse_pins(lock.read_text())
+    )
+    assert not result.ok
+    assert result.unknown_artifacts == ["unpacked-bundle/"]
+    # The legitimate top-level artifact is still recognised.
+    assert result.covered == {("demo", "1.0"): ["demo-1.0-py3-none-any.whl"]}
+
+
+def test_wheelhouse_refuses_a_digest_recorded_for_two_pins(tmp_path: Path) -> None:
+    """An ambiguous hash lockfile cannot be enforced; refuse before looking at files."""
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+    pins = {
+        ("alpha", "1.0"): ["d" * 64],
+        ("beta", "2.0"): ["d" * 64],  # same digest, different distribution
+    }
+    with pytest.raises(SystemExit, match="ambiguous"):
+        verify_wheelhouse.verify_wheelhouse(wheelhouse, pins)
+
+
+def test_wheelhouse_accepts_multiple_platform_wheels_for_one_pin(tmp_path: Path) -> None:
+    """Duplicates that are legitimate stay legitimate: several wheels whose
+    digests are all recorded for the same pin cover it more than once."""
+    lock = tmp_path / "hashes.txt"
+    lock.write_text(
+        f"demo==1.0 --hash=sha256:{_digest(b'linux wheel')} --hash=sha256:{_digest(b'win wheel')}\n"
+    )
+    wheelhouse = tmp_path / "wh"
+    wheelhouse.mkdir()
+    (wheelhouse / "demo-1.0-cp312-manylinux.whl").write_bytes(b"linux wheel")
+    (wheelhouse / "demo-1.0-cp312-win_amd64.whl").write_bytes(b"win wheel")
+
+    result = verify_wheelhouse.verify_wheelhouse(
+        wheelhouse, verify_wheelhouse.parse_pins(lock.read_text())
+    )
+    assert result.ok, result.summary()
+    assert sorted(result.covered[("demo", "1.0")]) == [
+        "demo-1.0-cp312-manylinux.whl",
+        "demo-1.0-cp312-win_amd64.whl",
+    ]
+    assert result.missing_pins == []
+
+
+def test_offline_install_documentation_carries_the_isolation_flags() -> None:
+    """The documented air-gapped install must be unambiguously offline.
+
+    ``--no-index`` forbids any index fallback and ``--find-links`` restricts
+    resolution to the verified wheelhouse; without both, an offline install can
+    silently reach the network and pick up unpinned bytes.
+    """
+    text = (REPO_ROOT / "docs" / "DEPENDENCY_AND_LICENSE_REGISTER.md").read_text(encoding="utf-8")
+    assert "--no-deps --no-index --find-links" in text
+    assert "--require-hashes" in text
+    # The verifier command the runbook names is the tool that actually exists.
+    assert "tools/verify_wheelhouse.py --wheelhouse" in text

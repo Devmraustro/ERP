@@ -23,22 +23,43 @@ lack the tarfile security fixes plus the independent archive preflight.
 (The retired `/tmp/glstub` workaround is unsupported — see the note in
 `docs/QA_TEST_MATRIX_AND_RESULTS.md` §1.)
 
-**Final evidence round (2026-10-26, local — not pushed).** Full suite on
-Windows/CPython 3.12.10: **551 passed, 19 skipped, 0 failed** (29 min; one
-benign third-party `DeprecationWarning` from starlette/anyio), coverage
-**88 %** (4,458 statements, 516 missed — the new OCR-harness statements moved
-the rounding boundary from 89 % to 88 %), staging acceptance **37/37, exit 0**.
-The OCR benchmark reproduces its committed figures exactly on consecutive runs
-(exact-match `0.9097`, ECE `0.0132`, `18/18` totals consistent, `13` missing /
-`0` mismatch) — all **synthetic** data; only latency varies between runs.
-GitHub Actions has **not** run for these local commits (not pushed, no
-workflow-dispatch authorization): the green runs quoted above remain attached
-to `4225f36` and `62a4bf9` only. New in this round: `tools/verify_wheelhouse.py`
-(offline wheelhouse build/verify against the hash lockfile, smoke-tested
-including tamper rejection), `docs/KEY_PROVIDER_CONTRACT.md` (key-provider
-contract with a consistency test), OCR totals-consistency / failure-category /
-per-language metrics with a CLI (`python -m dz_erp.benchmark <output_dir>`),
-and 4 wheelhouse tests (phase 19 now 19 tests, phase 22 now 13).
+**Production Readiness Phase 1 evidence round (2026-10-26, local — not pushed).**
+Full suite on Windows/CPython 3.12.10: **602 passed, 20 skipped, 0 failed**
+(20 min 09 s; one benign third-party `DeprecationWarning` from
+starlette/anyio), coverage **87 %** (4,575 statements, 589 missed; `serve.py`
+100 % after the provider gate), staging acceptance **37/37, exit 0**. The
+benchmark reproduces its committed figures on consecutive runs from clean
+output directories (all non-latency report keys identical — exact-match
+`0.9097`, ECE, totals, failure categories, strata/language roll-ups); latency
+is host-dependent and excluded. The prior round's evidence (551 passed/19
+skipped at `8dd53fc`, OCR reproductions, latency observations) remains
+attached to that commit.
+
+The deployment-readiness gate behaves as documented on this non-deployment
+host: `python tools/operational_readiness.py` exits **1** because the ERP
+environment is deliberately unconfigured here (every failure names the missing
+variable and its remediation); with `--run-checks`, the two read-only
+verifiers — `verify_dependency_graph.py` and `generate_hash_lock.py --check` —
+execute with **exit 0**, while `key-status` is reported **unavailable**
+(it requires `ERP_DB_PATH`/`ERP_VAULT_PATH`), and the overall exit code stays
+non-zero. On a real deployment host the same command exercises `key-status`
+and checkpoint verification; the eight external-evidence items (off-host
+storage, scheduler, alerting, DR drill, KMS/HSM, provenance, OCR corpus,
+professional approvals) are reported as required and never affect the exit
+code. GitHub Actions has **not** run for these local commits (not pushed, no
+workflow-dispatch authorization); the green runs quoted above remain attached
+to `4225f36` and `62a4bf9` only.
+
+New in this round: `tools/operational_readiness.py` (deterministic deployed-
+configuration checker, exit codes 0/1/2, external evidence reported as
+required, phase 24 = 19 tests), the fail-closed `ERP_KEY_PROVIDER` gate
+(`kms`/`hsm` declarations refuse start-up; phase 17 = 31 collected items),
+wheelhouse verifier hardening — nested directories and non-artifact files
+flagged, ambiguous digests refused, offline install flags pinned by test
+(phase 19 now 25) — the authorized-corpus OCR interface
+(`load_external_dataset`/`evaluate_external_dataset`, protocol §12), and the
+single release-readiness matrix (`docs/RELEASE_READINESS_MATRIX.md`,
+machine-checked; phase 22 now 15).
 
 ```bash
 python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -46,6 +67,7 @@ python -m pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
 python tools/verify_dependency_graph.py        # explicit dependency-graph validation
 python tools/generate_hash_lock.py --check     # lockfile/hash drift check
 python tools/verify_wheelhouse.py --build ./wheelhouse   # print the hash-enforced offline wheelhouse command
+python tools/operational_readiness.py --run-checks       # deployed-configuration readiness gate (exit 0/1/2)
 python -m pytest --cov=dz_erp --cov-report=term-missing
 python -m ruff check dz_erp tests tools        # static check
 ```
@@ -65,6 +87,7 @@ python -m ruff check dz_erp tests tools        # static check
 6. [`docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`](docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md) — Phase 5 server-side RBAC, Segregation of Duties (`creator != approver`), multi-company isolation, trigger-protected HMAC-SHA256 audit hash-chain, secret/PII log redaction, and encrypted backup/restore verification.
 7. [`docs/OCR_BENCHMARK_REPORT.md`](docs/OCR_BENCHMARK_REPORT.md) — Phase 6 empirical OCR benchmark report across 18 synthetic Algerian invoices in 6 strata (`benchmarks/results/ground_truth_and_results.json`).
 8. **[`docs/AUTHENTICATION_HARDENING_SPEC.md`](docs/AUTHENTICATION_HARDENING_SPEC.md)** — **Phase 7** remediation of the `X-User-Id`/`X-Company-Id` impersonation vulnerability (`CWE-287`/`CWE-639`): opaque revocable bearer tokens, PBKDF2 password hashing, brute-force lockout, schema migration, and the denial-audit rollback defect.
-9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (565 collected tests at the consolidated head; earlier counts retained as dated history).
+9. [`docs/QA_TEST_MATRIX_AND_RESULTS.md`](docs/QA_TEST_MATRIX_AND_RESULTS.md) — Complete QA execution matrix and coverage results (622 collected tests at the current head: 602 passed, 20 skipped; earlier counts retained as dated history).
 10. [`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`](docs/PRODUCTION_READINESS_AND_GO_NO_GO.md) — Final production-readiness assessment and Go/No-Go decision.
-11. [`docs/KEY_PROVIDER_CONTRACT.md`](docs/KEY_PROVIDER_CONTRACT.md) — The contract between the application and any key source: provider protocol, auditable `describe()` surface, failure modes (raise, never fall back), rotation behaviour, Windows ACL limitation, and the acceptance criteria a real KMS/HSM integration must meet (none is bundled; `KmsKeyProvider` reports `implemented: False`, `hsm_equivalent: False`).
+11. [`docs/KEY_PROVIDER_CONTRACT.md`](docs/KEY_PROVIDER_CONTRACT.md) — The contract between the application and any key source: provider protocol, auditable `describe()` surface, failure modes (raise, never fall back), rotation behaviour, Windows ACL limitation, and the acceptance criteria a real KMS/HSM integration must meet (none is bundled; `KmsKeyProvider` reports `implemented: False`, `hsm_equivalent: False`). Includes the fail-closed `ERP_KEY_PROVIDER` selection gate and per-provider outage behaviour.
+12. [`docs/RELEASE_READINESS_MATRIX.md`](docs/RELEASE_READINESS_MATRIX.md) — The single release-gate table: requirement/risk ID, owner, required evidence, verification command, status (Verified vs. Blocked-external), external dependency and explicit pass criteria for KMS/HSM custody, publisher provenance, off-host checkpoints, alerting, DR, production-scale concurrency, OCR validation, Algerian accounting/tax review and Law 18-07/ANPDP. Companion tool: `tools/operational_readiness.py`, the deterministic deployed-configuration checker whose exit code covers only what it can actually see.

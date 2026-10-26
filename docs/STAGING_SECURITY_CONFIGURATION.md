@@ -319,6 +319,15 @@ python -m dz_erp.serve
 
 Then confirm:
 
+- [ ] `python tools/operational_readiness.py --run-checks --report-json readiness.json` exits 0
+      (the deterministic checker for exactly the configuration half of this list: env vars
+      present and well-formed, exactly one key source per key, key-file permissions, docs
+      disabled, loopback/proxy posture, writable security log, and - with `--checkpoint` -
+      checkpoint existence, shape and freshness). It deliberately does **not** verify
+      functionality that only the environment can prove: off-host storage, scheduler
+      installation, alert delivery, DR drills, KMS custody, publisher provenance, a real OCR
+      corpus and professional approvals are reported as required external evidence and never
+      folded into the exit code (`docs/RELEASE_READINESS_MATRIX.md`).
 - [ ] `/healthz` returns 200 and the server is **not** reachable off-loopback.
 - [ ] A request with no token returns 401, and a line appears in `$ERP_SECURITY_LOG_PATH`.
 - [ ] On POSIX, the vault and audit key files are mode `0600` and their directory is `0700`. On Windows, set and verify an explicit NTFS ACL limited to the service account; `chmod` mode bits are not an access-control boundary.

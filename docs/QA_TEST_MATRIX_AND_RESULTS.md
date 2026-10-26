@@ -145,6 +145,18 @@ The exact head includes the atomic OCR confidence migration, foreign-key checkin
 | 29 | `test_empirical_ocr_benchmark_across_6_algerian_invoice_strata` | Runs 18-document Algerian invoice benchmark across 6 strata (`90.97%` field exact match, `100%` line association, `0.79%` ECE) | `Passed` |
 | 30 | `test_complete_14_step_end_to_end_supplier_invoice_workflow` | Executes all 14 mandatory end-to-end steps from upload through human edit, 3-way match, SoD approval, idempotent posting, duplicate block, and isolated backup/restore | `Passed` |
 
+Additionally (19 collected items in the file): the engine must run
+single-threaded (`test_ocr_engine_is_configured_for_deterministic_inference`,
+`test_ocr_engine_actually_loads_and_recognises_text`); the external-dataset
+interface (`load_external_dataset` / `evaluate_external_dataset`,
+`docs/OCR_EVALUATION_PROTOCOL.md` §12) refuses manifests without a complete
+authorization statement, without ground truth, with escaping/duplicate paths
+and unsupported types, and scores an authorized corpus through the real
+engine while carrying the authorization into the report; and
+`test_benchmark_report_is_reproducible_from_a_clean_output_directory` runs
+the benchmark twice from clean directories and requires every non-latency
+report key to be identical.
+
 ### 2.6 Phase 7 — Authentication Remediation (`tests/test_phase7_authentication_remediation.py`)
 
 Regression suite for the identity-header impersonation vulnerability (`CWE-287` / `CWE-639`)
@@ -345,10 +357,12 @@ documentation could previously not be checked by running anything.
 | Suite | Tests | What it pins |
 | :--- | ---: | :--- |
 | `tests/test_phase18_ocr_confidence_provenance.py` | 19 | The removed `0.995` constant; `confidence: null` + `not_measured` for native text; `engine_line` scope for engine scores; `confidence_calibrated` hard-coded `False`; the `IS NOT` trigger comparison; legacy-row relabelling. Reinstating the constant fails exactly two tests. |
-| `tests/test_phase19_dependency_integrity.py` | 19 | Hash lockfile ↔ version lockfile agreement; `--require-hashes` install step in both CI jobs; the validator rejecting wrong version, missing package, unsatisfied specifier, unparseable requirement and non-allow-listed substitution; per-line trailing backslash so pip enforces **every** digest, not just the first; the offline-wheelhouse parser (continuation joining, missing-hash refusal), verifier (accept pinned, reject tampered/mismatched/missing) and hash-enforced build command. |
+| `tests/test_phase19_dependency_integrity.py` | 25 | Hash lockfile ↔ version lockfile agreement; `--require-hashes` install step in both CI jobs; the validator rejecting wrong version, missing package, unsatisfied specifier, unparseable requirement and non-allow-listed substitution; per-line trailing backslash so pip enforces **every** digest, not just the first; the offline-wheelhouse parser (continuation joining, missing-hash refusal, unparseable entry, empty lockfile) and verifier (accept pinned, reject tampered/mismatched/missing, flag unexpected non-artifact files **and nested directories**, refuse a digest recorded for two pins, accept legitimate multi-platform duplicates) and hash-enforced build command; the documented offline install carries `--no-index --find-links --require-hashes`. |
 | `tests/test_phase20_checkpoints_and_monitoring.py` | 52 | `validate_checkpoint` rejecting empty / partial / wrong-format / wrong-schema / negative / malformed-hash documents that previously reported `valid: true`; truncation and rewritten-head detection; export refused from an unverifiable ledger or into the ledger's own directory; monitor exit codes `0/2/3`; read-only behaviour (no key material written, none printed); `ops/` units parsed with real systemd continuation semantics. |
 | `tests/test_phase21_arabic_review_routing.py` | 19 | `ARABIC_RECOGNITION_HEAD_AVAILABLE = False`; native Arabic keeps `standard_review`; declared or dominant Arabic scans route to `manual_transcription`; a scan yielding nothing is not reported as a parsing success; route/reason persisted on `source_documents` and in the audit event; API `declared_language` round trip; schema rejects an out-of-vocabulary route; migration is idempotent and leaves old rows `NULL`. |
-| `tests/test_phase22_register_and_docs_consistency.py` | 13 | The risk-register summary equals the derived counts; identifiers unique; every cited file resolves; runbook names existing units and flags; exit-code table matches the CLI; the mechanisms behind the mitigated rows still exist in code; the key-provider contract document describes a surface the code really has (describe() keys, exceptions, env vars, no hardware-custody claim). |
+| `tests/test_phase22_register_and_docs_consistency.py` | 15 | The risk-register summary equals the derived counts; identifiers unique; every cited file resolves; runbook names existing units and flags; exit-code table matches the CLI; the mechanisms behind the mitigated rows still exist in code; the key-provider contract document describes a surface the code really has (describe() keys, exceptions, env vars, no hardware-custody claim), including the fail-closed `ERP_KEY_PROVIDER` gate and the outage-behaviour section; the release-readiness matrix is machine-checked (unique IDs, required coverage, fixed status vocabulary, blocked rows name their external dependency, cited paths exist) and the readiness checker cites only existing matrix rows. |
+| `tests/test_phase23_staging_acceptance.py` | 1 | Runs `tools/staging_acceptance.py` end to end and requires the full 37-check functional acceptance to pass. |
+| `tests/test_phase24_operational_readiness.py` | 19 | The deployment readiness checker: complete configuration passes; missing/invalid paths, enabled API docs and non-loopback binds fail with named remediations; exactly-one key source per key; checkpoint existence/shape/freshness; verification commands listed but executed only on request, with exit codes folded into the result; exit codes 0/1/2; external-evidence items reported as required, never as satisfied; Windows custody honestly warns about ACLs. |
 
 ### 2B.1 Two defects these tests caught in their own implementation
 

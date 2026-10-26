@@ -178,7 +178,16 @@ def verify_wheelhouse(wheelhouse: Path, pins: Dict[Tuple[str, str], List[str]]) 
 
     result = WheelhouseResult()
     for path in sorted(wheelhouse.iterdir()):
+        if path.is_dir():
+            # A subdirectory is not an artifact pip's --find-links would serve,
+            # and it is exactly how an unpacked archive or a stray checkout
+            # ends up inside a wheelhouse. Flagging it keeps the verifier's
+            # "only pinned bytes in here" claim checkable; silently skipping
+            # would let a wheelhouse pass that pip later refuses.
+            result.unknown_artifacts.append(path.name + "/")
+            continue
         if not path.is_file():
+            result.unknown_artifacts.append(path.name)
             continue
         result.files_checked += 1
         stem = path.name.lower()

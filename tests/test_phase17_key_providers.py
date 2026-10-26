@@ -29,6 +29,7 @@ from dz_erp.key_provider import (
     KeyMaterialUnavailable,
     KeyProvider,
     KmsKeyProvider,
+    configured_provider,
     ensure_key_directory,
 )
 from dz_erp.key_rotation import KeyConfigurationError, KeyCustodyError
@@ -289,3 +290,60 @@ def test_fake_implementations_must_not_claim_hsm_equivalence_silently() -> None:
                      EnvironmentKeyProvider("ANY")):
         assert isinstance(provider, KeyProvider)
         assert provider.describe()["hsm_equivalent"] is False
+
+
+# ----------------------------------------------------------------------
+# configured_provider — fail-closed selection (ERP_KEY_PROVIDER)
+# ----------------------------------------------------------------------
+def test_configured_provider_defaults_to_none_when_unset() -> None:
+    """No declaration is the honest default: file-based custody, declared nowhere."""
+    assert configured_provider({}) is None
+    assert configured_provider({"ERP_KEY_PROVIDER": ""}) is None
+    assert configured_provider({"ERP_KEY_PROVIDER": "   "}) is None
+
+
+def test_configured_provider_accepts_the_names_this_build_honours() -> None:
+    for declared in ("file", "environment", " FILE ", "Environment"):
+        assert configured_provider({"ERP_KEY_PROVIDER": declared}) == declared.strip().lower()
+
+
+@pytest.mark.parametrize("declared", ["kms", "hsm", "vault-transit", "cloud", "KMS"])
+def test_configured_provider_refuses_unavailable_declarations_fail_closed(declared: str) -> None:
+    """A declared provider this build cannot supply must stop start-up, never
+    silently fall back to files while wearing its label."""
+    with pytest.raises(KeyConfigurationError, match="ERP_KEY_PROVIDER"):
+        configured_provider({"ERP_KEY_PROVIDER": declared})
+
+
+def test_configured_provider_error_names_the_contract_section() -> None:
+    with pytest.raises(KeyConfigurationError) as excinfo:
+        configured_provider({"ERP_KEY_PROVIDER": "kms"})
+    assert "KEY_PROVIDER_CONTRACT" in str(excinfo.value)
+
+
+def test_build_app_refuses_a_kms_declaration_before_touching_any_paths(
+    tmp_path, monkeypatch
+) -> None:
+    """The application entry point fails closed on an unhonourable custody
+    declaration even when nothing else is configured."""
+    from dz_erp import serve
+
+    monkeypatch.setenv("ERP_KEY_PROVIDER", "kms")
+    monkeypatch.delenv("ERP_DB_PATH", raising=False)
+    monkeypatch.delenv("ERP_VAULT_PATH", raising=False)
+    with pytest.raises(KeyConfigurationError, match="no KMS/HSM client is bundled"):
+        serve.build_app()
+
+
+def test_build_app_still_starts_with_an_honourable_declaration(
+    tmp_path, monkeypatch
+) -> None:
+    """The fail-closed gate must not reject the configurations it exists to allow."""
+    from dz_erp import serve
+
+    db = tmp_path / "erp.sqlite3"
+    monkeypatch.setenv("ERP_KEY_PROVIDER", "file")
+    monkeypatch.setenv("ERP_DB_PATH", str(db))
+    monkeypatch.setenv("ERP_VAULT_PATH", str(tmp_path / "vault"))
+    app = serve.build_app()
+    assert app is not None

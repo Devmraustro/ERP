@@ -36,21 +36,20 @@ python -m ruff check dz_erp tests tools      # static check
 | Mandatory runtime libraries | **None.** Every pinned runtime dependency is a pure-Python or wheel package |
 | Optional (GUI build only) | `libgl1`, `libglib2.0-0` — needed only if the GUI `opencv-python` build is deliberately reinstalled for interactive debugging |
 
-### 1.2 Current verification — consolidated head 4225f36 (2026-10-25)
+### 1.2 Current verification — exact head 2de2ae7 (2026-10-26)
 
-The exact current PR/code head `4225f36c56fed66700d61ffe832db7373214a93d` passed GitHub Actions run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234). All three jobs succeeded.
+The exact PR head `2de2ae7e8aca1fa522b4e4a1f1210f18f86bc838` passed GitHub Actions run [40382194997](https://github.com/Devmraustro/ERP/actions/runs/40382194997). All three jobs completed successfully.
 
-- **Linux / Python 3.11.17:** 562 passed, 3 platform-specific skipped, 0 failed; **88% coverage** (4,403 statements, 523 missed); 92.58 seconds.
-- **Linux / Python 3.12.15:** 562 passed, 3 platform-specific skipped, 0 failed; **88% coverage** (4,403 statements, 523 missed); 289.31 seconds.
-- **Windows / Python 3.12.10:** key rotation, migration, backup/restore, logging and recovery subset: 138 passed, 8 platform-specific skipped, 0 failed; 92.88 seconds.
+- **Linux / Python 3.11.17:** 620 passed, 3 skipped, 0 failed; **88% coverage** (4,575 statements, 534 missed); full suite exit 0.
+- **Linux / Python 3.12.15:** 620 passed, 3 skipped, 0 failed; **88% coverage** (4,575 statements, 534 missed); full suite exit 0.
+- **Windows / Python 3.12.10:** key rotation, migration, backup/restore, logging and recovery subset: 148 passed, 8 platform-specific skipped, 0 failed.
 - **Synthetic staging acceptance:** 37/37 on Linux and 37/37 on Windows. The checkpoint path exercise uses a same-host sibling directory; it does not prove real off-host durability.
-- **Risk register:** `python tools/risk_register_counts.py` passed and reported a consistent 31-row register.
-- **Exact-head migration regressions:** valid legacy OCR rows migrate and re-migrate idempotently; a failed copy rolls back the table rebuild; a legacy row with an orphan foreign-key reference is rejected and the original table is preserved.
+- **Risk register:** summary validation passed; 31 rows are consistent.
+- **Phase 24 POSIX fixture:** the exact-head regression is green in the cross-platform CI matrix; the permission-gate test uses a POSIX-declaring shim without globally patching `os.name`.
 
-Dependency installation with hashes, dependency-graph validation, OpenCV/RapidOCR import, Ruff, byte-compilation and hash-lock drift checks passed in the Linux jobs; Windows dependency validation, Ruff and byte-compilation also passed. The full test suite and acceptance checks are complete on the exact head, rather than inferred from a previous commit.
+Hash-verified dependency installation, dependency-graph validation, OpenCV/RapidOCR imports, Ruff and byte-compilation passed in the Linux jobs. Windows dependency validation, Ruff, byte-compilation and its security/recovery acceptance suite also passed. One warning was emitted in each pytest run; there were no test failures. The 3 Linux skips are platform-specific regression paths, while the 8 Windows skips concern POSIX-only behaviours.
 
-Earlier test totals below describe historical phases and are retained for traceability.
-
+This is evidence for the exact tested commit only. It does not establish external KMS/HSM custody, off-host checkpoint durability, end-to-end alert delivery, production-scale recovery, a representative authorized OCR corpus, or professional/legal sign-off.
 ### 1.3 Prior (Phase 7) results — retained for traceability
 
 - **Total Collected Tests:** `87`

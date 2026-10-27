@@ -200,7 +200,17 @@ def test_hash_lockfile_uses_sha256_only() -> None:
 
 def test_pyproject_declarations_are_all_pinned_in_the_lockfile() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    declared = re.findall(r'^\s*"([A-Za-z0-9_.\-]+)==([^"]+)"', text, re.MULTILINE)
+    # Scope: the core runtime dependencies. The lockfile is the reproducible
+    # installation that CI and deployments rely on. Optional extras are
+    # deliberately absent from the lock (installing a GUI stack into a
+    # headless CI matrix would be the wrong default); they are exact-pinned
+    # in pyproject itself and asserted below so they cannot drift silently.
+    # This mirrors the documented-substitution philosophy of
+    # opencv-python -> opencv-python-headless: an explicit, asserted deviation
+    # rather than an unrecorded one.
+    dep_block = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", text, re.MULTILINE | re.DOTALL)
+    assert dep_block, "core dependencies array not found in pyproject.toml"
+    declared = re.findall(r'"([A-Za-z0-9_.\-]+)==([^"]+)"', dep_block.group(1))
     assert declared, "no pinned declarations found in pyproject.toml"
     pins = dict(generate_hash_lock.read_pins(LOCKFILE))
     lowered = {name.lower().replace("_", "-"): version for name, version in pins.items()}
@@ -208,6 +218,34 @@ def test_pyproject_declarations_are_all_pinned_in_the_lockfile() -> None:
         key = name.lower().replace("_", "-")
         assert key in lowered, f"{name} is declared in pyproject.toml but absent from the lockfile"
         assert lowered[key] == version, f"{name}=={version} declared but {lowered[key]} locked"
+
+
+def test_optional_desktop_extra_is_exact_pinned_and_absent_from_the_lockfile() -> None:
+    """The desktop GUI extra is pinned in pyproject, never lock-installed by CI.
+
+    Two invariants: (1) the extra cannot drift - its requirement list is
+    asserted exactly; (2) it must stay out of requirements.lock.txt so the
+    headless CI matrix (pip install --no-deps -r requirements.lock.txt) never
+    pulls PySide6/Qt. If the extra gains a requirement, this test fails and
+    forces a deliberate decision - not a silent GUI dependency.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    extras_block = re.search(
+        r"^\[project\.optional-dependencies\]\s*(.*?)^\[", text, re.MULTILINE | re.DOTALL
+    )
+    assert extras_block, "optional-dependencies section not found in pyproject.toml"
+    pins = dict(re.findall(r'"([A-Za-z0-9_.\-]+)==([^"]+)"', extras_block.group(1)))
+    # Both extras are asserted exactly: any addition is a deliberate,
+    # reviewed decision, never a silent GUI dependency.
+    assert pins == {
+        "pytest": "8.3.5",
+        "pytest-cov": "6.0.0",
+        "pytest-asyncio": "1.3.0",
+        "ruff": "0.14.0",
+        "PySide6": "6.11.2",
+    }, f"extras drifted: {pins}"
+    lock_pins = {name.lower().replace("_", "-") for name, _ in generate_hash_lock.read_pins(LOCKFILE)}
+    assert "pyside6" not in lock_pins, "PySide6 must stay out of the headless lockfile"
 
 
 def test_supported_python_versions_are_declared_and_consistent() -> None:

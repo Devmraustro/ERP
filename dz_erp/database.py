@@ -11,8 +11,9 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
+from .decimal_utils import format_dzd, to_decimal
 from .rotation_audit import RecordedOperation, RotationLedger
 from .key_provider import FileKeyProvider
 from .key_rotation import (
@@ -1441,3 +1442,213 @@ class ERPDatabase:
         working.remove(version, confirm_retained_copies=confirm_retained_copies)
         self._persist_audit_keyring(working)
         return {"removed_version": version, "active_version": working.active_version}
+
+    # ------------------------------------------------------------------
+    # Read models for client applications (Phase 25)
+    #
+    # The desktop client and any future reporting surface read company data
+    # through these methods instead of ad-hoc SQL at the call site. Every
+    # method is scoped to a company id and refuses an unscoped read: tenant
+    # isolation is enforced here, not hoped for at the caller.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _require_company_scope(company_id: Any, operation: str) -> int:
+        """A read without an explicit company scope is a tenant-isolation bug."""
+        if company_id is None:
+            raise TenantIsolationError(
+                f"{operation} requires a company scope; refusing an unscoped read."
+            )
+        try:
+            cid = int(company_id)
+        except (TypeError, ValueError) as exc:
+            raise TenantIsolationError(
+                f"{operation} received an invalid company scope: {company_id!r}."
+            ) from exc
+        if cid < 1:
+            raise TenantIsolationError(
+                f"{operation} received an invalid company scope: {company_id!r}."
+            )
+        return cid
+
+    @staticmethod
+    def _read_limit(limit: Any, operation: str) -> int:
+        try:
+            capped = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{operation} limit must be an integer, got {limit!r}.") from exc
+        if capped < 1 or capped > 500:
+            raise ValueError(f"{operation} limit must be between 1 and 500, got {capped}.")
+        return capped
+
+    def list_accounts(self, company_id: Any, *, limit: Any = 500) -> List[Dict[str, Any]]:
+        """SCF chart rows for one company, ordered by account code."""
+        cid = self._require_company_scope(company_id, "list_accounts")
+        capped = self._read_limit(limit, "list_accounts")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, code, name_fr, name_ar, account_type, reconcile, active
+                FROM accounts
+                WHERE company_id = ?
+                ORDER BY code
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_products(self, company_id: Any, *, limit: Any = 500) -> List[Dict[str, Any]]:
+        """Product catalogue rows for one company, ordered by SKU."""
+        cid = self._require_company_scope(company_id, "list_products")
+        capped = self._read_limit(limit, "list_products")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, sku, name, uom, is_storable, standard_cost_dzd,
+                       stock_account_code, clearing_account_code,
+                       expense_account_code, income_account_code
+                FROM products
+                WHERE company_id = ?
+                ORDER BY sku
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_source_documents(
+        self, company_id: Any, *, limit: Any = 100
+    ) -> List[Dict[str, Any]]:
+        """Uploaded source documents for one company, newest first.
+
+        Deliberately excludes ``vault_path`` and ``file_sha256``: the storage
+        location and content digest are internal custody facts, not list-view
+        data. Contents are only ever read through the secure per-document path.
+        """
+        cid = self._require_company_scope(company_id, "list_source_documents")
+        capped = self._read_limit(limit, "list_source_documents")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, filename, mime_type, byte_size, page_count,
+                       security_status, security_findings, workflow_state,
+                       rejection_reason, uploaded_at, uploaded_by_id
+                FROM source_documents
+                WHERE company_id = ?
+                ORDER BY uploaded_at DESC, id DESC
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_supplier_invoices(
+        self, company_id: Any, *, limit: Any = 100
+    ) -> List[Dict[str, Any]]:
+        """Supplier invoices for one company, newest first."""
+        cid = self._require_company_scope(company_id, "list_supplier_invoices")
+        capped = self._read_limit(limit, "list_supplier_invoices")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, supplier_id, document_id, invoice_type, supplier_invoice_no,
+                       fiscal_year, invoice_date, due_date, currency_code, payment_method,
+                       amount_ht_dzd, amount_tva_dzd, amount_timbre_dzd, amount_ttc_dzd,
+                       workflow_state, validation_errors_json, journal_entry_id,
+                       reversal_of_invoice_id, created_at
+                FROM supplier_invoices
+                WHERE company_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def trial_balance(self, company_id: Any) -> Dict[str, Any]:
+        """Per-account debit/credit totals over POSTED journal entries.
+
+        Computed in exact Decimal arithmetic from the stored line strings and
+        refused if unbalanced: per-entry balance is already a schema CHECK, and
+        this aggregate is the second gate a report must pass before anyone
+        relies on it. Draft entries are excluded on purpose - a trial balance
+        that quietly mixed drafts would misstate the ledger.
+        """
+        cid = self._require_company_scope(company_id, "trial_balance")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT l.account_code  AS account_code,
+                       a.name_fr       AS name_fr,
+                       a.name_ar       AS name_ar,
+                       a.account_type  AS account_type,
+                       l.debit_dzd     AS debit_dzd,
+                       l.credit_dzd    AS credit_dzd
+                FROM journal_entry_lines AS l
+                JOIN journal_entries AS e
+                  ON e.id = l.journal_entry_id AND e.company_id = l.company_id
+                LEFT JOIN accounts AS a
+                  ON a.company_id = l.company_id AND a.code = l.account_code
+                WHERE l.company_id = ? AND e.state = 'POSTED'
+                ORDER BY l.account_code
+                """,
+                (cid,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        per_account: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            bucket = per_account.setdefault(
+                r["account_code"],
+                {
+                    "name_fr": r["name_fr"],
+                    "name_ar": r["name_ar"],
+                    "account_type": r["account_type"],
+                    "debit": to_decimal("0.00"),
+                    "credit": to_decimal("0.00"),
+                },
+            )
+            bucket["debit"] += to_decimal(r["debit_dzd"])
+            bucket["credit"] += to_decimal(r["credit_dzd"])
+        total_debit = sum((b["debit"] for b in per_account.values()), to_decimal("0.00"))
+        total_credit = sum((b["credit"] for b in per_account.values()), to_decimal("0.00"))
+        if total_debit != total_credit:
+            raise FinancialIntegrityError(
+                "Trial balance is unbalanced: "
+                f"total debit {format_dzd(total_debit)} != total credit {format_dzd(total_credit)}. "
+                "Refusing to report a ledger that does not balance."
+            )
+        report_rows = [
+            {
+                "account_code": code,
+                "name_fr": per_account[code]["name_fr"],
+                "name_ar": per_account[code]["name_ar"],
+                "account_type": per_account[code]["account_type"],
+                "debit_dzd": format_dzd(per_account[code]["debit"]),
+                "credit_dzd": format_dzd(per_account[code]["credit"]),
+            }
+            for code in sorted(per_account)
+        ]
+        return {
+            "company_id": cid,
+            "entry_state": "POSTED",
+            "rows": report_rows,
+            "total_debit_dzd": format_dzd(total_debit),
+            "total_credit_dzd": format_dzd(total_credit),
+            "balanced": True,
+        }

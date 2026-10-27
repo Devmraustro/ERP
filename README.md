@@ -2,6 +2,43 @@
 
 Production-grade Algerian *Système Comptable Financier* (SCF) localization, procure-to-pay (`PO → Goods Receipt → 3-Way Match → SoD Approval → Idempotent GL Posting`), encrypted supplier invoice intake with OCR (`pdfplumber` + `RapidOCR PP-OCRv4`), and tamper-evident audit/backup architecture.
 
+## Desktop application — installed, local-first (Phases 25–26)
+
+The product is an **installed desktop application** (logiciel de gestion), not a website: launch
+`dz-erp` on the workstation, log in, and work with the accounting data that lives on that machine
+(Mode A) or on the company's own server (Mode B). No browser, no cloud account, no internet for
+core operations. The client never opens the database file — every operation goes through the
+verified authenticated API (server-verified tokens, RBAC, tenant isolation, audited denials), so
+the desktop UI inherits the same controls the test suite enforces on the server.
+
+```bat
+py -3.12 -m pip install -e ".[desktop]"   :: PySide6==6.11.2 (optional GUI extra)
+dz-erp                                    :: start the desktop app (Mode A, first-run wizard)
+dz-erp --language ar                      :: Arabic interface (right-to-left layout)
+dz-erp --mode server --server-url http://erp-intranet:8000   :: Mode B (company LAN server)
+dz-erp --smoke                            :: headless Mode A verification (no GUI, exit 0)
+```
+
+Modes: **A — single workstation**: a private ERP service starts inside the application, bound to
+`127.0.0.1` on an ephemeral port, backed by the local database and encrypted document vault under
+`%LOCALAPPDATA%\AlgerianERP` (XDG equivalent elsewhere). **B — company LAN**: the client connects
+to a company-hosted `python -m dz_erp.serve` deployment; a SQLite file shared over the network is
+explicitly **not** a supported multi-user architecture. Details, data locations, backup/uninstall
+rules and the honest gap list: `docs/DESKTOP_APPLICATION.md`.
+
+**Desktop-phase verification (this branch, Windows/CPython 3.12.10).** The new read-only client
+API passes 6/6 (`tests/test_phase25_read_api.py`: tenant scoping, audited warehouse-role denials,
+clamped limits, POSTED-only balanced trial balance). The desktop suite passes 10/10
+(`tests/test_phase26_desktop.py`: secret-free config whitelist, corrupt-config recovery,
+loopback-only ephemeral embedded service, first-run overwrite refusal, full
+bootstrap→serve→login→read→logout→stop cycle, headless `--smoke` subprocess exit 0, offscreen Qt
+construction with the Arabic right-to-left switch). Full local suite: **620 passed, 20 skipped,
+0 failed, exit 0** (85 % coverage; see §2C–2D of
+`docs/QA_TEST_MATRIX_AND_RESULTS.md`). The PyInstaller one-file build succeeds (128.3 MiB,
+SHA-256 sidecar verified); executing the unsigned exe is blocked by this workstation's
+application-control policy (WinError 4551) and is recorded, not bypassed
+(`docs/DESKTOP_APPLICATION.md` §8.2).
+
 ## Quick Verification
 
 Verified at code head `4225f36c56fed66700d61ffe832db7373214a93d` (2026-10-25):

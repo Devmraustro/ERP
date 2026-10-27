@@ -74,6 +74,23 @@ alerting, scheduling, DR or custody functionality):
 | Authorized real-world OCR dataset interface (manifest = custody statement; refused without authorization/ground truth/contained paths) + two-run clean-dir reproducibility of the synthetic benchmark | `Verified` (interface; no real-world corpus exists yet) | `dz_erp/benchmark.py` `load_external_dataset` / `evaluate_external_dataset`; `docs/OCR_EVALUATION_PROTOCOL.md` §12; tests in `tests/test_phase6_ocr_benchmark_e2e.py` |
 | Single release-readiness matrix: 10 rows (KMS/HSM, provenance, off-host checkpoints, alerting, DR, production concurrency, OCR corpus, SCF/tax review, Law 18-07/ANPDP, operational gate), statuses machine-checked, 9 of 10 blocked-external | `Verified` (as a gate table) | `docs/RELEASE_READINESS_MATRIX.md`; consistency tests in `tests/test_phase22_register_and_docs_consistency.py` |
 
+### 3.3 Desktop application direction — installed, local-first client
+
+Delivered on this branch. The product becomes an **installed desktop
+application** (logiciel de gestion): the client is a thin native PySide6
+layer over the verified REST API — it never opens the database file, so every
+control below is inherited, not reimplemented. `main` remains untouched; this
+does not deploy anything.
+
+| Deliverable | Status | Evidence |
+|---|---|---|
+| Read-only listing/reporting API for clients (authenticated, tenant-scoped from the credential, limits clamped 1–500 server-side; warehouse role denied on financial reads **with the refusal audit-logged after commit**; trial balance POSTED-only, exact `Decimal`, refuses an unbalanced ledger) | `Verified` | 5 endpoints in `dz_erp/api.py`; read models in `dz_erp/database.py`; secure wrappers in `dz_erp/security_audit.py`; 6 tests (`tests/test_phase25_read_api.py`) |
+| Mode A — single workstation: embedded loopback service (`127.0.0.1:0`, ephemeral, non-loopback bind refused), first-run bootstrap that refuses existing installations, clean stop | `Verified` | `dz_erp/desktop/service.py` built on `serve.build_app`; 10 tests (`tests/test_phase26_desktop.py`); `dz-erp --smoke` exits 0 |
+| Mode B — company LAN client (no local service; same client code against a company server) | `Verified` at client layer | `dz_erp/desktop/config.py` mode/server_url validation; `ErpClient`; server deployment unchanged (existing runbooks) |
+| Configuration safety (secret-free whitelist, corrupt-file recovery, atomic writes) + FR/AR with RTL | `Verified` | `dz_erp/desktop/config.py`, `dz_erp/desktop/i18n.py`; phase 26 tests incl. offscreen Qt RTL switch |
+| Packaging: reproducible PyInstaller build + SHA-256 sidecar | `Verified` (build + checksum); packaged execution blocked by host policy | `tools/build_desktop.py`: one-file build **128.3 MiB**, SHA-256 `9fedbfb7…3cea5`, sidecar verified via `--check` (exit 0); running the exe is refused on this workstation by Windows application-control policy (WinError 4551, unsigned binary) — recorded as the environmental blocker with the exact command, not bypassed |
+| SCF chart provisioning at first run; invoice/approval/OCR-correction/user-management UI; signed installer distribution | **`Open`** | `docs/DESKTOP_APPLICATION.md` §8.1 (exact next increments; no aspirational claims) |
+
 ---
 
 ## 4. Residual Risks & Pre-Production Sign-Off Checklist

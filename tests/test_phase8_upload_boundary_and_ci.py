@@ -1268,7 +1268,11 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
         "GET /healthz",
         "POST /api/v1/auth/token",
     ], f"unexpected public set: {sorted(public)}"
-    assert len(protected) == 14, f"expected 14 protected operations, got {len(protected)}: {sorted(protected)}"
+    # 14 original protected operations + the 5 Phase 25 read/report endpoints
+    # (accounts, products, documents, invoices, accounting/trial-balance).
+    # The count pin catches accidental surface changes; the desktop read
+    # endpoints are authenticated like every other protected operation.
+    assert len(protected) == 19, f"expected 19 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

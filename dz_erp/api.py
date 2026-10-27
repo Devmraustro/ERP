@@ -47,8 +47,10 @@ from .procurement_stock import (
 from .security_audit import (
     JsonlSecurityLog,
     StructuredRedactingLogger,
+    list_supplier_invoices_secure,
     read_source_document_file_secure,
     read_supplier_invoice_secure,
+    trial_balance_secure,
 )
 from .upload import (
     UnsupportedMediaTypeError,
@@ -623,6 +625,84 @@ def create_erp_fastapi_app(
                 reversal_invoice_id=reversal_invoice_id,
                 idempotency_key=idempotency_key,
             )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FinancialIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Read-only listing and reporting endpoints (Phase 25)
+    #
+    # These exist so an installed client application can present real data
+    # without speaking ad-hoc SQL. Scope comes from the verified credential,
+    # every listing is bounded by a clamped limit, and the two financial
+    # surfaces reuse the exact RBAC of the per-invoice read (warehouse role
+    # denied, denial audited) so a list view is never a bypass.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/accounts")
+    def api_list_accounts(
+        limit: int = 500,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """SCF chart rows for the caller's company, ordered by account code."""
+        try:
+            rows = db.list_accounts(auth.company_id, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "accounts": rows, "count": len(rows)}
+
+    @app.get("/api/v1/products")
+    def api_list_products(
+        limit: int = 500,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Product catalogue rows for the caller's company, ordered by SKU."""
+        try:
+            rows = db.list_products(auth.company_id, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "products": rows, "count": len(rows)}
+
+    @app.get("/api/v1/documents")
+    def api_list_documents(
+        limit: int = 100,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Uploaded source documents for the caller's company, newest first.
+
+        Metadata only - vault paths and digests stay internal; contents are
+        read exclusively through the audited per-document secure path.
+        """
+        try:
+            rows = db.list_source_documents(auth.company_id, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "documents": rows, "count": len(rows)}
+
+    @app.get("/api/v1/invoices")
+    def api_list_invoices(
+        limit: int = 100,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Supplier invoices for the caller's company, newest first.
+
+        Financial data: same role rule as the per-invoice read - the warehouse
+        role is refused and the refusal is audit-logged.
+        """
+        try:
+            rows = list_supplier_invoices_secure(db, auth.user_id, limit=limit)
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "invoices": rows, "count": len(rows)}
+
+    @app.get("/api/v1/accounting/trial-balance")
+    def api_trial_balance(
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Per-account POSTED debit/credit totals; refuses an unbalanced ledger."""
+        try:
+            return trial_balance_secure(db, auth.user_id)
         except (AuthorizationError, TenantIsolationError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except FinancialIntegrityError as exc:

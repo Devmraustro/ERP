@@ -428,3 +428,89 @@ One mutation initially **passed when it should have failed**: the systemd test f
 `Unknown key` lines, which is precisely the defect a typo'd directive produces. The assertion was
 corrected to treat those lines as failures, and re-running the mutation then failed as required.
 That is a test defect, not an application defect, and it is recorded rather than quietly fixed.
+
+## 2C. Phase 25 — read-only listing & reporting API for installed clients (`tests/test_phase25_read_api.py`) — `Passed`
+
+The desktop client (§2D) presents data through these endpoints instead of ad-hoc SQL, so the
+controls below are the client's controls too. Locally: **6 passed in 3.84 s** (Python 3.12.10),
+ruff clean.
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_read_endpoints_require_authentication` | All five new endpoints (`/api/v1/accounts`, `/api/v1/products`, `/api/v1/documents`, `/api/v1/invoices`, `/api/v1/accounting/trial-balance`) answer **401** without a server-issued token. |
+| `test_reference_lists_are_tenant_scoped` | Two tenants each see only their own accounts/products/documents (company scope is derived from the verified credential, never a caller argument). The document list **excludes `vault_path` and `file_sha256`** — custody facts are not list-view data. |
+| `test_unscoped_reads_are_refused_at_the_data_layer` | A `None` company scope raises `TenantIsolationError` for every read model — a missing scope is a bug, not an empty result. |
+| `test_financial_lists_refuse_warehouse_role_with_audited_denial` | The warehouse role gets **403** on the invoice list and the trial balance, and each refusal is recorded in the append-only audit log as `SECURITY_UNAUTHORIZED_ROLE_READ_BLOCKED` (targets `("supplier_invoices","list")` and `("journal_entries","trial_balance")`), raised **after commit** so the denial survives. A list view is never a bypass of the detail view. |
+| `test_invoice_list_and_trial_balance_scoped_balanced_and_posted_only` | Full verified lifecycle (create → submit → approve → post): the posted invoice is visible to its company only; the trial balance accumulates in exact `Decimal` arithmetic over **POSTED entries only** (a balanced 500.00 DZD DRAFT entry is excluded), reports `11900.00` = `11900.00` (balanced), and an empty ledger reports `0.00` for the other tenant. |
+| `test_list_limit_is_clamped` | `limit=0`, `limit=501` and `limit=abc` → **422**; `limit=1` returns exactly one row. Limits are clamped server-side (1–500). |
+
+## 2D. Phase 26 — installed desktop client (`tests/test_phase26_desktop.py`) — `Passed`
+
+The product direction becomes an installed, local-first **desktop** application (Mode A: single
+workstation with an embedded loopback service; Mode B: LAN client to a company server). The
+desktop layer is split into Qt-free modules (config, embedded service, API client, i18n — testable
+headless and on CI) and a PySide6 UI layer that is an **optional** extra (`pip install
+algerian-ai-erp[desktop]`, PySide6==6.11.2, LGPL-3.0). Design rules with regression tests:
+the client never opens the SQLite file; the embedded service is built by the same
+`serve.build_app` as a deployment and binds `127.0.0.1:0` only; the session token is memory-only;
+the persisted config is a secret-free whitelist.
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_config_persists_whitelist_only` | `config.json` contains exactly the whitelisted path/preference fields; no password/token field can persist; round-trip save → load preserves values. |
+| `test_corrupt_config_recovers_to_defaults` | A damaged config file is moved aside (kept for forensics, `config.json.corrupt-<pid>`) and defaults are restored — preferences never take accounting data down with them. |
+| `test_config_validation_refuses_bad_values` | Unknown language, `mode=server` without `server_url`, non-HTTP(S) URL → `ValueError`; defaults validate. |
+| `test_i18n_covers_both_languages_and_rtl` | FR and AR string tables are populated; `is_rtl("ar")` is true; missing keys fall back to the key, unknown languages fall back to French. |
+| `test_desktop_package_version_is_declared` | Package identity (`AlgerianERP`, `0.1.0`). |
+| `test_embedded_service_refuses_non_loopback_bind` | `host="0.0.0.0"` → `ValueError` ("loopback interface only"); a LAN-visible bind from the embedded service is a design violation, never a warning. |
+| `test_first_run_refuses_existing_installation` | Re-running first-run against a database that already has users raises and **changes nothing** — an "attacker" username cannot overwrite an existing admin. |
+| `test_mode_a_full_cycle_start_login_read_stop` | The real Mode A loop: bootstrap (company + admin, audit keys minted beside the DB) → embedded service on an **ephemeral** loopback port → `/healthz`-gated start → unauthenticated call refused locally → wrong password → **HTTP 401** → login → session, empty lists, balanced `0.00` trial balance → logout (server-side revoke) → stop. The `ERP_SECURITY_LOG_PATH` environment variable is restored after app construction (sentinel asserted), and `service.port` raises after stop. |
+| `test_smoke_command_full_cycle` | `python -m dz_erp.desktop --smoke --data-dir …` as a **subprocess**: exit 0, JSON payload with status/user/port/base_url, and the user-provided data dir survives as evidence. |
+| `test_mainwindow_constructs_and_switches_to_rtl` | (requires PySide6, run with `QT_QPA_PLATFORM=offscreen`) The real `MainWindow` constructs against a live embedded service (6 navigation views), and switching to Arabic flips the application to `RightToLeft`, back to French to `LeftToRight`. |
+
+Headless Mode A smoke (also the CI-runnable proxy for "the installed app starts"), real output on
+this workstation (Python 3.12.10, exit code 0):
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "mode": "local",
+  "base_url": "http://127.0.0.1:58263",
+  "port": 58263,
+  "data_dir": "C:\\Users\\rabdz\\AppData\\Local\\Temp\\dz-erp-smoke-doc",
+  "user": "admin",
+  "role": "admin",
+  "accounts": 0,
+  "products": 0,
+  "documents": 0,
+  "invoices": 0,
+  "trial_balance_rows": 0,
+  "total_debit_dzd": "0.00"
+}
+```
+
+Honest gaps (also in `docs/DESKTOP_APPLICATION.md` §8.1): a first-run database starts with an
+**empty chart of accounts** (the verified loader `localization.load_official_odoo_chart` is the
+designated next increment, blocked on a bundled-data story for frozen builds); invoice
+create/approve/post forms, OCR field-correction screens and user administration are not yet wired
+into the UI (API + client methods exist). Packaging is build-script + SHA-256 sidecar; an
+unsigned-installer distribution is not claimed as solved.
+
+**Full suite on this head (Windows/CPython 3.12.10, clean re-run after the two contract-pin
+fixes below): 620 passed, 20 skipped, 0 failed, exit 0** (36 min 48 s; the single warning is the
+benign third-party starlette/anyio `DeprecationWarning`). Coverage **85 %** (5,485 statements,
+804 missed): the statement count grew by ~910 with the desktop layer, and the drop from the 87 %
+Phase-24 baseline comes entirely from the two new GUI-heavy modules measured headless —
+`desktop/ui.py` (58 %; widget bodies execute only in interactive Qt) and `desktop/app.py`
+(39 %; GUI orchestration) — while the modified core modules keep their prior profiles
+(`database.py` 93 %, `api.py` 83 %). The first run of this phase had exactly two failures, both
+*contract-pin tests updated by the new surface*, never product behaviour:
+`test_pyproject_declarations_are_all_pinned_in_the_lockfile` (the lock test predated optional
+extras; re-scoped to the core `dependencies` array **plus a new stronger test** asserting both
+extras are exact-pinned and PySide6 stays out of the headless lockfile) and
+`test_openapi_contract_declares_exactly_the_public_operations` (protected-operation count pinned
+at 14 → 19 for the five new authenticated read endpoints; the public set is unchanged). Both
+re-verified green with their files (202 passed) and in the clean full run above. CI for this
+exact head is pending the authorized push (the workflow triggers on `pull_request`), which is
+reported, not assumed.

@@ -41,6 +41,17 @@ dev = [
     # Static check used by CI; see [tool.ruff] below.
     "ruff==0.14.0",
 ]
+# Native desktop UI. Optional on purpose: the headless CI matrix (and every
+# server deployment) installs without it, and the Qt-free desktop modules
+# (config/service/api_client/i18n) keep working without PySide6. 6.11.2 is
+# the conservative pin - the current stable line rather than the 2.5-week-old
+# 6.12.0 - under the LGPL-3.0 licence already used by this project.
+desktop = [
+    "PySide6==6.11.2",
+]
+
+[project.scripts]
+dz-erp = "dz_erp.desktop.app:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

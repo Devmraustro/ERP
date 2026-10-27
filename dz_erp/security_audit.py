@@ -489,6 +489,79 @@ def read_source_document_file_secure(
     return raw_bytes
 
 
+def list_supplier_invoices_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    *,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """List supplier invoices under the same RBAC as the per-invoice read.
+
+    The company scope is derived from the verified ``users`` row, never from a
+    caller argument, and the warehouse-role denial is audited (and committed)
+    exactly like the single-invoice read before the error is raised - a list
+    view must not become a way to read financial data a detail view denies.
+    """
+    denial: Optional[Exception] = None
+    scoped_company_id: Optional[int] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        elif user["role"] == "warehouse":
+            db.append_audit_event(
+                conn=conn,
+                company_id=user["company_id"],
+                actor_user_id=requesting_user_id,
+                action_type="SECURITY_UNAUTHORIZED_ROLE_READ_BLOCKED",
+                target_model="supplier_invoices",
+                target_id="list",
+                after_state={"role": user["role"]},
+            )
+            denial = AuthorizationError("Warehouse role is not permitted to read financial invoices.")
+        else:
+            scoped_company_id = int(user["company_id"])
+
+    if denial is not None:
+        raise denial
+    assert scoped_company_id is not None
+    return db.list_supplier_invoices(scoped_company_id, limit=limit)
+
+
+def trial_balance_secure(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
+    """Trial balance under the same RBAC as invoice reads.
+
+    The ledger is financial data: the warehouse role is denied with an audited
+    event, and the report is computed for the requester's own company only.
+    """
+    denial: Optional[Exception] = None
+    scoped_company_id: Optional[int] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        elif user["role"] == "warehouse":
+            db.append_audit_event(
+                conn=conn,
+                company_id=user["company_id"],
+                actor_user_id=requesting_user_id,
+                action_type="SECURITY_UNAUTHORIZED_ROLE_READ_BLOCKED",
+                target_model="journal_entries",
+                target_id="trial_balance",
+                after_state={"role": user["role"]},
+            )
+            denial = AuthorizationError("Warehouse role is not permitted to read the ledger.")
+        else:
+            scoped_company_id = int(user["company_id"])
+
+    if denial is not None:
+        raise denial
+    assert scoped_company_id is not None
+    return db.trial_balance(scoped_company_id)
+
+
 def create_encrypted_backup(
     db: ERPDatabase,
     vault: PrivateDocumentVault,

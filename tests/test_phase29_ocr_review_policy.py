@@ -354,6 +354,38 @@ def test_approval_recheck_refuses_a_document_disturbed_after_submit(tmp_path: Pa
     assert decided["workflow_state"] == "Rejected"
 
 
+def test_approval_rechecks_invoice_payload_against_reviewed_source(tmp_path: Path) -> None:
+    """A payload altered after submission must be blocked at approval too."""
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    submitted = submit_invoice_for_approval(
+        db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"]
+    )
+    assert submitted["workflow_state"] == "PendingApproval"
+
+    # Simulate an out-of-band payload change after the submit-time check.
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoices SET amount_ht_dzd = ? WHERE company_id = ? AND id = ?",
+            ("2000.00", 1, invoice["invoice_id"]),
+        )
+
+    with pytest.raises(FinancialIntegrityError, match="AMOUNT_HT_DZD_SOURCE_MISMATCH"):
+        decide_invoice_approval(
+            db, company_id=1, approver_user_id=3,
+            invoice_id=invoice["invoice_id"], approve=True,
+        )
+
+    assert any(
+        action[1] == "INVOICE_APPROVAL_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
 def test_reviewed_source_invoice_number_must_match_invoice_payload(tmp_path: Path) -> None:
     db, vault, _ = _make_env(tmp_path)
     doc = _upload_standard_doc(db, vault)

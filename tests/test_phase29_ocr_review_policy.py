@@ -169,6 +169,7 @@ def _make_invoice(
     document_id=None,
     *,
     invoice_no: str = "FAC-2026-0001",
+    invoice_date: str = "2026-02-14",
     line_qty: str = "2",
     unit_price: str = "500.00",
     amount_ht: str = "1000.00",
@@ -179,7 +180,7 @@ def _make_invoice(
     line_ht = str((Decimal(line_qty) * Decimal(unit_price)).quantize(Decimal("0.01")))
     return create_and_validate_supplier_invoice(
         db=db, company_id=1, user_id=user_id, supplier_id=7,
-        supplier_invoice_no=invoice_no, invoice_date="2026-02-14",
+        supplier_invoice_no=invoice_no, invoice_date=invoice_date,
         lines=[{"sku": "SKU-1", "description": "Widgets", "qty": line_qty,
                 "unit_price_dzd": unit_price, "tax_rate": "19", "line_ht_dzd": line_ht}],
         amount_ht_dzd=amount_ht, amount_tva_dzd=amount_tva, amount_ttc_dzd=amount_ttc,
@@ -487,7 +488,8 @@ def test_manual_transcription_route_is_satisfiable_with_honest_provenance(tmp_pa
     # And the invoice lifecycle runs on the transcribed document.
     invoice = _make_invoice(
         db, doc["document_id"], invoice_no="FAC-AR-2026-77",
-        line_qty="1", amount_ht="500.00", amount_tva="95.00", amount_ttc="595.00",
+        invoice_date="2026-02-20", line_qty="1",
+        amount_ht="500.00", amount_tva="95.00", amount_ttc="595.00",
     )
     submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
     approved = decide_invoice_approval(

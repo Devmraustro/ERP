@@ -132,22 +132,28 @@ def _source_invoice_mismatches(
         mismatches.append("SUPPLIER_NIF_SOURCE_MISMATCH")
 
     source_lines = evaluation["lines"]
-    invoice_lines = conn.execute(
-        "SELECT qty FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ? ORDER BY id",
-        (company_id, invoice["id"]),
-    ).fetchall()
-    if len(source_lines) != len(invoice_lines):
-        mismatches.append("LINE_COUNT_SOURCE_MISMATCH")
-    else:
-        for index, (source_line, invoice_line) in enumerate(zip(source_lines, invoice_lines), start=1):
-            try:
-                source_qty = round_qty(to_decimal(str(source_line["value"])))
-                invoice_qty = round_qty(to_decimal(str(invoice_line["qty"])))
-            except (ValueError, TypeError, ArithmeticError):
-                mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_UNPARSEABLE")
-                continue
-            if source_qty != invoice_qty:
-                mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_MISMATCH")
+    # The review policy intentionally allows documents with no extracted line
+    # items: the invoice lines are then entered by a human and there is no
+    # source quantity evidence to compare. Do not interpret "no extracted
+    # lines" as "the invoice must have zero lines". When source lines exist,
+    # their count and quantities must match exactly.
+    if source_lines:
+        invoice_lines = conn.execute(
+            "SELECT qty FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ? ORDER BY id",
+            (company_id, invoice["id"]),
+        ).fetchall()
+        if len(source_lines) != len(invoice_lines):
+            mismatches.append("LINE_COUNT_SOURCE_MISMATCH")
+        else:
+            for index, (source_line, invoice_line) in enumerate(zip(source_lines, invoice_lines), start=1):
+                try:
+                    source_qty = round_qty(to_decimal(str(source_line["value"])))
+                    invoice_qty = round_qty(to_decimal(str(invoice_line["qty"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_UNPARSEABLE")
+                    continue
+                if source_qty != invoice_qty:
+                    mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_MISMATCH")
 
     return mismatches
 

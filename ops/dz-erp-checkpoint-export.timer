@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the DZ ERP ledger checkpoint export every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=30s
+# Fire missed runs after downtime: a gap in checkpoints widens the window in
+# which truncation is undetectable.
+Persistent=true
+Unit=dz-erp-checkpoint-export.service
+
+[Install]
+WantedBy=timers.target

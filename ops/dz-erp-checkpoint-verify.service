@@ -1,0 +1,25 @@
+# Verify the ledger against the retained off-host checkpoint (control S4).
+# Fails (exit 3) on truncation, a mismatched head, or a checkpoint older than
+# --max-checkpoint-age-days, so `systemctl --failed` and any journal alerting see it.
+[Unit]
+Description=DZ ERP rotation ledger checkpoint verification
+Documentation=file:/srv/dz-erp/docs/KEY_LEDGER_CHECKPOINT_RUNBOOK.md
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+Environment=ERP_STATE=/srv/dz-erp
+Environment=CHECKPOINT_DIR=/mnt/audit-offsite/checkpoints
+# Twice the export interval: an older checkpoint means exports have been failing.
+Environment=MAX_CHECKPOINT_AGE_DAYS=2
+ExecStart=/usr/bin/env python -m dz_erp.rotate_keys monitor \
+    --vault ${ERP_STATE}/vault \
+    --checkpoint-verify ${CHECKPOINT_DIR}/vault.rotation.checkpoint.json \
+    --max-checkpoint-age-days ${MAX_CHECKPOINT_AGE_DAYS}
+Restart=no
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify the DZ ERP ledger against the off-host checkpoint daily
+
+[Timer]
+OnBootSec=15min
+OnCalendar=*-*-* 06:17:00
+AccuracySec=1min
+Persistent=true
+Unit=dz-erp-checkpoint-verify.service
+
+[Install]
+WantedBy=timers.target

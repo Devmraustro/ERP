@@ -1,0 +1,745 @@
+{
+  "specs": [
+    {
+      "doc_id": "BENCH-001",
+      "stratum": "S1_FRENCH_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 1",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0001",
+      "invoice_date": "2026-10-01",
+      "supplier_nif": "001216099123401",
+      "supplier_rc": "16/00-0991201B12",
+      "supplier_ai": "16019912301",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "6000.00",
+      "amount_tva_dzd": "1140.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "7140.00",
+      "lines": [
+        {
+          "sku": "PRD-001",
+          "description": "COMPOSANT INDUSTRIEL 1",
+          "qty": "5.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "6000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-002",
+      "stratum": "S1_FRENCH_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 2",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0002",
+      "invoice_date": "2026-10-02",
+      "supplier_nif": "001216099123402",
+      "supplier_rc": "16/00-0991202B12",
+      "supplier_ai": "16019912302",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "25000.00",
+      "amount_tva_dzd": "4750.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "29750.00",
+      "lines": [
+        {
+          "sku": "PRD-002",
+          "description": "COMPOSANT INDUSTRIEL 2",
+          "qty": "10.00",
+          "unit_price_dzd": "2500.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "25000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-003",
+      "stratum": "S1_FRENCH_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 3",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0003",
+      "invoice_date": "2026-10-03",
+      "supplier_nif": "001216099123403",
+      "supplier_rc": "16/00-0991203B12",
+      "supplier_ai": "16019912303",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "18000.00",
+      "amount_tva_dzd": "1620.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "19620.00",
+      "lines": [
+        {
+          "sku": "PRD-003",
+          "description": "COMPOSANT INDUSTRIEL 3",
+          "qty": "15.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "9.0",
+          "line_ht_dzd": "18000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-004",
+      "stratum": "S2_BILINGUAL_FR_AR_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 4",
+      "arabic_header": "شركة أطلس للتجهيز الصناعي - فاتورة",
+      "invoice_number": "FAC-2026-0004",
+      "invoice_date": "2026-10-04",
+      "supplier_nif": "001216099123404",
+      "supplier_rc": "16/00-0991204B12",
+      "supplier_ai": "16019912304",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "6000.00",
+      "amount_tva_dzd": "1140.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "7140.00",
+      "lines": [
+        {
+          "sku": "PRD-004",
+          "description": "COMPOSANT INDUSTRIEL 4",
+          "qty": "5.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "6000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-005",
+      "stratum": "S2_BILINGUAL_FR_AR_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 5",
+      "arabic_header": "شركة أطلس للتجهيز الصناعي - فاتورة",
+      "invoice_number": "FAC-2026-0005",
+      "invoice_date": "2026-10-05",
+      "supplier_nif": "001216099123405",
+      "supplier_rc": "16/00-0991205B12",
+      "supplier_ai": "16019912305",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "25000.00",
+      "amount_tva_dzd": "4750.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "29750.00",
+      "lines": [
+        {
+          "sku": "PRD-005",
+          "description": "COMPOSANT INDUSTRIEL 5",
+          "qty": "10.00",
+          "unit_price_dzd": "2500.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "25000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-006",
+      "stratum": "S2_BILINGUAL_FR_AR_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 6",
+      "arabic_header": "شركة أطلس للتجهيز الصناعي - فاتورة",
+      "invoice_number": "FAC-2026-0006",
+      "invoice_date": "2026-10-06",
+      "supplier_nif": "001216099123406",
+      "supplier_rc": "16/00-0991206B12",
+      "supplier_ai": "16019912306",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "18000.00",
+      "amount_tva_dzd": "1620.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "19620.00",
+      "lines": [
+        {
+          "sku": "PRD-006",
+          "description": "COMPOSANT INDUSTRIEL 6",
+          "qty": "15.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "9.0",
+          "line_ht_dzd": "18000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-007",
+      "stratum": "S3_CASH_TIMBRE_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 7",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0007",
+      "invoice_date": "2026-10-07",
+      "supplier_nif": "001216099123407",
+      "supplier_rc": "16/00-0991207B12",
+      "supplier_ai": "16019912307",
+      "payment_method": "CASH",
+      "amount_ht_dzd": "6000.00",
+      "amount_tva_dzd": "1140.00",
+      "amount_timbre_dzd": "71.40",
+      "amount_ttc_dzd": "7211.40",
+      "lines": [
+        {
+          "sku": "PRD-007",
+          "description": "COMPOSANT INDUSTRIEL 7",
+          "qty": "5.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "6000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-008",
+      "stratum": "S3_CASH_TIMBRE_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 8",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0008",
+      "invoice_date": "2026-10-08",
+      "supplier_nif": "001216099123408",
+      "supplier_rc": "16/00-0991208B12",
+      "supplier_ai": "16019912308",
+      "payment_method": "CASH",
+      "amount_ht_dzd": "25000.00",
+      "amount_tva_dzd": "4750.00",
+      "amount_timbre_dzd": "297.50",
+      "amount_ttc_dzd": "30047.50",
+      "lines": [
+        {
+          "sku": "PRD-008",
+          "description": "COMPOSANT INDUSTRIEL 8",
+          "qty": "10.00",
+          "unit_price_dzd": "2500.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "25000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-009",
+      "stratum": "S3_CASH_TIMBRE_DIGITAL_PDF",
+      "mime_type": "application/pdf",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 9",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0009",
+      "invoice_date": "2026-10-09",
+      "supplier_nif": "001216099123409",
+      "supplier_rc": "16/00-0991209B12",
+      "supplier_ai": "16019912309",
+      "payment_method": "CASH",
+      "amount_ht_dzd": "18000.00",
+      "amount_tva_dzd": "1620.00",
+      "amount_timbre_dzd": "196.20",
+      "amount_ttc_dzd": "19816.20",
+      "lines": [
+        {
+          "sku": "PRD-009",
+          "description": "COMPOSANT INDUSTRIEL 9",
+          "qty": "15.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "9.0",
+          "line_ht_dzd": "18000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-010",
+      "stratum": "S4_CLEAN_RASTER_SCAN_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 10",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0010",
+      "invoice_date": "2026-10-10",
+      "supplier_nif": "001216099123410",
+      "supplier_rc": "16/00-0991210B12",
+      "supplier_ai": "16019912310",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "6000.00",
+      "amount_tva_dzd": "1140.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "7140.00",
+      "lines": [
+        {
+          "sku": "PRD-010",
+          "description": "COMPOSANT INDUSTRIEL 10",
+          "qty": "5.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "6000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-011",
+      "stratum": "S4_CLEAN_RASTER_SCAN_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 11",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0011",
+      "invoice_date": "2026-10-11",
+      "supplier_nif": "001216099123411",
+      "supplier_rc": "16/00-0991211B12",
+      "supplier_ai": "16019912311",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "25000.00",
+      "amount_tva_dzd": "4750.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "29750.00",
+      "lines": [
+        {
+          "sku": "PRD-011",
+          "description": "COMPOSANT INDUSTRIEL 11",
+          "qty": "10.00",
+          "unit_price_dzd": "2500.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "25000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-012",
+      "stratum": "S4_CLEAN_RASTER_SCAN_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 12",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0012",
+      "invoice_date": "2026-10-12",
+      "supplier_nif": "001216099123412",
+      "supplier_rc": "16/00-0991212B12",
+      "supplier_ai": "16019912312",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "18000.00",
+      "amount_tva_dzd": "1620.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "19620.00",
+      "lines": [
+        {
+          "sku": "PRD-012",
+          "description": "COMPOSANT INDUSTRIEL 12",
+          "qty": "15.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "9.0",
+          "line_ht_dzd": "18000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-013",
+      "stratum": "S5_STAMPED_SKEWED_SCAN_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 13",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0013",
+      "invoice_date": "2026-10-13",
+      "supplier_nif": "001216099123413",
+      "supplier_rc": "16/00-0991213B12",
+      "supplier_ai": "16019912313",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "6000.00",
+      "amount_tva_dzd": "1140.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "7140.00",
+      "lines": [
+        {
+          "sku": "PRD-013",
+          "description": "COMPOSANT INDUSTRIEL 13",
+          "qty": "5.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "6000.00"
+        }
+      ],
+      "skew_deg": 0.8,
+      "blur_radius": 0.3,
+      "add_wet_stamp": true,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-014",
+      "stratum": "S5_STAMPED_SKEWED_SCAN_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 14",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0014",
+      "invoice_date": "2026-10-14",
+      "supplier_nif": "001216099123414",
+      "supplier_rc": "16/00-0991214B12",
+      "supplier_ai": "16019912314",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "25000.00",
+      "amount_tva_dzd": "4750.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "29750.00",
+      "lines": [
+        {
+          "sku": "PRD-014",
+          "description": "COMPOSANT INDUSTRIEL 14",
+          "qty": "10.00",
+          "unit_price_dzd": "2500.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "25000.00"
+        }
+      ],
+      "skew_deg": 0.8,
+      "blur_radius": 0.3,
+      "add_wet_stamp": true,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-015",
+      "stratum": "S5_STAMPED_SKEWED_SCAN_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 15",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0015",
+      "invoice_date": "2026-10-15",
+      "supplier_nif": "001216099123415",
+      "supplier_rc": "16/00-0991215B12",
+      "supplier_ai": "16019912315",
+      "payment_method": "BANK_TRANSFER",
+      "amount_ht_dzd": "18000.00",
+      "amount_tva_dzd": "1620.00",
+      "amount_timbre_dzd": "0.00",
+      "amount_ttc_dzd": "19620.00",
+      "lines": [
+        {
+          "sku": "PRD-015",
+          "description": "COMPOSANT INDUSTRIEL 15",
+          "qty": "15.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "9.0",
+          "line_ht_dzd": "18000.00"
+        }
+      ],
+      "skew_deg": 0.8,
+      "blur_radius": 0.3,
+      "add_wet_stamp": true,
+      "thermal_style": false
+    },
+    {
+      "doc_id": "BENCH-016",
+      "stratum": "S6_THERMAL_CASH_RECEIPT_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 16",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0016",
+      "invoice_date": "2026-10-16",
+      "supplier_nif": "001216099123416",
+      "supplier_rc": "16/00-0991216B12",
+      "supplier_ai": "16019912316",
+      "payment_method": "CASH",
+      "amount_ht_dzd": "6000.00",
+      "amount_tva_dzd": "1140.00",
+      "amount_timbre_dzd": "71.40",
+      "amount_ttc_dzd": "7211.40",
+      "lines": [
+        {
+          "sku": "PRD-016",
+          "description": "COMPOSANT INDUSTRIEL 16",
+          "qty": "5.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "6000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": true
+    },
+    {
+      "doc_id": "BENCH-017",
+      "stratum": "S6_THERMAL_CASH_RECEIPT_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 17",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0017",
+      "invoice_date": "2026-10-17",
+      "supplier_nif": "001216099123417",
+      "supplier_rc": "16/00-0991217B12",
+      "supplier_ai": "16019912317",
+      "payment_method": "CASH",
+      "amount_ht_dzd": "25000.00",
+      "amount_tva_dzd": "4750.00",
+      "amount_timbre_dzd": "297.50",
+      "amount_ttc_dzd": "30047.50",
+      "lines": [
+        {
+          "sku": "PRD-017",
+          "description": "COMPOSANT INDUSTRIEL 17",
+          "qty": "10.00",
+          "unit_price_dzd": "2500.00",
+          "tax_rate": "19.0",
+          "line_ht_dzd": "25000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": true
+    },
+    {
+      "doc_id": "BENCH-018",
+      "stratum": "S6_THERMAL_CASH_RECEIPT_PNG",
+      "mime_type": "image/png",
+      "supplier_name": "SARL ATLAS EQUIPEMENT 18",
+      "arabic_header": null,
+      "invoice_number": "FAC-2026-0018",
+      "invoice_date": "2026-10-18",
+      "supplier_nif": "001216099123418",
+      "supplier_rc": "16/00-0991218B12",
+      "supplier_ai": "16019912318",
+      "payment_method": "CASH",
+      "amount_ht_dzd": "18000.00",
+      "amount_tva_dzd": "1620.00",
+      "amount_timbre_dzd": "196.20",
+      "amount_ttc_dzd": "19816.20",
+      "lines": [
+        {
+          "sku": "PRD-018",
+          "description": "COMPOSANT INDUSTRIEL 18",
+          "qty": "15.00",
+          "unit_price_dzd": "1200.00",
+          "tax_rate": "9.0",
+          "line_ht_dzd": "18000.00"
+        }
+      ],
+      "skew_deg": 0.0,
+      "blur_radius": 0.0,
+      "add_wet_stamp": false,
+      "thermal_style": true
+    }
+  ],
+  "report": {
+    "dataset_size_documents": 18,
+    "dataset_provenance": "Synthetic authorized Algerian commercial invoices generated via ReportLab/Pillow with ground-truth manifest",
+    "overall_field_exact_match_rate": 0.9097,
+    "overall_cer": 0.1113,
+    "table_line_association_accuracy": 1.0,
+    "arithmetic_consistency": {
+      "documents": 18,
+      "headers_evaluated": 18,
+      "headers_consistent": 18,
+      "line_sums_evaluated": 18,
+      "line_sums_consistent": 18,
+      "note": "Header consistency requires HT + TVA (+ a recognised droit de timbre) to reproduce TTC under 2-decimal DZD rounding; documents missing a needed field are excluded from the evaluated count, not scored as failures."
+    },
+    "failure_categories": {
+      "missing": 13,
+      "mismatch": 0,
+      "note": "missing = field not extracted at all; mismatch = extracted value differs from the ground truth. Per-field counts are in by_field[<field>]['failures']."
+    },
+    "expected_calibration_error_ece": 0.0132,
+    "calibration_observations": 59,
+    "calibration_excluded_no_confidence": 85,
+    "calibration_note": "ECE is computed only over fields whose extraction path measured a recognition confidence. Native PDF extraction measures none, and fields with no confidence are excluded rather than imputed.",
+    "latency_mean_ms": 3702.61,
+    "latency_p50_ms": 3252.74,
+    "latency_max_ms": 8302.01,
+    "by_field": {
+      "invoice_number": {
+        "total": 18,
+        "extracted": 17,
+        "exact_match": 17,
+        "exact_match_rate": 0.9444,
+        "precision": 1.0,
+        "recall": 0.9444,
+        "cer": 0.0556,
+        "failures": {
+          "missing": 1,
+          "mismatch": 0
+        }
+      },
+      "supplier_nif": {
+        "total": 18,
+        "extracted": 18,
+        "exact_match": 18,
+        "exact_match_rate": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
+      },
+      "supplier_rc": {
+        "total": 18,
+        "extracted": 12,
+        "exact_match": 12,
+        "exact_match_rate": 0.6667,
+        "precision": 1.0,
+        "recall": 0.6667,
+        "cer": 0.3333,
+        "failures": {
+          "missing": 6,
+          "mismatch": 0
+        }
+      },
+      "supplier_ai": {
+        "total": 18,
+        "extracted": 12,
+        "exact_match": 12,
+        "exact_match_rate": 0.6667,
+        "precision": 1.0,
+        "recall": 0.6667,
+        "cer": 0.3333,
+        "failures": {
+          "missing": 6,
+          "mismatch": 0
+        }
+      },
+      "invoice_date": {
+        "total": 18,
+        "extracted": 18,
+        "exact_match": 18,
+        "exact_match_rate": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
+      },
+      "amount_ht_dzd": {
+        "total": 18,
+        "extracted": 18,
+        "exact_match": 18,
+        "exact_match_rate": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
+      },
+      "amount_tva_dzd": {
+        "total": 18,
+        "extracted": 18,
+        "exact_match": 18,
+        "exact_match_rate": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
+      },
+      "amount_ttc_dzd": {
+        "total": 18,
+        "extracted": 18,
+        "exact_match": 18,
+        "exact_match_rate": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "cer": 0.0,
+        "failures": {
+          "missing": 0,
+          "mismatch": 0
+        }
+      }
+    },
+    "by_stratum": {
+      "S1_FRENCH_DIGITAL_PDF": {
+        "docs": 3,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 33.81
+      },
+      "S2_BILINGUAL_FR_AR_DIGITAL_PDF": {
+        "docs": 3,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 39.89
+      },
+      "S3_CASH_TIMBRE_DIGITAL_PDF": {
+        "docs": 3,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 35.9
+      },
+      "S4_CLEAN_RASTER_SCAN_PNG": {
+        "docs": 3,
+        "field_accuracy": 0.7083,
+        "mean_latency_ms": 7480.25
+      },
+      "S5_STAMPED_SKEWED_SCAN_PNG": {
+        "docs": 3,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 7535.79
+      },
+      "S6_THERMAL_CASH_RECEIPT_PNG": {
+        "docs": 3,
+        "field_accuracy": 0.75,
+        "mean_latency_ms": 7090.01
+      }
+    },
+    "by_language": {
+      "french_digital": {
+        "docs": 6,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 34.85
+      },
+      "bilingual_fr_ar": {
+        "docs": 3,
+        "field_accuracy": 1.0,
+        "mean_latency_ms": 39.89
+      },
+      "french_raster": {
+        "docs": 9,
+        "field_accuracy": 0.8194,
+        "mean_latency_ms": 7368.68
+      }
+    },
+    "language_coverage_note": "Groups measured on this synthetic set: french_digital, bilingual_fr_ar and french_raster. A scanned Arabic-only stratum is intentionally absent: the bundled recognition head cannot read it (docs/OCR_EVALUATION_PROTOCOL.md §7, risk O3); such documents are routed to manual transcription rather than mis-read."
+  }
+}

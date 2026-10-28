@@ -40,8 +40,15 @@ audited cross-company denials and byte-exact document content (`tests/test_phase
 5/5), and the desktop review UI — invoice review dialog with honest confidence display, human
 correction preserving raw OCR, explicit submit→approve→post with server-enforced segregation of
 duties and duplicate-post refusal surfaced as errors (`tests/test_phase27_desktop_ui.py` 4/4).
-The OpenAPI protected-operation pin is 19 → 23. Full local suite at the Phase 27 head:
-**661 passed, 20 skipped, 0 failed, exit 0** (19 min 18 s; 85 % coverage — see §2C–2E of
+Phase 28 adds user administration end to end: three admin-only endpoints (tenant-scoped account
+listing without credential material, account creation with role validation, PBKDF2 hashing and an
+8-character password floor at the API boundary, confirmation-backed deactivation that ends the
+target's live session at the next request; every non-admin attempt is audit-logged, unknown and
+cross-tenant targets are conflated to a single 403 — `tests/test_phase28_user_admin.py` 12/12) and
+the desktop users view (visible only to the server-resolved `admin` role; creation dialog;
+confirmation-gated deactivation — `tests/test_phase28_desktop_users_ui.py` 7/7, offscreen Qt).
+The OpenAPI protected-operation pin is 19 → 26. Full local suite at the Phase 28 head:
+**686 passed, 20 skipped, 0 failed, exit 0** (24 min 51 s; 85 % coverage — see §2C–2F of
 `docs/QA_TEST_MATRIX_AND_RESULTS.md`). The PyInstaller one-file build succeeds
 (128.3 MiB, SHA-256 sidecar verified) and now bundles the vendored SCF data for frozen builds;
 executing the unsigned exe is blocked by this workstation's application-control policy

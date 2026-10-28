@@ -166,14 +166,19 @@ invoices (**review dialog: extraction fields with honest confidence display,
 human correction via the authorized API, explicit submit-approval → approval →
 posting** with the server's segregation-of-duties and duplicate protections
 surfaced as readable errors; image/PDF preview), **invoice creation form
-(single-line MVP)**, trial balance; French/Arabic switching with RTL layout;
+(single-line MVP)**, trial balance; **user administration (administrators
+only: tenant-scoped account list without credential material, account
+creation with role picker and an 8-character minimum password — NIST
+SP 800-63B floor, enforced at the API boundary and restated as a dialog
+hint — and confirmation-gated deactivation that ends the target's live
+session at the next request)**; French/Arabic switching with RTL layout;
 about dialog; clean shutdown with token revocation; long operations (upload,
-review actions) run off the GUI thread.
+review actions) run off the GUI thread. The users view is visible only when
+the server-resolved session role is `admin` (the nav row is hidden, never
+removed, for other roles).
 
 Known product gaps, deliberately not faked:
 
-- User administration screens are not yet in the UI (the verified API and
-  client methods exist).
 - Multi-line invoice editing, purchase-order/GRN matching screens and printed
   reports are not in the UI; the API contract supports them.
 - Arabic OCR accuracy is **not** claimed: the extraction fields carry honest,

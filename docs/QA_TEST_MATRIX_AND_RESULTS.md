@@ -597,3 +597,70 @@ those three pass in isolation and in file-order sequence with the Phase 27 files
 (269 passed in 2 min 04 s), and the clean re-run above is the recorded result. No test was
 suppressed, weakened or skipped to obtain it. CI for this exact head is pending the authorized
 push (the workflow triggers on `pull_request`), which is reported, not assumed.
+
+## 2F. Phase 28 — user administration end to end - `Passed`
+
+Phase 28 closes the #1 documented product gap: **user administration**, implemented end to end at
+every boundary — three authenticated endpoints (`GET /api/v1/users`,
+`POST /api/v1/users`, `POST /api/v1/users/{user_id}/deactivate`), the secure wrappers that make the
+admin role, tenant scope and audit trail server-derived facts (never client claims), and the
+desktop users view (creation dialog with role picker, confirmation-gated deactivation) visible only
+when the **server-resolved** session role is `admin`. Locally (Python 3.12.10, ruff clean):
+
+- `tests/test_phase28_user_admin.py` — **12 passed in 7.99 s**
+- `tests/test_phase28_desktop_users_ui.py` — **7 passed in 26.72 s** (offscreen Qt against the real
+  embedded service)
+- Focused regression after the OpenAPI/nav changes — `tests/test_phase8_upload_boundary_and_ci.py`
+  + `test_phase25_read_api.py` + `test_phase26_desktop.py` + `test_phase27_desktop_ui.py` +
+  `test_phase27_review_api.py`: **231 passed in 81.29 s**
+
+### A. User administration API (`tests/test_phase28_user_admin.py`)
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_user_endpoints_require_authentication` | All three endpoints answer **401** without a server-issued credential. |
+| `test_non_admin_is_refused_and_attempt_audited` | Every non-admin attempt (list, create, deactivate) is **403** and writes one `SECURITY_USER_ADMIN_ACCESS_BLOCKED` event (actor = the attempted actor) **committed before the refusal is raised** — the transaction context manager rolls back on an in-scope raise, so the guard raises after the commit; nothing changes server-side. |
+| `test_admin_lists_only_own_tenant_and_never_credential_material` | The listing is scoped from the verified credential (tenant Beta's rows never appear in tenant Alpha's list) and the read model exposes only `id/username/role/is_active/branch_id/password_updated_at` — **never `password_hash`/`api_token_hash`**. |
+| `test_admin_creates_user_who_can_then_authenticate` | Creation returns the account, it appears in the list as active, the password was really hashed into a **working credential** (fresh token login + session), and `AUTH_USER_CREATED` is audited with the acting admin as actor. |
+| `test_create_rejects_duplicate_username` / `_unknown_role` / `_short_password` / `_blank_username` | Uniqueness (schema-enforced) surfaces as **409**; an unknown role and a **7-character** password are **422** at the API boundary (NIST SP 800-63B floor; the only authority — the dialog merely restates it as a hint); a blank username is **422**. |
+| `test_deactivation_takes_effect_for_live_and_fresh_sessions` | After deactivation the target's **live token is rejected at the next request** (`authenticate` re-reads `is_active` server-side — no token-revocation step to forget) and fresh login is refused; `AUTH_USER_DEACTIVATED` is audited. |
+| `test_admin_cannot_deactivate_self` | Self-deactivation is a **409** conflict. |
+| `test_deactivating_an_inactive_user_conflicts` | Deactivating an already-inactive account is a **409** with the account named. |
+| `test_cross_tenant_and_unknown_targets_are_conflated` | A foreign-tenant id and a nonexistent id both answer **403 with the identical detail** — no tenant- or id-existence oracle; the foreign clerk remains untouched and authenticated. |
+
+### B. Desktop users UI (`tests/test_phase28_desktop_users_ui.py`, offscreen Qt against the real embedded service)
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_users_view_visible_for_admin_and_lists_accounts` | The nav row is hidden until `set_session` adopts the **server-resolved** role; for `admin` it becomes visible, the view lists the tenant's accounts (role + active state; no credential material) and the FR/AR labels resolve. |
+| `test_users_view_hidden_for_non_admin` | A clerk session keeps the row hidden (hidden, never removed — row→stack-index mapping stays stable for every other view). |
+| `test_create_user_via_dialog_then_created_account_logs_in` | The dialog drives the authorized API: the created account appears as active, **logs in over HTTP** with the password typed in the dialog, and `AUTH_USER_CREATED` carries the acting admin as actor. |
+| `test_create_dialog_local_validation_makes_no_api_call` | A blank username and a 7-character password are refused locally with readable messages and **no worker started** (no API call). |
+| `test_create_dialog_surfaces_server_rejection` | A duplicate username (server 409) is surfaced inside the dialog ("Création impossible… HTTP 409…") — never swallowed, dialog not accepted. |
+| `test_deactivation_confirmation_takes_effect_and_is_audited` | Deactivation requires confirmation; afterwards the row shows "désactivé", the target's **live token is rejected at the next request** (401), `AUTH_USER_DEACTIVATED` carries the acting admin as actor, and no error dialog fired. |
+| `test_deactivation_without_selection_shows_guidance` | With no row selected, a readable guidance message is shown instead of a silent no-op. |
+
+### C. Contract updates and cross-phase consistency
+
+- OpenAPI protected-operation pin: **23 → 26** (`PROTECTED_GETS` extended with `/api/v1/users`).
+  The public set is unchanged; the deny-by-default OpenAPI declaration covered the new endpoints
+  automatically.
+- `desktop/ui.py` gained the `users` view (nav row + table + create dialog + deactivate button) and
+  `MainWindow.set_session` now stores the server-resolved role that drives the row visibility; the
+  phase-26/27 desktop suites re-ran green against the enlarged view set (231 passed, above).
+
+**Full suite at the Phase 28 head** (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`,
+`pytest tests -q --cov=dz_erp --cov-report=term`): **686 passed, 20 skipped, 0 failed, exit 0 in
+24 min 51 s** (pytest's internal duration; the run was suspended by the harness at conversation
+turn boundaries — the phase-9 process-boundary subprocess workers were observed active and
+cycling throughout, so the wall clock across turns overstates it; the healthy Phase 27 reference
+is 19 min 18 s). Coverage **85 %** (6,239 statements, 939 missed; up from 6,033 statements at the
+Phase 27 head). Per module: `api.py` 87 % (322 → 364 statements), `database.py` 94 %,
+`security_audit.py` 79 % (469 → 501), `localization.py` 94 %, `desktop/service.py` 87 %,
+`desktop/ui.py` 69 % (612 → 727; the users-view tests raised it from 63 %),
+`desktop/api_client.py` 68 %, `desktop/app.py` 39 %. The single warning is the benign third-party
+starlette/anyio `DeprecationWarning`. The total count reconciles exactly: 661 (Phase 27 head) +
+12 user-admin API + 7 users-UI tests + 6 new forged-header parametrization instances (the
+`/api/v1/users` pin × 6 header sets) = 686. No test was suppressed, weakened or skipped to obtain
+this result. CI for this exact head is pending the authorized push (the workflow triggers on
+`pull_request`), which is reported, not assumed.

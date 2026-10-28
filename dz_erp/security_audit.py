@@ -661,6 +661,124 @@ def list_stock_quants_secure(
     return db.list_stock_quants(scoped_company_id, limit=limit)
 
 
+def _require_user_admin(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
+    """Guard shared by every user-administration operation: active admin only.
+
+    A non-admin attempt is audited and committed before the refusal is
+    raised, so the blocked attempt survives in the append-only chain exactly
+    like every other authorization denial (the transaction context manager
+    rolls back on an in-scope raise, hence the post-commit raise here).
+    """
+    denial: Optional[AuthorizationError] = None
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            raise AuthorizationError("User is inactive or revoked.")
+        if user["role"] != "admin":
+            db.append_audit_event(
+                conn=conn,
+                company_id=user["company_id"],
+                actor_user_id=requesting_user_id,
+                action_type="SECURITY_USER_ADMIN_ACCESS_BLOCKED",
+                target_model="users",
+                target_id="list",
+                after_state={"role": user["role"]},
+            )
+            denial = AuthorizationError("User administration is restricted to administrators.")
+    if denial is not None:
+        raise denial
+    return dict(user)
+
+
+def list_users_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    *,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """User accounts of the requester's company, administrators only.
+
+    The scope is derived from the verified credential; the read model itself
+    never exposes credential material (password or token hashes).
+    """
+    admin = _require_user_admin(db, requesting_user_id)
+    return db.list_users(int(admin["company_id"]), limit=limit)
+
+
+def create_user_admin_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    auth_manager: Any,
+    *,
+    username: str,
+    password: str,
+    role: str,
+    branch_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Create a user in the admin's own company, under the admin guard.
+
+    Delegates the verified mechanics (role validation, PBKDF2 hashing, the
+    ``AUTH_USER_CREATED`` audit event with the acting admin as ``actor``) to
+    :class:`~dz_erp.auth.AuthManager.create_user` — no parallel
+    implementation of credential handling.
+    """
+    admin = _require_user_admin(db, requesting_user_id)
+    user = auth_manager.create_user(
+        username=username,
+        password=password,
+        role=role,
+        company_id=int(admin["company_id"]),
+        branch_id=branch_id,
+        actor_user_id=int(admin["id"]),
+    )
+    return user
+
+
+def deactivate_user_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    target_user_id: int,
+) -> Dict[str, Any]:
+    """Deactivate a user of the admin's own company, administrators only.
+
+    Refuses to deactivate the acting admin themself: the last active admin
+    must never be able to lock everyone out of an installed workstation (and
+    an admin deactivating themself mid-session is always that case here).
+    The deactivated account's tokens are rejected by ``authenticate`` from
+    the moment ``is_active`` flips (``AUTH_USER_INACTIVE_REJECTED``), so the
+    change takes effect for live sessions immediately. The deactivation is
+    itself an audited event.
+    """
+    admin = _require_user_admin(db, requesting_user_id)
+    if target_user_id == int(admin["id"]):
+        raise ValueError("An administrator cannot deactivate their own account.")
+
+    with db.transaction() as conn:
+        target = conn.execute(
+            "SELECT * FROM users WHERE id = ? AND company_id = ?",
+            (target_user_id, int(admin["company_id"])),
+        ).fetchone()
+        if not target:
+            raise TenantIsolationError("User not found in target company.")
+        if not target["is_active"]:
+            raise ValueError(f"User '{target['username']}' is already deactivated.")
+        conn.execute(
+            "UPDATE users SET is_active = 0 WHERE id = ? AND company_id = ?",
+            (target_user_id, int(admin["company_id"])),
+        )
+        db.append_audit_event(
+            conn=conn,
+            company_id=int(admin["company_id"]),
+            actor_user_id=int(admin["id"]),
+            action_type="AUTH_USER_DEACTIVATED",
+            target_model="users",
+            target_id=str(target_user_id),
+            before_state={"is_active": 1, "username": target["username"], "role": target["role"]},
+            after_state={"is_active": 0},
+        )
+    return {"user_id": target_user_id, "username": target["username"], "is_active": 0}
+
+
 def trial_balance_secure(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
     """Trial balance under the same RBAC as invoice reads.
 

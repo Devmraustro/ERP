@@ -1746,3 +1746,30 @@ class ERPDatabase:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    def list_users(self, company_id: Any, *, limit: Any = 500) -> List[Dict[str, Any]]:
+        """User accounts of one company for the administration screen.
+
+        Exposes exactly what an administrator manages — identity, role,
+        activation state, last password rotation — and deliberately excludes
+        ``password_hash`` and ``api_token_hash``: credential material is
+        never list-view data. Ordered by username for a stable screen.
+        """
+        cid = self._require_company_scope(company_id, "list_users")
+        capped = self._read_limit(limit, "list_users")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, username, role, is_active, branch_id,
+                       password_updated_at
+                FROM users
+                WHERE company_id = ?
+                ORDER BY username
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()

@@ -16,6 +16,7 @@ record bound to the presented credential.
 """
 
 import os
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -57,10 +58,13 @@ from .procurement_stock import (
 from .security_audit import (
     JsonlSecurityLog,
     StructuredRedactingLogger,
+    create_user_admin_secure,
+    deactivate_user_secure,
     list_extracted_fields_secure,
     list_partners_secure,
     list_stock_quants_secure,
     list_supplier_invoices_secure,
+    list_users_secure,
     read_source_document_content_secure,
     read_source_document_file_secure,
     read_supplier_invoice_secure,
@@ -122,6 +126,13 @@ class ReversalApprovalDecisionInput(BaseModel):
 class FieldEditInput(BaseModel):
     field_name: str
     new_value: str
+
+
+class UserCreateInput(BaseModel):
+    username: str
+    password: str
+    role: str
+    branch_id: Optional[int] = None
 
 
 class LoginRequest(BaseModel):
@@ -821,5 +832,96 @@ def create_erp_fastapi_app(
             media_type=doc["mime_type"],
             headers={"Content-Disposition": f'inline; filename="{quoted}"'},
         )
+
+    # ------------------------------------------------------------------
+    # User administration (Phase 28). Administrators only: the guard in
+    # security_audit derives the role from the verified credential and
+    # audits every non-admin attempt. Unknown/cross-tenant targets are
+    # conflated on purpose ("not found in target company") so responses
+    # never leak whether a foreign user id exists.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/users")
+    def api_list_users(
+        limit: int = 500,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """User accounts of the caller's company; administrators only.
+
+        The listing never includes credential material (password or token
+        hashes are excluded by the read model).
+        """
+        try:
+            rows = list_users_secure(db, auth.user_id, limit=limit)
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "users": rows, "count": len(rows)}
+
+    @app.post("/api/v1/users")
+    def api_create_user(
+        body: UserCreateInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create a user in the caller's company; administrators only.
+
+        The verified credential mechanics (role validation, PBKDF2 hashing,
+        ``AUTH_USER_CREATED`` audit event attributed to the acting admin)
+        are delegated to ``AuthManager.create_user``. The password must have
+        at least 8 characters (NIST SP 800-63B floor for a new credential at
+        an API boundary); uniqueness of the username is enforced by the
+        schema and surfaced as 409.
+        """
+        username = body.username.strip()
+        if not username:
+            raise HTTPException(status_code=422, detail="Username is required.")
+        if len(body.password) < 8:
+            raise HTTPException(
+                status_code=422,
+                detail="Password must be at least 8 characters long.",
+            )
+        try:
+            user = create_user_admin_secure(
+                db,
+                auth.user_id,
+                app.state.auth_manager,
+                username=username,
+                password=body.password,
+                role=body.role,
+                branch_id=body.branch_id,
+            )
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Username '{username}' already exists.",
+            ) from exc
+        return {"company_id": auth.company_id, "user": user}
+
+    @app.post("/api/v1/users/{user_id}/deactivate")
+    def api_deactivate_user(
+        user_id: int,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Deactivate a user; administrators only, never their own account.
+
+        The deactivated account's tokens are rejected by ``authenticate``
+        from the moment ``is_active`` flips, so live sessions end at the
+        next request. Self-deactivation and deactivating an already
+        inactive user are conflicts (409).
+        """
+        try:
+            result = deactivate_user_secure(db, auth.user_id, user_id)
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, **result}
 
     return app

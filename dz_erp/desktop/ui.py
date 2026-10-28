@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__ as ERP_VERSION
+from ..auth import VALID_ROLES
 from . import APP_NAME
 from .api_client import ErpApiError, ErpClient
 from .i18n import is_rtl, tr
@@ -50,6 +51,7 @@ VIEWS = (
     "documents",
     "invoices",
     "trial_balance",
+    "users",
 )
 
 
@@ -646,6 +648,81 @@ class CreateInvoiceDialog(QDialog):
         )
 
 
+class CreateUserDialog(QDialog):
+    """Administrator form to create a user account in the tenant.
+
+    Role choices come from the server's validated role list; the 8-character
+    password minimum is restated here as a hint, with the API remaining the
+    single validation authority. On success the created account (id, role)
+    is kept in ``created_user`` so the caller can confirm and refresh.
+    """
+
+    def __init__(self, lang: str, client: ErpClient, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._lang = lang
+        self._client = client
+        self._workers: List[ApiWorker] = []
+        self.created_user: Optional[Dict[str, Any]] = None
+        self.setWindowTitle(tr(lang, "users_create_title"))
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username = QLineEdit()
+        form.addRow(tr(lang, "col_username"), self.username)
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(tr(lang, "users_field_password"), self.password)
+        self.role_combo = QComboBox()
+        for role in VALID_ROLES:
+            self.role_combo.addItem(role, role)
+        form.addRow(tr(lang, "col_role"), self.role_combo)
+        hint = QLabel(tr(lang, "users_password_hint"))
+        hint.setWordWrap(True)
+        form.addRow("", hint)
+        layout.addLayout(form)
+
+        self.create_button = QPushButton(tr(lang, "users_create_button"))
+        self.create_button.setDefault(True)
+        self.create_button.clicked.connect(self._submit)
+        layout.addWidget(self.create_button)
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #b00020;")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
+
+    def _submit(self) -> None:
+        username = self.username.text().strip()
+        password = self.password.text()
+        if not username:
+            self.error_label.setText(tr(self._lang, "users_username_required"))
+            return
+        if len(password) < 8:
+            self.error_label.setText(tr(self._lang, "users_password_short"))
+            return
+        self.create_button.setEnabled(False)
+        worker = ApiWorker(
+            self._client.create_user,
+            username,
+            password,
+            str(self.role_combo.currentData()),
+            parent=self,
+        )
+        self._workers.append(worker)
+        worker.succeeded.connect(self._on_created)
+        worker.failed.connect(self._on_failed)
+        worker.start()
+
+    def _on_created(self, result: object) -> None:
+        self.created_user = dict(result) if isinstance(result, dict) else {}
+        self.accept()
+
+    def _on_failed(self, exc: object) -> None:
+        self.create_button.setEnabled(True)
+        self.error_label.setText(
+            tr(self._lang, "users_create_failed", detail=str(exc))
+        )
+
+
 class MainWindow(QMainWindow):
     """Navigation + data views for a logged-in desktop session."""
 
@@ -688,6 +765,7 @@ class MainWindow(QMainWindow):
         self.documents_table = make_table([])
         self.invoices_table = make_table([])
         self.tb_table = make_table([])
+        self.users_table = make_table([])
         self.tb_footer = QLabel("")
         self.stack.addWidget(self.accounts_table)
         self.stack.addWidget(self.products_table)
@@ -726,8 +804,27 @@ class MainWindow(QMainWindow):
         tb_layout.addWidget(self.tb_footer)
         self.stack.addWidget(tb_widget)
 
+        users_widget = QWidget()
+        users_layout = QVBoxLayout(users_widget)
+        users_row = QHBoxLayout()
+        self.users_create_button = QPushButton("")
+        self.users_create_button.clicked.connect(self._create_user)
+        self.users_deactivate_button = QPushButton("")
+        self.users_deactivate_button.clicked.connect(self._deactivate_user)
+        users_row.addWidget(self.users_create_button)
+        users_row.addWidget(self.users_deactivate_button)
+        users_row.addStretch(1)
+        users_layout.addLayout(users_row)
+        users_layout.addWidget(self.users_table)
+        self.stack.addWidget(users_widget)
+
         # Row → invoice id for the review dialog; filled by the loader.
         self._invoice_ids: List[int] = []
+        # Row → user id for the deactivation action; filled by the loader.
+        self._user_ids: List[int] = []
+        # Server-resolved role of the current session ("": not logged in).
+        # Drives the visibility of the users administration view.
+        self._role = ""
         self._workers: List[ApiWorker] = []
         self.invoices_table.cellDoubleClicked.connect(lambda r, _c: self._open_review())
 
@@ -782,6 +879,8 @@ class MainWindow(QMainWindow):
         self.upload_button.setText(tr(lang, "button_upload"))
         self.review_button.setText(tr(lang, "review_button"))
         self.create_invoice_button.setText(tr(lang, "invoice_create"))
+        self.users_create_button.setText(tr(lang, "users_create"))
+        self.users_deactivate_button.setText(tr(lang, "users_deactivate"))
         # Nav re-population resets the current row; block the change signal so
         # clearing doesn't trigger a spurious dashboard load, restore the
         # selection, then load the current view exactly once.
@@ -792,7 +891,17 @@ class MainWindow(QMainWindow):
             self.nav.addItem(tr(lang, f"nav_{key}"))
         self.nav.setCurrentRow(current)
         self.nav.blockSignals(False)
+        self._apply_nav_role_visibility()
         self._refresh_current_view()
+
+    def _apply_nav_role_visibility(self) -> None:
+        """Hide the users-administration nav row from non-admin sessions.
+
+        The row is hidden, never removed: row→stack-index mapping stays
+        stable and no other view's index shifts. The role is the server-
+        resolved principal role, never anything the client computes.
+        """
+        self.nav.setRowHidden(VIEWS.index("users"), self._role != "admin")
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -938,6 +1047,27 @@ class MainWindow(QMainWindow):
                 )
             elif key == "trial_balance":
                 self._load_trial_balance()
+            elif key == "users":
+                data = self._client.users()
+                self._user_ids = [int(r["id"]) for r in data.get("users", []) if r.get("id") is not None]
+                fill_table(
+                    self.users_table,
+                    [
+                        tr(lang, "col_username"),
+                        tr(lang, "col_role"),
+                        tr(lang, "col_status"),
+                        tr(lang, "col_password_updated"),
+                    ],
+                    [
+                        [
+                            str(r.get("username", "")),
+                            str(r.get("role", "")),
+                            tr(lang, "users_active") if r.get("is_active") else tr(lang, "users_inactive"),
+                            str(r.get("password_updated_at") or ""),
+                        ]
+                        for r in data.get("users", [])
+                    ],
+                )
         except ErpApiError as exc:
             self._error(exc)
 
@@ -1080,7 +1210,58 @@ class MainWindow(QMainWindow):
         if dialog.result() == QDialog.DialogCode.Accepted:
             self._load_view(VIEWS.index("invoices"))
 
+    def _selected_user_id(self) -> Optional[int]:
+        selected = self.users_table.selectedItems()
+        row = selected[0].row() if selected else -1
+        if 0 <= row < len(self._user_ids):
+            return self._user_ids[row]
+        return None
+
+    def _create_user(self) -> None:
+        dialog = CreateUserDialog(self._lang, self._client, parent=self)
+        dialog.exec()
+        if dialog.result() == QDialog.DialogCode.Accepted:
+            self.statusBar().showMessage(tr(self._lang, "users_created"), 5000)
+            self._load_view(VIEWS.index("users"))
+
+    def _deactivate_user(self) -> None:
+        user_id = self._selected_user_id()
+        if user_id is None:
+            QMessageBox.information(
+                self,
+                tr(self._lang, "users_deactivate"),
+                tr(self._lang, "users_none_selected"),
+            )
+            return
+        selected = self.users_table.selectedItems()
+        username = self.users_table.item(selected[0].row(), 0).text() if selected else ""
+        answer = QMessageBox.question(
+            self,
+            tr(self._lang, "users_deactivate"),
+            tr(self._lang, "users_deactivate_confirm", username=username),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.users_deactivate_button.setEnabled(False)
+        worker = ApiWorker(self._client.deactivate_user, user_id, parent=self)
+        self._track(worker)
+        worker.succeeded.connect(lambda _result: self._deactivate_done())
+        worker.failed.connect(self._deactivate_failed)
+        worker.start()
+
+    def _deactivate_done(self) -> None:
+        self.users_deactivate_button.setEnabled(True)
+        self.statusBar().showMessage(tr(self._lang, "users_deactivated"), 5000)
+        self._load_view(VIEWS.index("users"))
+
+    def _deactivate_failed(self, exc: object) -> None:
+        self.users_deactivate_button.setEnabled(True)
+        self._error(exc)
+
     def set_session(self, session: Dict[str, Any]) -> None:
+        self._role = str(session.get("role", ""))
         self.dash_labels["status_user"].setText(
             tr(
                 self._lang,
@@ -1089,6 +1270,7 @@ class MainWindow(QMainWindow):
                 role=session.get("role", "?"),
             )
         )
+        self._apply_nav_role_visibility()
 
     def set_mode_label(self, label: str) -> None:
         self.dash_labels["mode_local"].setText(label)

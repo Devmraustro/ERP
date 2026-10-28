@@ -174,6 +174,30 @@ class ErpClient:
         )
 
     # ------------------------------------------------------------------
+    # user administration (Phase 28 endpoints; administrators only)
+    # ------------------------------------------------------------------
+
+    def users(self, *, limit: int = 500) -> Dict[str, Any]:
+        return self._request("GET", "/api/v1/users", params={"limit": limit})
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        role: str,
+        *,
+        branch_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a user; the server validates role, password and uniqueness."""
+        payload: Dict[str, Any] = {"username": username, "password": password, "role": role}
+        if branch_id is not None:
+            payload["branch_id"] = branch_id
+        return self._request("POST", "/api/v1/users", json=payload)
+
+    def deactivate_user(self, user_id: int) -> Dict[str, Any]:
+        return self._request("POST", f"/api/v1/users/{user_id}/deactivate")
+
+    # ------------------------------------------------------------------
     # document intake
     # ------------------------------------------------------------------
 

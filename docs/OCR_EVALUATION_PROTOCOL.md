@@ -188,11 +188,18 @@ Procedure, per extraction path and per field type:
 5. Re-measure after every engine, model or preprocessing change; store the threshold with the
    model version (`ocr_model_version` already exists on extracted fields).
 
-Current state: **no threshold is derived this way.** The provenance problem (P0) is fixed —
-confidence is no longer fabricated and its scope is recorded — but calibration itself is still
-unmeasured: the 59 available OCR observations are too few for 5 bins, and they come from
-synthetic documents. Until a powered run exists on representative data, the safe configuration
-remains "everything is reviewed", which is what the workflow already enforces.
+Current state: **no threshold is derived this way, and no auto-accept path exists.** The
+provenance problem (P0) is fixed — confidence is no longer fabricated and its scope is recorded —
+and since Phase 29 the "everything is reviewed" configuration is **enforced, not advisory**
+(`dz_erp/review_policy.py`): an invoice whose source document has an undecided, flagged or stale
+required-field review, or whose extracted totals are arithmetically inconsistent, is refused at
+submission and re-checked at approval (`INVOICE_SUBMIT_BLOCKED_UNREVIEWED` /
+`INVOICE_APPROVAL_BLOCKED_UNREVIEWED` in `dz_erp/procurement_stock.py`). A measured score can only
+mark a field `low_confidence` — harder scrutiny, never acceptance: satisfaction always requires an
+explicit, attributed human decision bound to the exact value that was reviewed. The
+`low_confidence_threshold` values in `REVIEW_POLICY` are therefore review-effort knobs, not
+false-accept guarantees. Calibration itself is still unmeasured: the 59 available OCR observations
+are too few for 5 bins, and they come from synthetic documents.
 
 ---
 

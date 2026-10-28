@@ -9,8 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
 from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
-from .intake_ocr import levenshtein_distance, normalize_invoice_ref
+from .intake_ocr import DOCUMENT_LINKABLE_STATES, levenshtein_distance, normalize_invoice_ref
 from .localization import calculate_droit_de_timbre, validate_algerian_identifiers
+from .review_policy import evaluate_document_review_policy
 
 
 def compute_invoice_payload_hash(
@@ -62,6 +63,79 @@ def _check_user_and_tenant(conn: Any, company_id: int, user_id: int, allowed_rol
             f"Role '{user['role']}' is not authorized for this action; required one of {allowed_roles}."
         )
     return user
+
+
+def _document_review_gate(
+    conn: Any,
+    db: ERPDatabase,
+    company_id: int,
+    invoice: Any,
+    actor_user_id: int,
+    *,
+    action: str,
+) -> Optional[FinancialIntegrityError]:
+    """Phase 29 fail-closed gate: the linked document's field review must hold.
+
+    Evaluates :func:`dz_erp.review_policy.evaluate_document_review_policy`
+    from the rows visible inside the caller's IMMEDIATE transaction, so the
+    verdict cannot race a concurrent field edit or decision (TOCTOU-safe: the
+    same lock that will move the invoice forward also reads the evidence the
+    gate judges). Invoices without a linked document pass untouched — their
+    inputs were typed by a human at creation time, and deterministic
+    validation, SoD and payload-hash binding still apply.
+
+    Returns ``None`` when satisfied; otherwise audits the blocked attempt
+    (committed with the caller's transaction via the commit-then-refuse
+    pattern) and returns the error the caller must raise after the
+    transaction body completes.
+    """
+    document_id = invoice["document_id"]
+    if not document_id:
+        return None
+    doc = conn.execute(
+        "SELECT * FROM source_documents WHERE id = ? AND company_id = ?",
+        (document_id, company_id),
+    ).fetchone()
+    if not doc:
+        return FinancialIntegrityError(
+            f"DOCUMENT_REVIEW_UNSATISFIED: linked document {document_id} not found in company {company_id}."
+        )
+    fields = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ?",
+            (company_id, document_id),
+        ).fetchall()
+    ]
+    decisions = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM ocr_field_reviews WHERE company_id = ? AND document_id = ?",
+            (company_id, document_id),
+        ).fetchall()
+    ]
+    evaluation = evaluate_document_review_policy(dict(doc), fields, decisions)
+    if evaluation["satisfied"]:
+        return None
+    blocking = evaluation["blocking"]
+    db.append_audit_event(
+        conn=conn,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        action_type=f"INVOICE_{action}_BLOCKED_UNREVIEWED",
+        target_model="supplier_invoices",
+        target_id=str(invoice["id"]),
+        after_state={
+            "document_id": document_id,
+            "document_state": doc["workflow_state"],
+            "blocking": blocking[:20],
+            "blocking_truncated": len(blocking) > 20,
+        },
+    )
+    return FinancialIntegrityError(
+        "DOCUMENT_REVIEW_UNSATISFIED: invoice cannot proceed while its source document "
+        "has undecided, flagged or stale field reviews — " + "; ".join(blocking[:20])
+    )
 
 
 def create_purchase_order(
@@ -435,6 +509,24 @@ def create_and_validate_supplier_invoice(
         if not sup:
             raise TenantIsolationError("Supplier does not belong to target company.")
 
+        # Phase 29: a draft may cite a source document only while that document
+        # is still in review. Linking a document that already backs an approval
+        # used to overwrite its workflow_state here, desynchronising the
+        # evidence from the approval that relied on it.
+        if document_id:
+            linked_doc = conn.execute(
+                "SELECT workflow_state FROM source_documents WHERE id = ? AND company_id = ?",
+                (document_id, company_id),
+            ).fetchone()
+            if not linked_doc:
+                raise TenantIsolationError("Source document does not belong to target company.")
+            if linked_doc["workflow_state"] not in DOCUMENT_LINKABLE_STATES:
+                raise FinancialIntegrityError(
+                    f"DOCUMENT_LINK_STATE_REFUSED: document {document_id} is in state "
+                    f"'{linked_doc['workflow_state']}'; a draft invoice may only cite a "
+                    f"document in one of {DOCUMENT_LINKABLE_STATES}."
+                )
+
         # 1. Validate Algerian supplier identifiers if domestic REEL supplier
         if sup["country_code"] == "DZ" and sup["tax_regime"] == "REEL":
             if not sup["nif"]:
@@ -647,8 +739,15 @@ def submit_invoice_for_approval(
     user_id: int,
     invoice_id: int,
 ) -> Dict[str, Any]:
-    """Transition a Validated invoice to PendingApproval."""
+    """Transition a Validated invoice to PendingApproval.
+
+    Phase 29: refused while the linked document's field review is not
+    satisfied (see :func:`_document_review_gate`). The refusal is audited and
+    committed before the error is raised, hence the denial-variable structure.
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
+    denial: Optional[Exception] = None
+    result: Optional[Dict[str, Any]] = None
     with db.transaction() as conn:
         _check_user_and_tenant(conn, company_id, user_id, ("clerk", "accountant", "admin"))
         inv = conn.execute(
@@ -662,36 +761,48 @@ def submit_invoice_for_approval(
                 f"Cannot request approval for invoice in state '{inv['workflow_state']}'; must be 'Validated'."
             )
 
-        cur = conn.execute(
-            """
-            INSERT INTO approval_requests (
-                company_id, target_model, target_id, payload_sha256,
-                requested_by_id, requested_at, decision
-            ) VALUES (?, 'supplier_invoices', ?, ?, ?, ?, 'PENDING')
-            """,
-            (company_id, invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
+        denial = _document_review_gate(
+            conn, db, company_id, inv, user_id, action="SUBMIT"
         )
-        req_id = int(cur.lastrowid)
-        conn.execute(
-            "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
-            (invoice_id,),
-        )
-        if inv["document_id"]:
-            conn.execute(
-                "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
-                (inv["document_id"],),
+        if denial is None:
+            cur = conn.execute(
+                """
+                INSERT INTO approval_requests (
+                    company_id, target_model, target_id, payload_sha256,
+                    requested_by_id, requested_at, decision
+                ) VALUES (?, 'supplier_invoices', ?, ?, ?, ?, 'PENDING')
+                """,
+                (company_id, invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
             )
+            req_id = int(cur.lastrowid)
+            conn.execute(
+                "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
+                (invoice_id,),
+            )
+            if inv["document_id"]:
+                conn.execute(
+                    "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
+                    (inv["document_id"],),
+                )
 
-        db.append_audit_event(
-            conn=conn,
-            company_id=company_id,
-            actor_user_id=user_id,
-            action_type="APPROVAL_REQUESTED",
-            target_model="supplier_invoices",
-            target_id=str(invoice_id),
-            after_state={"approval_request_id": req_id, "workflow_state": "PendingApproval"},
-        )
-        return {"invoice_id": invoice_id, "approval_request_id": req_id, "workflow_state": "PendingApproval"}
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=user_id,
+                action_type="APPROVAL_REQUESTED",
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state={"approval_request_id": req_id, "workflow_state": "PendingApproval"},
+            )
+            result = {
+                "invoice_id": invoice_id,
+                "approval_request_id": req_id,
+                "workflow_state": "PendingApproval",
+            }
+    if denial is not None:
+        raise denial
+    assert result is not None
+    return result
 
 
 def decide_invoice_approval(
@@ -702,8 +813,17 @@ def decide_invoice_approval(
     approve: bool,
     reason: str = "",
 ) -> Dict[str, Any]:
-    """Approve or reject a PendingApproval invoice with strict Segregation of Duties enforcement."""
+    """Approve or reject a PendingApproval invoice with strict Segregation of Duties enforcement.
+
+    Phase 29: an *approval* is additionally refused while the linked document's
+    field review is not satisfied — re-checked here inside the same IMMEDIATE
+    transaction, so a document that was satisfied at submit time but disturbed
+    since cannot ride an approval through. Rejection (the safe direction) is
+    never gated. The refusal is audited and committed before it is raised.
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
+    denial: Optional[Exception] = None
+    result: Optional[Dict[str, Any]] = None
     with db.transaction() as conn:
         _check_user_and_tenant(conn, company_id, approver_user_id, ("approver", "accountant", "admin"))
         inv = conn.execute(
@@ -720,6 +840,10 @@ def decide_invoice_approval(
             raise AuthorizationError(
                 "SEGREGATION_OF_DUTIES_VIOLATION: Invoice creator cannot approve their own invoice."
             )
+        if approve:
+            denial = _document_review_gate(
+                conn, db, company_id, inv, approver_user_id, action="APPROVAL"
+            )
 
         req = conn.execute(
             """
@@ -732,54 +856,59 @@ def decide_invoice_approval(
         if not req:
             raise FinancialIntegrityError("No pending approval request found.")
 
-        decision_str = "APPROVED" if approve else "REJECTED"
-        new_wf_state = "Approved" if approve else "Rejected"
+        if denial is None:
+            decision_str = "APPROVED" if approve else "REJECTED"
+            new_wf_state = "Approved" if approve else "Rejected"
 
-        conn.execute(
-            """
-            UPDATE approval_requests
-            SET decision = ?, decided_by_id = ?, decided_at = ?, reason = ?
-            WHERE id = ?
-            """,
-            (decision_str, approver_user_id, now_iso, reason, req["id"]),
-        )
-        conn.execute(
-            """
-            UPDATE supplier_invoices
-            SET workflow_state = ?,
-                approved_payload_sha256 = ?,
-                approved_by_id = ?,
-                approved_at = ?
-            WHERE id = ?
-            """,
-            (
-                new_wf_state,
-                inv["payload_sha256"] if approve else None,
-                approver_user_id if approve else None,
-                now_iso if approve else None,
-                invoice_id,
-            ),
-        )
-        if inv["document_id"]:
             conn.execute(
-                "UPDATE source_documents SET workflow_state = ?, rejection_reason = ? WHERE id = ?",
-                (new_wf_state, None if approve else reason, inv["document_id"]),
+                """
+                UPDATE approval_requests
+                SET decision = ?, decided_by_id = ?, decided_at = ?, reason = ?
+                WHERE id = ?
+                """,
+                (decision_str, approver_user_id, now_iso, reason, req["id"]),
             )
+            conn.execute(
+                """
+                UPDATE supplier_invoices
+                SET workflow_state = ?,
+                    approved_payload_sha256 = ?,
+                    approved_by_id = ?,
+                    approved_at = ?
+                WHERE id = ?
+                """,
+                (
+                    new_wf_state,
+                    inv["payload_sha256"] if approve else None,
+                    approver_user_id if approve else None,
+                    now_iso if approve else None,
+                    invoice_id,
+                ),
+            )
+            if inv["document_id"]:
+                conn.execute(
+                    "UPDATE source_documents SET workflow_state = ?, rejection_reason = ? WHERE id = ?",
+                    (new_wf_state, None if approve else reason, inv["document_id"]),
+                )
 
-        db.append_audit_event(
-            conn=conn,
-            company_id=company_id,
-            actor_user_id=approver_user_id,
-            action_type="INVOICE_APPROVED" if approve else "INVOICE_REJECTED",
-            target_model="supplier_invoices",
-            target_id=str(invoice_id),
-            after_state={
-                "workflow_state": new_wf_state,
-                "approved_payload_sha256": inv["payload_sha256"] if approve else None,
-                "reason": reason,
-            },
-        )
-        return {"invoice_id": invoice_id, "workflow_state": new_wf_state, "decision": decision_str}
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=approver_user_id,
+                action_type="INVOICE_APPROVED" if approve else "INVOICE_REJECTED",
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state={
+                    "workflow_state": new_wf_state,
+                    "approved_payload_sha256": inv["payload_sha256"] if approve else None,
+                    "reason": reason,
+                },
+            )
+            result = {"invoice_id": invoice_id, "workflow_state": new_wf_state, "decision": decision_str}
+    if denial is not None:
+        raise denial
+    assert result is not None
+    return result
 
 
 def modify_draft_invoice_line(

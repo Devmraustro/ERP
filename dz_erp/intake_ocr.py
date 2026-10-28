@@ -10,6 +10,7 @@ import time
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,8 +23,8 @@ from cryptography.fernet import Fernet
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 
-from .database import ERPDatabase, TenantIsolationError
-from .decimal_utils import format_dzd
+from .database import ERPDatabase, AuthorizationError, FinancialIntegrityError, TenantIsolationError
+from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
 from .rotation_audit import RecordedOperation, RotationLedger
 from .key_provider import FileKeyProvider
 from .key_rotation import (
@@ -175,6 +176,28 @@ REASON_FIELDS_EXTRACTED = "FIELDS_EXTRACTED"
 REASON_NATIVE_ARABIC_SUPPORTED = "NATIVE_ARABIC_TEXT_SUPPORTED"
 REASON_NO_FIELDS = "NO_FIELDS_RECOGNISED"
 REASON_DECLARED_ARABIC = "DECLARED_ARABIC_SCAN"
+
+# ---------------------------------------------------------------------------
+# Phase 29 — field review and decisions
+# ---------------------------------------------------------------------------
+# Who may act as a reviewer on extracted fields, and while the document is in
+# which workflow states. Both are policy, not UI: the checks live in the
+# service functions and are audited server-side, so a desktop build cannot
+# widen them. ``warehouse``/``treasury``/``auditor`` are deliberately excluded
+# (stock floor, cash desk, read-only); ``ocr_worker`` is a pipeline identity.
+REVIEW_CAPABLE_ROLES = ("clerk", "approver", "accountant", "admin")
+
+# Field decisions and field edits are possible only while the document is
+# waiting for review or validated-but-not-yet-submitted. Once an approval
+# exists (PendingApproval/Approved/Posted), the document is evidence for a
+# decided invoice: changing its values afterwards would desynchronise the
+# paper trail from the approval that relied on it, so it is refused.
+FIELD_EDITABLE_STATES = ("NeedsReview", "Validated")
+
+# A new draft invoice may cite a document only while it is still in review —
+# linking a document that already backs an approval (PendingApproval/Approved/
+# Posted) would overwrite that state and desynchronise the evidence.
+DOCUMENT_LINKABLE_STATES = ("NeedsReview", "Validated")
 
 # A document is treated as Arabic-script when Arabic letters outnumber Latin ones.
 _ARABIC_RANGES = (
@@ -1081,6 +1104,17 @@ def parse_structured_invoice_text(
                 "requires_human_review": True,
                 **_confidence_payload(conf, confidence_kind),
             }
+            return
+        # Phase 29: a later match for a field we already recorded is no longer
+        # dropped silently. An identical value is a harmless repeat; a
+        # *different* value is a contradiction on the page — the reviewer must
+        # see it, so it is kept as a conflict beside the first reading.
+        first = fields[name]
+        if norm in (None, "") or norm == first["normalized_value"]:
+            return
+        fields[name].setdefault("_conflicts", []).append(
+            {"raw_text": raw, "normalized_value": norm}
+        )
 
     for text_line, conf, bbox in lines_with_meta:
         # Ignore prompt injection sentences so they can never pollute structured fields
@@ -1200,6 +1234,13 @@ def parse_structured_invoice_text(
                     **_confidence_payload(conf, confidence_kind),
                 }
             )
+
+    # Freeze the collected conflicts into their stored form before returning:
+    # a JSON array per field (None when the page agreed with itself). This is
+    # extraction product — the trigger keeps it immutable after the fact.
+    for meta in fields.values():
+        conflicts = meta.pop("_conflicts", None)
+        meta["conflict_values_json"] = json.dumps(conflicts, ensure_ascii=False) if conflicts else None
 
     return {
         "fields": fields,
@@ -1439,8 +1480,8 @@ def upload_and_process_supplier_document(
                 INSERT INTO ocr_extracted_fields (
                     company_id, document_id, page_number, line_index, field_name,
                     raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
-                    confidence_calibrated, bbox_json, ocr_model_version, created_at
-                ) VALUES (?, ?, 1, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confidence_calibrated, bbox_json, conflict_values_json, ocr_model_version, created_at
+                ) VALUES (?, ?, 1, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     company_id,
@@ -1455,6 +1496,7 @@ def upload_and_process_supplier_document(
                     fmeta["confidence_scope"],
                     1 if fmeta["confidence_calibrated"] else 0,
                     json.dumps(fmeta["bbox"]),
+                    fmeta.get("conflict_values_json"),
                     ocr_result["model_version"],
                     now_iso,
                 ),
@@ -1466,8 +1508,8 @@ def upload_and_process_supplier_document(
                 INSERT INTO ocr_extracted_fields (
                     company_id, document_id, page_number, line_index, field_name,
                     raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
-                    confidence_calibrated, bbox_json, ocr_model_version, created_at
-                ) VALUES (?, ?, 1, ?, 'line_item_json', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confidence_calibrated, bbox_json, conflict_values_json, ocr_model_version, created_at
+                ) VALUES (?, ?, 1, ?, 'line_item_json', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 """,
                 (
                     company_id,
@@ -1556,33 +1598,513 @@ def update_extracted_field_by_human(
     field_name: str,
     new_value: str,
 ) -> Dict[str, Any]:
-    """Record a human edit on an extracted field without overwriting raw_text or confidence."""
+    """Record a human edit on an extracted field without overwriting raw_text or confidence.
+
+    Phase 29 hardening: the editor must be an active review-capable user of the
+    target company, and the document must still be in a review-editable state
+    (``NeedsReview`` or ``Validated``) — once an approval exists, the document
+    is evidence for a decided invoice and its values are closed. Refusals are
+    audited before they are raised.
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
+    denial: Optional[Exception] = None
     with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            raise AuthorizationError("Invalid or inactive user credentials.")
+        if user["company_id"] != company_id:
+            raise TenantIsolationError(
+                f"Tenant isolation violation: user {user_id} (company {user['company_id']}) "
+                f"cannot access company {company_id}."
+            )
+        if user["role"] not in REVIEW_CAPABLE_ROLES:
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=user_id,
+                action_type="SECURITY_FIELD_EDIT_BLOCKED",
+                target_model="source_documents",
+                target_id="review",
+                after_state={"role": user["role"], "required_roles": list(REVIEW_CAPABLE_ROLES)},
+            )
+            denial = AuthorizationError(
+                f"Role '{user['role']}' is not authorized to review extracted fields; "
+                f"required one of {REVIEW_CAPABLE_ROLES}."
+            )
+        else:
+            doc = conn.execute(
+                "SELECT workflow_state FROM source_documents WHERE id = ? AND company_id = ?",
+                (document_id, company_id),
+            ).fetchone()
+            if not doc:
+                raise ValueError(f"Source document {document_id} not found in company {company_id}.")
+            if doc["workflow_state"] not in FIELD_EDITABLE_STATES:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=company_id,
+                    actor_user_id=user_id,
+                    action_type="SECURITY_FIELD_EDIT_BLOCKED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={
+                        "workflow_state": doc["workflow_state"],
+                        "editable_states": list(FIELD_EDITABLE_STATES),
+                    },
+                )
+                denial = FinancialIntegrityError(
+                    f"FIELD_EDIT_CLOSED: document state '{doc['workflow_state']}' does not "
+                    f"accept field edits; editable states are {FIELD_EDITABLE_STATES}."
+                )
+            else:
+                row = conn.execute(
+                    "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ? AND field_name = ?",
+                    (company_id, document_id, field_name),
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Field {field_name} not found on document {document_id}")
+
+                conn.execute(
+                    """
+                    UPDATE ocr_extracted_fields
+                    SET human_override_value = ?, normalized_value = ?, edited_by_id = ?, edited_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_value, new_value, user_id, now_iso, row["id"]),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM ocr_extracted_fields WHERE id = ?", (row["id"],)
+                ).fetchone()
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=company_id,
+                    actor_user_id=user_id,
+                    action_type="OCR_HUMAN_FIELD_EDIT",
+                    target_model="ocr_extracted_fields",
+                    target_id=str(row["id"]),
+                    before_state={"normalized_value": row["normalized_value"], "raw_text": row["raw_text"]},
+                    after_state={
+                        "human_override_value": new_value,
+                        "raw_text": updated["raw_text"],
+                        "edited_by": dict(user)["username"],
+                    },
+                )
+                return dict(updated)
+    if denial is not None:
+        raise denial
+    raise AssertionError("unreachable: denial or return must have happened")
+
+
+def decide_extracted_field_review(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    document_id: str,
+    field_name: str,
+    decision: str,
+    *,
+    value: Optional[str] = None,
+    expected_value: Optional[str] = None,
+    note: Optional[str] = None,
+    line_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Record one human review decision on an extracted field (Phase 29).
+
+    This is the record that turns "review required" from advisory into
+    enforced: :mod:`dz_erp.review_policy` computes document satisfaction from
+    these rows, and the invoice approval gate refuses to run while any required
+    field is undecided, flagged, or stale.
+
+    Decision semantics (closed vocabulary):
+
+    * ``CONFIRMED`` — the current value matches the paper. Requires
+      ``expected_value``: the reviewer states what they saw, and a value that
+      changed since their read is refused instead of silently confirmed.
+    * ``CORRECTED`` — the paper says otherwise. Supplies ``value``, which is
+      validated against the field's class before anything is stored. On an
+      existing field this writes the override exactly like
+      ``update_extracted_field_by_human`` (raw text and confidence provenance
+      stay immutable). On a *missing* field this is the manual-transcription
+      entry point: it creates the row with honest provenance
+      (``human-manual-entry``, no measured confidence) rather than fabricating
+      an engine reading. On a line row it rewrites the quantity and recomputes
+      the line amount.
+    * ``FLAGGED`` — cannot be verified. Blocks the document until superseded.
+    * ``NOT_PRESENT`` — the field legitimately does not exist on the document
+      (optional fields only; a required critical field must be transcribed,
+      never asserted away). Becomes stale if a value appears afterwards.
+
+    Idempotency and concurrency: the whole decision runs inside one IMMEDIATE
+    transaction with the policy's data; an identical repeat decision returns
+    the recorded one with ``idempotent_replay`` instead of writing a duplicate,
+    and a concurrent conflicting edit is caught by the expected-value check.
+    """
+    from .review_policy import (
+        DECISIONS_REQUIRING_VALUE,
+        FIELD_DECISIONS,
+        LINE_ITEM_FIELD,
+        ReviewPolicyValueError,
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if decision not in FIELD_DECISIONS:
+        raise ReviewPolicyValueError(
+            f"Unknown review decision {decision!r}; expected one of {FIELD_DECISIONS}."
+        )
+    if field_name == LINE_ITEM_FIELD and line_index is None:
+        raise ReviewPolicyValueError("A line-item decision requires line_index.")
+    if field_name != LINE_ITEM_FIELD and line_index is not None:
+        raise ReviewPolicyValueError("line_index is only valid for line-item decisions.")
+    if decision in DECISIONS_REQUIRING_VALUE and value in (None, ""):
+        raise ReviewPolicyValueError(f"{decision} requires a value.")
+    if note is not None and (len(note) > 256 or "\n" in note):
+        raise ReviewPolicyValueError("Review note must be a single line of at most 256 characters.")
+
+    denial: Optional[Exception] = None
+    result: Optional[Dict[str, Any]] = None
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            raise AuthorizationError("Invalid or inactive user credentials.")
+        if user["company_id"] != company_id:
+            raise TenantIsolationError(
+                f"Tenant isolation violation: user {user_id} (company {user['company_id']}) "
+                f"cannot access company {company_id}."
+            )
+        if user["role"] not in REVIEW_CAPABLE_ROLES:
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=user_id,
+                action_type="SECURITY_FIELD_REVIEW_BLOCKED",
+                target_model="source_documents",
+                target_id="review",
+                after_state={"role": user["role"], "required_roles": list(REVIEW_CAPABLE_ROLES)},
+            )
+            denial = AuthorizationError(
+                f"Role '{user['role']}' is not authorized to review extracted fields; "
+                f"required one of {REVIEW_CAPABLE_ROLES}."
+            )
+        else:
+            doc = conn.execute(
+                "SELECT * FROM source_documents WHERE id = ? AND company_id = ?",
+                (document_id, company_id),
+            ).fetchone()
+            if not doc:
+                raise ValueError(f"Source document {document_id} not found in company {company_id}.")
+            if doc["workflow_state"] not in FIELD_EDITABLE_STATES:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=company_id,
+                    actor_user_id=user_id,
+                    action_type="SECURITY_FIELD_REVIEW_BLOCKED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={
+                        "workflow_state": doc["workflow_state"],
+                        "decidable_states": list(FIELD_EDITABLE_STATES),
+                    },
+                )
+                denial = FinancialIntegrityError(
+                    f"FIELD_REVIEW_CLOSED: document state '{doc['workflow_state']}' does not "
+                    f"accept field decisions; decidable states are {FIELD_EDITABLE_STATES}."
+                )
+            else:
+                result = _apply_field_decision(
+                    conn,
+                    db=db,
+                    company_id=company_id,
+                    user=dict(user),
+                    document_id=document_id,
+                    field_name=field_name,
+                    line_index=line_index,
+                    decision=decision,
+                    value=value,
+                    expected_value=expected_value,
+                    note=note,
+                    now_iso=now_iso,
+                )
+    if denial is not None:
+        raise denial
+    assert result is not None
+    return result
+
+
+def _apply_field_decision(
+    conn: Any,
+    *,
+    db: ERPDatabase,
+    company_id: int,
+    user: Any,
+    document_id: str,
+    field_name: str,
+    line_index: Optional[int],
+    decision: str,
+    value: Optional[str],
+    expected_value: Optional[str],
+    note: Optional[str],
+    now_iso: str,
+) -> Dict[str, Any]:
+    """Apply one validated decision inside the caller's transaction."""
+    from .review_policy import (
+        DECISION_CONFIRMED,
+        DECISION_CORRECTED,
+        DECISION_FLAGGED,
+        HUMAN_ENTRY_MODEL,
+        HUMAN_ENTRY_RAW,
+        LINE_ITEM_FIELD,
+        ReviewPolicyValueError,
+        TEXT_FALLBACK_RULE,
+        rule_for,
+        validate_corrected_value,
+    )
+
+    user_id = int(user["id"])
+    is_line = field_name == LINE_ITEM_FIELD
+    if is_line:
         row = conn.execute(
-            "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ? AND field_name = ?",
+            """
+            SELECT * FROM ocr_extracted_fields
+            WHERE company_id = ? AND document_id = ? AND field_name = ? AND line_index = ?
+            """,
+            (company_id, document_id, field_name, line_index),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT * FROM ocr_extracted_fields
+            WHERE company_id = ? AND document_id = ? AND field_name = ?
+              AND line_index IS NULL
+            """,
             (company_id, document_id, field_name),
         ).fetchone()
-        if not row:
-            raise ValueError(f"Field {field_name} not found on document {document_id}")
 
-        conn.execute(
-            """
-            UPDATE ocr_extracted_fields
-            SET human_override_value = ?, normalized_value = ?, edited_by_id = ?, edited_at = ?
-            WHERE id = ?
-            """,
-            (new_value, new_value, user_id, now_iso, row["id"]),
-        )
-        updated = conn.execute("SELECT * FROM ocr_extracted_fields WHERE id = ?", (row["id"],)).fetchone()
-        db.append_audit_event(
-            conn=conn,
-            company_id=company_id,
-            actor_user_id=user_id,
-            action_type="OCR_HUMAN_FIELD_EDIT",
-            target_model="ocr_extracted_fields",
-            target_id=str(row["id"]),
-            before_state={"normalized_value": row["normalized_value"], "raw_text": row["raw_text"]},
-            after_state={"human_override_value": new_value, "raw_text": updated["raw_text"]},
-        )
-        return dict(updated)
+    rule = rule_for(field_name)
+    current_value: Optional[str] = None
+    if row is not None:
+        current_value = row["normalized_value"]
+        if is_line:
+            # Quantities are compared in the canonical 6-decimal form.
+            try:
+                payload = json.loads(str(current_value))
+                current_value = f"{round_qty(to_decimal(str(payload.get('qty')))):.6f}"
+            except (ValueError, TypeError, KeyError):
+                raise FinancialIntegrityError(
+                    "LINE_PAYLOAD_UNPARSEABLE: the line item JSON cannot be reviewed as-is; "
+                    "flag it and rebuild the line on the invoice."
+                ) from None
+
+    if decision == DECISION_CONFIRMED:
+        if row is None:
+            raise ReviewPolicyValueError(
+                f"FIELD_NOT_EXTRACTED:{field_name} not found on document {document_id}; "
+                "a missing field is transcribed (CORRECTED) or asserted NOT_PRESENT."
+            )
+        if expected_value is None:
+            raise ReviewPolicyValueError(
+                "CONFIRMED requires expected_value: state the value you reviewed."
+            )
+        if is_line:
+            seen = _canonical_line_qty(expected_value)
+            if seen != current_value:
+                raise FinancialIntegrityError(
+                    f"FIELD_VALUE_CHANGED_SINCE_READ: expected {expected_value!r}, "
+                    f"current {current_value!r}; re-read the field and decide again."
+                )
+        elif str(expected_value) != str(current_value):
+            raise FinancialIntegrityError(
+                f"FIELD_VALUE_CHANGED_SINCE_READ: expected {expected_value!r}, "
+                f"current {current_value!r}; re-read the field and decide again."
+            )
+        reviewed_value = current_value
+    elif decision == DECISION_CORRECTED:
+        assert value not in (None, "")
+        try:
+            reviewed_value = validate_corrected_value(
+                rule if rule is not None else TEXT_FALLBACK_RULE, str(value)
+            )
+        except ValueError as exc:
+            raise ReviewPolicyValueError(str(exc)) from exc
+        if row is None:
+            if is_line:
+                raise ReviewPolicyValueError(
+                    "Line rows are created by extraction only; transcribe the line on the invoice."
+                )
+            # Manual transcription entry point: create the field row with honest
+            # provenance — a human read the value, no engine measured it. This is
+            # how an Arabic-only document (or any unread field) becomes decidable
+            # without fabricating an engine reading.
+            conn.execute(
+                """
+                INSERT INTO ocr_extracted_fields (
+                    company_id, document_id, page_number, line_index, field_name,
+                    raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
+                    confidence_calibrated, bbox_json, conflict_values_json,
+                    ocr_model_version, human_override_value, edited_by_id, edited_at, created_at
+                ) VALUES (?, ?, 1, NULL, ?, ?, ?, NULL, 'not_measured', 'unavailable',
+                          0, '[]', NULL, ?, ?, ?, ?, ?)
+                """,
+                (
+                    company_id,
+                    document_id,
+                    field_name,
+                    HUMAN_ENTRY_RAW,
+                    reviewed_value,
+                    HUMAN_ENTRY_MODEL,
+                    reviewed_value,
+                    user_id,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ? AND field_name = ?",
+                (company_id, document_id, field_name),
+            ).fetchone()
+        elif is_line:
+            _rewrite_line_quantity(conn, row, reviewed_value)
+            conn.execute(
+                "UPDATE ocr_extracted_fields SET edited_by_id = ?, edited_at = ? WHERE id = ?",
+                (user_id, now_iso, row["id"]),
+            )
+        else:
+            if expected_value is not None and str(expected_value) != str(current_value):
+                raise FinancialIntegrityError(
+                    f"FIELD_VALUE_CHANGED_SINCE_READ: expected {expected_value!r}, "
+                    f"current {current_value!r}; re-read the field and correct again."
+                )
+            conn.execute(
+                """
+                UPDATE ocr_extracted_fields
+                SET human_override_value = ?, normalized_value = ?, edited_by_id = ?, edited_at = ?
+                WHERE id = ?
+                """,
+                (reviewed_value, reviewed_value, user_id, now_iso, row["id"]),
+            )
+    elif decision == DECISION_FLAGGED:
+        if rule is None:
+            raise ReviewPolicyValueError(
+                f"FIELD_NOT_IN_POLICY:{field_name} is not a policy field; a flag on it would "
+                "never gate anything, so it is refused. Transcribe it (CORRECTED) instead."
+            )
+        reviewed_value = current_value
+    else:  # DECISION_NOT_PRESENT
+        if is_line:
+            raise ReviewPolicyValueError(
+                "NOT_PRESENT is not valid for line items; FLAG the line instead."
+            )
+        if rule is None:
+            raise ReviewPolicyValueError(
+                f"FIELD_NOT_IN_POLICY:{field_name} is not a policy field; asserting it absent "
+                "is meaningless outside the policy, so it is refused."
+            )
+        if row is not None and current_value not in (None, ""):
+            raise FinancialIntegrityError(
+                f"FIELD_IS_PRESENT:{field_name} has a stored value; assert NOT_PRESENT only "
+                "for fields the document genuinely lacks."
+            )
+        if rule.required:
+            raise ReviewPolicyValueError(
+                f"FIELD_REQUIRED_CANNOT_BE_ABSENT:{field_name} is a required critical field; "
+                "transcribe it (CORRECTED) instead of asserting it absent."
+            )
+        reviewed_value = None
+
+    # Idempotency: an identical repeat of the current latest decision is a
+    # replay of that decision, not a new event.
+    latest = conn.execute(
+        """
+        SELECT * FROM ocr_field_reviews
+        WHERE company_id = ? AND document_id = ? AND field_name = ? AND line_index IS ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (company_id, document_id, field_name, line_index),
+    ).fetchone()
+    if (
+        latest is not None
+        and latest["decision"] == decision
+        and latest["reviewed_value"] == reviewed_value
+        and latest["reviewed_by_id"] == user_id
+    ):
+        return {
+            "document_id": document_id,
+            "field_name": field_name,
+            "line_index": line_index,
+            "decision": decision,
+            "reviewed_value": reviewed_value,
+            "reviewed_by_id": user_id,
+            "reviewed_at": latest["reviewed_at"],
+            "note": latest["note"],
+            "idempotent_replay": True,
+        }
+
+    cur = conn.execute(
+        """
+        INSERT INTO ocr_field_reviews (
+            company_id, document_id, field_name, line_index, decision,
+            reviewed_value, note, reviewed_by_id, reviewed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (company_id, document_id, field_name, line_index, decision, reviewed_value, note, user_id, now_iso),
+    )
+    decision_id = int(cur.lastrowid)
+    db.append_audit_event(
+        conn=conn,
+        company_id=company_id,
+        actor_user_id=user_id,
+        action_type="OCR_FIELD_REVIEW_DECIDED",
+        target_model="ocr_field_reviews",
+        target_id=str(decision_id),
+        before_state={
+            "field_name": field_name,
+            "line_index": line_index,
+            "value": current_value,
+            "previous_decision": None if latest is None else latest["decision"],
+        },
+        after_state={
+            "decision": decision,
+            "reviewed_value": reviewed_value,
+            "note": note,
+            "reviewed_by": user["username"],
+        },
+    )
+    return {
+        "document_id": document_id,
+        "field_name": field_name,
+        "line_index": line_index,
+        "decision": decision,
+        "reviewed_value": reviewed_value,
+        "reviewed_by_id": user_id,
+        "reviewed_at": now_iso,
+        "note": note,
+        "idempotent_replay": False,
+    }
+
+
+def _canonical_line_qty(value: Optional[str]) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    try:
+        return f"{round_qty(to_decimal(str(value))):.6f}"
+    except (ValueError, TypeError):
+        return None
+
+
+def _rewrite_line_quantity(conn: Any, row: Any, new_qty: str) -> None:
+    """Rewrite one line row's quantity and recompute its HT amount in place.
+
+    The line JSON is extraction output, so the correction keeps every other
+    reading untouched and recomputes the line amount from the corrected
+    quantity exactly like invoice validation does (qty × PU × discount).
+    """
+    payload = json.loads(str(row["normalized_value"]))
+    qty = to_decimal(new_qty)
+    unit_price = to_decimal(payload.get("unit_price_dzd", "0"))
+    discount = to_decimal(payload.get("discount_pct", "0.00"))
+    line_ht = round_dzd(qty * unit_price * ((Decimal("100.00") - discount) / Decimal("100.00")))
+    payload["qty"] = f"{round_qty(qty):.6f}"
+    payload["line_ht_dzd"] = format_dzd(line_ht)
+    conn.execute(
+        "UPDATE ocr_extracted_fields SET normalized_value = ? WHERE id = ?",
+        (json.dumps(payload, ensure_ascii=False), row["id"]),
+    )

@@ -9,7 +9,7 @@ An executable acceptance script, not a test suite replacement. It builds the
 entry point ``uvicorn dz_erp.serve:app`` uses), then exercises the documented
 end-to-end workflow against an isolated temporary directory:
 
-    startup -> auth -> upload -> OCR -> human create -> approve -> post
+    startup -> auth -> upload -> OCR -> human create -> field review -> approve -> post
             -> audit verification -> vault rotation -> audit rotation
             -> interrupted rotation + resume -> backup -> isolated restore
             -> verification in a fresh OS process
@@ -290,6 +290,82 @@ def run(state: Path) -> int:
             == 403
         ),
     )
+    check(
+        "review: submission is refused while the document review is incomplete",
+        lambda: _assert(
+            client.post(
+                f"/api/v1/invoices/{invoice_id}/submit-approval",
+                headers={"Authorization": f"Bearer {clerk}"},
+            ).status_code
+            == 422
+        ),
+    )
+
+    # ------------------------------------------------------------ field review
+    # Phase 29: the field review is enforced, not advisory. The reviewer
+    # completes it through the documented API: every extracted required field
+    # (and extracted line quantity) is CONFIRMED at exactly its current value,
+    # and every optional field the extraction did not find is asserted absent.
+    verdict = client.get(
+        f"/api/v1/documents/{document['document_id']}/review-policy",
+        headers={"Authorization": f"Bearer {clerk}"},
+    )
+    check(
+        "review: the review-policy verdict is readable and unsatisfied before decisions",
+        lambda: _assert(
+            verdict.status_code == 200 and verdict.json()["satisfied"] is False, verdict.text
+        ),
+    )
+
+    def complete_review() -> bool:
+        body = verdict.json()
+        for fev in body["fields"]:
+            if fev["satisfied"]:
+                continue
+            if fev["value"] is not None:
+                decision = {
+                    "field_name": fev["field_name"],
+                    "decision": "CONFIRMED",
+                    "expected_value": fev["value"],
+                }
+            elif not fev["required"]:
+                decision = {"field_name": fev["field_name"], "decision": "NOT_PRESENT"}
+            else:
+                return _assert(
+                    False,
+                    f"required field {fev['field_name']} was not extracted; the staging"
+                    " fixture must stay fully extracted (transcription path is covered by"
+                    " the phase-29 test suite)",
+                )
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json=decision,
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        for lev in body["lines"]:
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json={
+                    "field_name": "line_item_json",
+                    "decision": "CONFIRMED",
+                    "expected_value": lev["value"],
+                    "line_index": lev["line_index"],
+                },
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        after = client.get(
+            f"/api/v1/documents/{document['document_id']}/review-policy",
+            headers={"Authorization": f"Bearer {clerk}"},
+        )
+        return _assert(
+            after.status_code == 200 and after.json()["satisfied"] is True, after.text
+        )
+
+    check("review: field decisions satisfy the review policy", complete_review)
     check(
         "workflow: submitted for approval",
         lambda: _assert(

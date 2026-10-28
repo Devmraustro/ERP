@@ -47,7 +47,16 @@ target's live session at the next request; every non-admin attempt is audit-logg
 cross-tenant targets are conflated to a single 403 — `tests/test_phase28_user_admin.py` 12/12) and
 the desktop users view (visible only to the server-resolved `admin` role; creation dialog;
 confirmation-gated deactivation — `tests/test_phase28_desktop_users_ui.py` 7/7, offscreen Qt).
-The OpenAPI protected-operation pin is 19 → 26. Full local suite at the Phase 28 head:
+Phase 29 makes OCR uncertainty handling **fail-closed and enforced**: field-level review decisions
+(`CONFIRMED` bound to the reviewed value / `CORRECTED` or honest `human-manual-entry` transcription /
+`FLAGGED` / `NOT_PRESENT` for genuinely absent optional fields) are separate attributed records, and
+an invoice whose document has undecided, flagged or stale required-field reviews, or whose extracted
+totals do not sum, is refused at submission and re-checked at approval — every refusal audited
+(`tests/test_phase29_ocr_review_policy.py` 24/24). A measured score can only mark a field
+`low_confidence`; it never accepts it, and auto-accept stays unimplemented on purpose
+(`docs/OCR_EVALUATION_PROTOCOL.md` §6). The OpenAPI protected-operation pin is 19 → 26 → 28. Full
+local suite at the Phase 29 head: **710 passed, 20 skipped, 0 failed, exit 0** (23 min 48 s; 85 %
+coverage — see §2G of `docs/QA_TEST_MATRIX_AND_RESULTS.md`). Full local suite at the Phase 28 head:
 **686 passed, 20 skipped, 0 failed, exit 0** (24 min 51 s; 85 % coverage — see §2C–2F of
 `docs/QA_TEST_MATRIX_AND_RESULTS.md`). The PyInstaller one-file build succeeds
 (128.3 MiB, SHA-256 sidecar verified) and now bundles the vendored SCF data for frozen builds;

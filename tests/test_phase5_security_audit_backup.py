@@ -70,7 +70,9 @@ def _login(client: TestClient, username: str, password: str) -> str:
     return resp.json()["access_token"]
 
 
-def test_rbac_sod_approval_invalidation_and_api_bypass_protection(tmp_path: Path) -> None:
+def test_rbac_sod_approval_invalidation_and_api_bypass_protection(
+    tmp_path: Path, complete_document_field_review
+) -> None:
     """Verify RBAC, Segregation of Duties, post-approval edit invalidation, and FastAPI endpoint guards."""
     db = ERPDatabase(str(tmp_path / "sec.sqlite3"))
     _setup_two_tenants(db)
@@ -110,6 +112,9 @@ def test_rbac_sod_approval_invalidation_and_api_bypass_protection(tmp_path: Path
         lines=[{"description": "Service", "qty": "1", "unit_price_dzd": "10000.00", "tax_rate": "19.0", "line_ht_dzd": "10000.00"}],
     )
     inv_id = inv["invoice_id"]
+    # Phase 29 gate: the linked document's field review must be complete
+    # before the invoice lifecycle may proceed.
+    complete_document_field_review(db, 1, doc["document_id"], reviewer_user_id=1)
     submit_invoice_for_approval(db, company_id=1, user_id=4, invoice_id=inv_id)
 
     # 1. Segregation of Duties: Creator (user 4) cannot approve their own invoice
@@ -177,7 +182,9 @@ def test_rbac_sod_approval_invalidation_and_api_bypass_protection(tmp_path: Path
         post_supplier_invoice(db, company_id=1, accountant_user_id=4, invoice_id=inv_id, idempotency_key="post-after-edit")
 
 
-def test_audit_immutability_log_redaction_and_encrypted_backup_restore(tmp_path: Path) -> None:
+def test_audit_immutability_log_redaction_and_encrypted_backup_restore(
+    tmp_path: Path, complete_document_field_review
+) -> None:
     """Verify DB-trigger audit protection, secret/PII log redaction, and isolated backup restoration."""
     db_path = tmp_path / "prod.sqlite3"
     db = ERPDatabase(str(db_path))
@@ -214,6 +221,9 @@ def test_audit_immutability_log_redaction_and_encrypted_backup_restore(tmp_path:
         amount_ttc_dzd="23800.00",
         lines=[{"description": "Consulting", "qty": "1", "unit_price_dzd": "20000.00", "tax_rate": "19.0", "line_ht_dzd": "20000.00"}],
     )
+    # Phase 29 gate: complete the linked document's field review before the
+    # invoice lifecycle may proceed.
+    complete_document_field_review(db, 1, doc["document_id"], reviewer_user_id=1)
     submit_invoice_for_approval(db, company_id=1, user_id=1, invoice_id=inv["invoice_id"])
     decide_invoice_approval(db, company_id=1, approver_user_id=3, invoice_id=inv["invoice_id"], approve=True)
     post_supplier_invoice(db, company_id=1, accountant_user_id=4, invoice_id=inv["invoice_id"], idempotency_key="bk-post-1")

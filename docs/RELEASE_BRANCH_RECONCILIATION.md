@@ -92,18 +92,18 @@ The latest user-local Windows full-suite run and 37/37 staging acceptance were o
 
 ## 8. Latest verification update — 2026-10-25
 
-The consolidated review branch and PR #2 are aligned at `4225f36c56fed66700d61ffe832db7373214a93d`. GitHub Actions run [40210565234](https://github.com/Devmraustro/ERP/actions/runs/40210565234) completed successfully on that exact head.
+The tested code head `2de2ae7e8aca1fa522b4e4a1f1210f18f86bc838` passed GitHub Actions run [40382194997](https://github.com/Devmraustro/ERP/actions/runs/40382194997). The follow-up commits `6bcb859` and the subsequent documentation refreshes update evidence documents only; they do not change application or test code. The final documentation head must have its own CI result verified before it is called green.
 
-| Check | Exact-head result |
+| Check | Tested-code result |
 |---|---|
-| Linux / Python 3.11.17 full suite | 562 passed, 3 skipped, 0 failed; 88% coverage |
-| Linux / Python 3.12.15 full suite | 562 passed, 3 skipped, 0 failed; 88% coverage |
-| Windows / Python 3.12.10 security, migration, backup/recovery subset | 138 passed, 8 skipped, 0 failed |
+| Linux / Python 3.11.17 full suite | 620 passed, 3 skipped, 0 failed; 88% coverage |
+| Linux / Python 3.12.15 full suite | 620 passed, 3 skipped, 0 failed; 88% coverage |
+| Windows / Python 3.12.10 security, migration, backup/recovery subset | 148 passed, 8 platform-specific skipped, 0 failed |
 | Linux synthetic staging acceptance | 37/37 |
 | Windows synthetic staging acceptance | 37/37 |
 | Risk-register summary | Pass, 31 rows |
 | Dependency, static analysis and byte-compilation gates | Pass across the configured matrix |
 
-The latest code changes add a foreign-key integrity check to the transactional OCR confidence migration and regression coverage for orphaned legacy rows; the original table is preserved if the migration cannot proceed safely. The success fixtures were updated with valid parent records after the first attempted CI revealed two invalid fixtures. All tests pass on the corrected head.
+The Phase 24 POSIX permission fixture repair is included in the tested code head. OCR confidence migration retains its transactional foreign-key check and rollback coverage; this documentation refresh does not alter those code paths.
 
-PR #2 remains open and unmerged; PR #1 remains open and unmerged. `main` has not been changed. No production deployment, production key operation, or processing of real customer data occurred. Production blockers in §4 remain open, and the release verdict stays **CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY**.
+PR #2 remains open and unmerged; `main` has not been changed. No production deployment, production key operation, or processing of real customer data occurred. Production blockers remain open, and the release verdict stays **CONDITIONAL GO — ISOLATED NON-PRODUCTION STAGING ONLY**.

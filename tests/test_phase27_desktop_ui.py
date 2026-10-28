@@ -164,6 +164,58 @@ def _service_with_fixtures(tmp_path: Path):
     return db_path, service
 
 
+def _complete_field_review(db_path: Path) -> None:
+    """Phase 29: record the field decisions the fail-closed gate now requires.
+
+    The shared conftest helper refuses documents with missing required fields
+    (it exists for fully-extracted fixtures). ``doc-1`` is a minimal two-field
+    fixture, so the reviewer here takes the honest path the policy provides:
+    transcribe the required fields they read on the paper, assert the optional
+    ones absent, and bind the corrected TTC — a decision on every required
+    field, attributed to the admin who reviewed it.
+    """
+    from dz_erp.database import ERPDatabase
+    from dz_erp.intake_ocr import decide_extracted_field_review
+    from dz_erp.review_policy import DECISION_NOT_PRESENT, evaluate_document_review_policy
+
+    db = ERPDatabase(str(db_path))
+    for field_name, value in {
+        "invoice_number": "FAC-UI-001",
+        "supplier_name": "Fournisseur Synthétique",
+        "supplier_nif": "001216099123456",
+        "invoice_date": "2026-10-20",
+        "currency_code": "DZD",
+        "amount_ht_dzd": "10000.00",
+        "amount_tva_dzd": "1900.00",
+        "amount_ttc_dzd": "11900.00",
+    }.items():
+        decide_extracted_field_review(
+            db, company_id=1, user_id=1, document_id="doc-1",
+            field_name=field_name, decision="CORRECTED", value=value,
+        )
+    for optional in ("supplier_nis", "supplier_rc", "supplier_ai", "amount_timbre_dzd", "due_date"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=1, document_id="doc-1",
+            field_name=optional, decision=DECISION_NOT_PRESENT,
+        )
+    with db.transaction() as conn:
+        doc = dict(conn.execute("SELECT * FROM source_documents WHERE id = 'doc-1'").fetchone())
+        fields = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM ocr_extracted_fields WHERE company_id = 1 AND document_id = 'doc-1'"
+            ).fetchall()
+        ]
+        decisions = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM ocr_field_reviews WHERE company_id = 1 AND document_id = 'doc-1'"
+            ).fetchall()
+        ]
+    evaluation = evaluate_document_review_policy(doc, fields, decisions)
+    assert evaluation["satisfied"], evaluation["blocking"]
+
+
 def _create_invoice_via_api(client: ErpClient) -> int:
     result = client.create_invoice(
         {
@@ -273,6 +325,12 @@ def test_review_dialog_full_cycle_with_correction_and_audit(
         assert row[2] == "11900.00"  # corrected current value
         events = _audit(db_path, "OCR_HUMAN_FIELD_EDIT")
         assert any(e["target_model"] == "ocr_extracted_fields" for e in events)
+
+        # Phase 29: submission is now gated on the document's field review —
+        # the reviewer records the decisions the policy requires first, and
+        # every decision lands in the audit chain with their identity.
+        _complete_field_review(db_path)
+        assert _audit(db_path, "OCR_FIELD_REVIEW_DECIDED"), "field decisions must be audited"
 
         # Explicit submit → approve → post, each an explicit UI action.
         # Segregation of duties is a server control the UI inherits: the

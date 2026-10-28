@@ -108,7 +108,9 @@ def test_empirical_ocr_benchmark_across_6_algerian_invoice_strata(tmp_path: Path
     assert "arabic" in report["language_coverage_note"].lower()
 
 
-def test_complete_14_step_end_to_end_supplier_invoice_workflow(tmp_path: Path) -> None:
+def test_complete_14_step_end_to_end_supplier_invoice_workflow(
+    tmp_path: Path, complete_document_field_review
+) -> None:
     """Execute the mandatory 14-step end-to-end scenario from file upload to isolated backup/restore."""
     db_file = tmp_path / "e2e_erp.sqlite3"
     db = ERPDatabase(str(db_file))
@@ -233,6 +235,10 @@ def test_complete_14_step_end_to_end_supplier_invoice_workflow(tmp_path: Path) -
     )
     assert inv["workflow_state"] == "Validated"
     assert inv["validation_errors"] == []
+
+    # Phase 29 gate: the linked document's field review must be complete
+    # before the invoice may move forward (fail-closed).
+    complete_document_field_review(db, 1, doc["document_id"], reviewer_user_id=1)
 
     # Step 8: Submit for human approval
     sub = submit_invoice_for_approval(db, company_id=1, user_id=1, invoice_id=inv["invoice_id"])

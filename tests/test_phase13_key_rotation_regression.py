@@ -57,7 +57,7 @@ INVOICE_SPEC = {
 }
 
 
-def _deployment(tmp_path: Path) -> tuple:
+def _deployment(tmp_path: Path, complete_document_field_review) -> tuple:
     """Database + vault + one posted, approved invoice, using synthetic data only."""
     db = ERPDatabase(str(tmp_path / "erp.sqlite3"))
     with db.transaction() as conn:
@@ -115,6 +115,9 @@ def _deployment(tmp_path: Path) -> tuple:
             }
         ],
     )
+    # Phase 29 gate: complete the linked document's field review before the
+    # invoice lifecycle may proceed.
+    complete_document_field_review(db, 1, document["document_id"], reviewer_user_id=1)
     submit_invoice_for_approval(db, company_id=1, user_id=1, invoice_id=invoice["invoice_id"])
     decide_invoice_approval(db, company_id=1, approver_user_id=3, invoice_id=invoice["invoice_id"], approve=True)
     posted = post_supplier_invoice(
@@ -134,7 +137,9 @@ def _journal_state(db: ERPDatabase) -> list:
     return [{"entries": entries, "lines": lines}]
 
 
-def test_rotation_preserves_posted_accounting_and_audit_evidence(tmp_path: Path) -> None:
+def test_rotation_preserves_posted_accounting_and_audit_evidence(
+    tmp_path: Path, complete_document_field_review
+) -> None:
     """The decisive invariant: rotating keys changes no financial fact.
 
     A key is a physical carrier, not an accounting event. If rotation altered a
@@ -142,7 +147,7 @@ def test_rotation_preserves_posted_accounting_and_audit_evidence(tmp_path: Path)
     chain, the system would no longer be auditable - so this is asserted on the
     rows themselves, not through an API response.
     """
-    db, vault, document, invoice, posted = _deployment(tmp_path)
+    db, vault, document, invoice, posted = _deployment(tmp_path, complete_document_field_review)
     assert posted["journal_entry_id"]
     before_journals = _journal_state(db)
 
@@ -227,9 +232,11 @@ def _doc_path(db: ERPDatabase, document: dict) -> str:
     return row["vault_path"]
 
 
-def test_rotation_does_not_grant_financial_authority(tmp_path: Path) -> None:
+def test_rotation_does_not_grant_financial_authority(
+    tmp_path: Path, complete_document_field_review
+) -> None:
     """Rotation must not become a way around role checks or idempotency."""
-    db, _vault, _document, invoice, _posted = _deployment(tmp_path)
+    db, _vault, _document, invoice, _posted = _deployment(tmp_path, complete_document_field_review)
     db.rotate_audit_key()
 
     # Re-posting the same invoice is still refused as a duplicate.

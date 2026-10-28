@@ -659,3 +659,86 @@ starlette/anyio `DeprecationWarning`. The total count reconciles exactly: 661 (P
 `/api/v1/users` pin × 6 header sets) = 686. No test was suppressed, weakened or skipped to obtain
 this result. CI for this exact head is pending the authorized push (the workflow triggers on
 `pull_request`), which is reported, not assumed.
+
+## 2G. Phase 29 - fail-closed OCR uncertainty handling and field-level human review - `Passed`
+
+Phase 29 turns OCR uncertainty handling from advisory into **enforced**. Extraction stays read-only
+evidence; a human decision is a separate, attributed record (`ocr_field_reviews`) bound to the exact
+value it was made on. New pieces, all server-side: `dz_erp/review_policy.py` (per-field rules,
+tri-state status, fail-closed aggregation, extracted-totals arithmetic, Arabic/no-fields
+transcription semantics); conflict capture at intake (a second, different reading of the same field
+is recorded, never dropped); hardened human field edits; a decision service (CONFIRMED at the
+reviewed value / CORRECTED or honestly transcribed / FLAGGED / NOT_PRESENT for genuinely absent
+optional fields — refused for required ones); the invoice submit/approval gates that re-evaluate the
+policy inside the same IMMEDIATE transaction (TOCTOU-safe) and audit every refusal
+(`INVOICE_SUBMIT_BLOCKED_UNREVIEWED` / `INVOICE_APPROVAL_BLOCKED_UNREVIEWED`); a document-link state
+whitelist; two authenticated API endpoints (`POST /api/v1/documents/{id}/fields/decide`,
+`GET /api/v1/documents/{id}/review-policy`); and an idempotent migration that upgrades pre-phase-29
+databases without losing a stored row. A measured score can only mark a field `low_confidence` — it
+never accepts it; confidence unavailable is never treated as measured. Auto-accept remains
+unimplemented on purpose (`docs/OCR_EVALUATION_PROTOCOL.md` §6).
+
+Locally (Python 3.12.10, ruff clean, `QT_QPA_PLATFORM=offscreen`):
+
+- `tests/test_phase29_ocr_review_policy.py` — **24 passed in 12.28 s**
+- `python tools/staging_acceptance.py` — **40/40 checks** (three new checks: submission refused
+  while the review is incomplete; the verdict readable and unsatisfied before decisions; field
+  decisions satisfying the policy through the documented API)
+- Full suite and coverage at the phase-29 head: recorded in the closing paragraph of this section.
+
+### A. The enforcement and its refusals (`tests/test_phase29_ocr_review_policy.py`)
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_unreviewed_document_blocks_submission_and_the_block_is_audited` | Submitting an invoice whose document has no field decisions is **refused** (`DOCUMENT_REVIEW_UNSATISFIED`), audited as `INVOICE_SUBMIT_BLOCKED_UNREVIEWED` with the attempting clerk as actor, **committed before the refusal** (chain stays valid), and nothing moved. |
+| `test_field_review_satisfies_the_gate_and_approval_rechecks_it` | Confirming every extracted required field (+ line quantity) and honestly asserting the absent optional ones satisfies the policy; the decisions are attributed (`reviewed_by_id`) and value-bound; submit and approval then succeed. |
+| `test_approval_recheck_refuses_a_document_disturbed_after_submit` | A flag that appears after submission (out-of-band write — the only way the closed review can change) is caught by the approval gate's re-evaluation: refusal + `INVOICE_APPROVAL_BLOCKED_UNREVIEWED`; rejection (the safe direction) is never gated. |
+| `test_legacy_invoice_without_document_is_unaffected` | The fully-typed, document-less invoice flow (validated → approved → posted) passes untouched — the gate only governs OCR-backed invoices. |
+| `test_required_field_cannot_be_asserted_absent_but_optional_can` | `NOT_PRESENT` is honest only for a genuinely absent **optional** field; for a **required** field it is refused (`FIELD_REQUIRED_CANNOT_BE_ABSENT`) — a critical field must be transcribed, never asserted away. |
+| `test_manual_transcription_route_is_satisfiable_with_honest_provenance` | The Arabic-only/no-fields route (`manual_transcription`) is satisfiable end to end: transcription creates rows with `human-manual-entry` provenance, raw `[manual entry]`, **no measured confidence** — and the transcribed invoice posts through the normal lifecycle. |
+| `test_low_confidence_is_flagged_but_still_requires_a_decision` | A measured 0.31 is flagged `low_confidence` (harder scrutiny) and still requires a decision; the decision never touches the measured score or its provenance. |
+| `test_conflicting_extraction_is_recorded_not_dropped` / `test_end_to_end_conflicting_totals_reach_the_database` | A second, different reading of the same field is kept as a recorded conflict (unit and rendered-PDF end-to-end), flagged `conflicting_extraction`; a decision on the current value satisfies the gate while the conflicting reading stays visible. |
+| `test_inconsistent_extracted_totals_block_even_when_every_field_was_confirmed` | A confident misread (TTC edited to a value that no longer sums) blocks the document via `INCONSISTENT_EXTRACTED_TOTALS` even with every field confirmed; correcting the value re-satisfies the arithmetic **and** re-binds the stale decision. |
+| `test_totals_rounding_boundary_and_the_timbre_note` | Exact 2-decimal sums pass; the missing timbre is a named, benign gap (`timbre not extracted`) rather than a silent one. |
+| `test_transcribed_timbre_closes_the_gap_only_when_it_sums` | Transcribing a timbre closes the benign gap only when the sum holds; a 10.00 timbre on a 1190.00 invoice re-opens `inconsistent`. |
+| `test_decision_bound_to_value_goes_stale_after_an_edit` | A CONFIRMED bound to the reviewed value goes `decision_stale` after a human edit and blocks submission (`FIELD_FLAGGED`); a CORRECTED re-binds it. |
+| `test_flagged_field_blocks_until_superseded` | An open flag blocks; superseding with CONFIRMED on the exact current value clears it and submission proceeds. |
+| `test_line_quantity_decision_binds_canonically_and_correction_recomputes` | Line decisions bind to the canonical 6-decimal quantity ("2" ≡ "2.000000"); a correction rewrites the quantity and recomputes the line amount; a wrong expected value is refused (`FIELD_VALUE_CHANGED_SINCE_READ`). |
+| `test_decisions_are_idempotent_and_concurrency_is_refused` | An exact repeat of the latest decision is a replay (no new row, same timestamp); the same decision by another reviewer is a new event; a value changed between read and confirm is refused and writes nothing. |
+| `test_every_decision_and_denial_is_audited_with_identity` | `OCR_FIELD_REVIEW_DECIDED` carries the reviewer's identity; the chain verifies. |
+| `test_role_and_state_gates_on_decisions_and_edits_are_audited` | A warehouse role is refused (audited `SECURITY_FIELD_REVIEW_BLOCKED`/`SECURITY_FIELD_EDIT_BLOCKED`); once the document backs a submitted approval, decisions and edits are closed (`FIELD_REVIEW_CLOSED`/`FIELD_EDIT_CLOSED`) and those refusals are audited too. |
+| `test_inactive_user_cannot_decide` | A deactivated account is refused outright. |
+| `test_cross_tenant_decisions_are_impossible_and_reads_are_audited` | A foreign-tenant user cannot decide on (or even read the verdict of) the document; the cross-company read attempt is audited in the **victim's** chain; the tenant's data is untouched. |
+| `test_document_link_state_whitelist` | A draft may cite a document only while it is `NeedsReview`/`Validated`; once it backs a submitted approval the link is refused (`DOCUMENT_LINK_STATE_REFUSED`) and the document's state is never clobbered. |
+| `test_migration_upgrades_legacy_database_preserving_rows` | A real pre-phase-29 database (current schema minus the phase-29 objects) gains the conflict column, the decisions table and the refreshed immutability trigger through the idempotent migration; stored rows survive and decisions work immediately. |
+| `test_api_decide_endpoint_contract` | The decide endpoint: 401 unauthenticated, 403 wrong role, 200 + idempotent replay, 422 for every contract violation (unknown decision, invalid transcription value, `NOT_PRESENT` on a present required field, flag on a non-policy field) with stable reason prefixes, 404 that conflates foreign and missing documents. |
+| `test_api_review_policy_endpoint` | The verdict endpoint: 401/403/404 and the same evaluation the gates enforce, with per-field status, honest confidence provenance, totals and blocking reasons. |
+
+### B. Contract updates and cross-phase consistency
+
+- OpenAPI protected-operation pin: **26 → 28** (the two phase-29 endpoints); the public set is
+  unchanged.
+- Shared review fixture: `tests/conftest.py` gained `complete_document_field_review` (confirms
+  every extracted required field, asserts genuinely-absent optional fields, asserts satisfaction);
+  the phase-5/6/7/13 lifecycle tests now complete the field review before driving an invoice
+  forward — the intended fail-closed flow, no test weakened or skipped.
+- The phase-27 desktop review-dialog test completes the field review through the service before
+  submitting (its minimal two-field fixture follows the honest transcription path; a desktop
+  decision UI remains future work).
+- `tools/staging_acceptance.py`: **37 → 40 checks** (the gate refusal, the unsatisfied verdict, and
+  API-driven decision completion before the invoice workflow).
+- Documentation: `docs/OCR_EVALUATION_PROTOCOL.md` §6 now states the enforced review and the
+  deliberately unimplemented auto-accept path; `docs/RISK_REGISTER.md` O1/O2/O3 updated;
+  `docs/RELEASE_READINESS_MATRIX.md` R-OCR/R-SCF citations updated.
+
+**Full suite at the Phase 29 head** (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`,
+`pytest tests -q --cov=dz_erp --cov-report=term`): **710 passed, 20 skipped, 0 failed, exit 0 in
+29 min 15 s**. Coverage **85 %** (6,740 statements, 993 missed; up from 6,239 statements at the
+Phase 28 head). Per module: the new `review_policy.py` **88 %** (242 statements), `api.py` 87 %
+(322 → 397), `database.py` 94 %, `intake_ocr.py` 92 %, `procurement_stock.py` 83 %,
+`security_audit.py` 79 %. A second, plain no-coverage confirmation run passed **710 passed,
+20 skipped, 0 failed, exit 0 in 23 min 48 s**. The single warning is the benign third-party
+starlette/anyio `DeprecationWarning`. The total count reconciles exactly: 686 (Phase 28 head) +
+24 phase-29 tests = 710. No test was suppressed, weakened or skipped to obtain this result. CI for
+this exact head is pending the authorized push (the workflow triggers on `pull_request`), which is
+reported, not assumed.

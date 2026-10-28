@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
 
@@ -434,19 +434,22 @@ def read_supplier_invoice_secure(
     return result
 
 
-def read_source_document_file_secure(
+def read_source_document_content_secure(
     db: ERPDatabase,
     vault: PrivateDocumentVault,
     requesting_user_id: int,
     document_id: str,
-) -> bytes:
-    """Read raw decrypted source document bytes with company-isolation and audit logging.
+) -> "Tuple[bytes, Dict[str, Any]]":
+    """Read decrypted source bytes plus the tenant-scoped metadata row.
 
-    As with :func:`read_supplier_invoice_secure`, denials are audited and
-    committed before the error is raised so the blocked attempt survives.
+    Company-isolation and audit logging are identical to the file read:
+    denials are audited and committed before the error is raised so the
+    blocked attempt survives. The metadata row (filename, MIME type) lets a
+    preview surface label what it shows without a second tenant check.
     """
     denial: Optional[Exception] = None
     raw_bytes: Optional[bytes] = None
+    doc_meta: Optional[Dict[str, Any]] = None
 
     with db.transaction() as conn:
         user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
@@ -482,10 +485,31 @@ def read_source_document_file_secure(
                     target_id=document_id,
                     after_state={"byte_size": len(raw_bytes)},
                 )
+                doc_meta = dict(doc)
 
     if denial is not None:
         raise denial
-    assert raw_bytes is not None
+    assert raw_bytes is not None and doc_meta is not None
+    return raw_bytes, doc_meta
+
+
+def read_source_document_file_secure(
+    db: ERPDatabase,
+    vault: PrivateDocumentVault,
+    requesting_user_id: int,
+    document_id: str,
+) -> bytes:
+    """Read raw decrypted source document bytes with company-isolation and audit logging.
+
+    As with :func:`read_supplier_invoice_secure`, denials are audited and
+    committed before the error is raised so the blocked attempt survives.
+    """
+    raw_bytes, _doc_meta = read_source_document_content_secure(
+        db=db,
+        vault=vault,
+        requesting_user_id=requesting_user_id,
+        document_id=document_id,
+    )
     return raw_bytes
 
 
@@ -527,6 +551,114 @@ def list_supplier_invoices_secure(
         raise denial
     assert scoped_company_id is not None
     return db.list_supplier_invoices(scoped_company_id, limit=limit)
+
+
+def list_extracted_fields_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    document_id: str,
+    *,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """OCR field rows of one document, under the document-file RBAC.
+
+    Source documents are the warehouse domain, so any active user of the
+    tenant may review them; the company scope is derived from the verified
+    ``users`` row, and a cross-company attempt is audited (and committed)
+    exactly like the per-document file read before the error is raised.
+    The limit is clamped up front through the same single-source helper
+    every read model uses, so a bad limit stays a contract (422) error at
+    the API layer and can never be mistaken for the document's 404.
+    """
+    db._read_limit(limit, "list_extracted_fields")
+    denial: Optional[Exception] = None
+    scoped_company_id: Optional[int] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        else:
+            doc = conn.execute(
+                "SELECT company_id FROM source_documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if not doc:
+                denial = ValueError("Source document not found.")
+            elif doc["company_id"] != user["company_id"]:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=doc["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="SECURITY_CROSS_COMPANY_READ_BLOCKED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={
+                        "attacker_company_id": user["company_id"],
+                        "target_company_id": doc["company_id"],
+                    },
+                )
+                denial = TenantIsolationError("Cross-company read access denied.")
+            else:
+                scoped_company_id = int(user["company_id"])
+
+    if denial is not None:
+        raise denial
+    assert scoped_company_id is not None
+    return db.list_extracted_fields(scoped_company_id, document_id, limit=limit)
+
+
+def list_partners_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    *,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Partner master data for the requester's own company, any active user.
+
+    Master data is operational, not ledger-financial, so no role is denied;
+    the scope still comes only from the verified credential.
+    """
+    denial: Optional[Exception] = None
+    scoped_company_id: Optional[int] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        else:
+            scoped_company_id = int(user["company_id"])
+
+    if denial is not None:
+        raise denial
+    assert scoped_company_id is not None
+    return db.list_partners(scoped_company_id, limit=limit)
+
+
+def list_stock_quants_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    *,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """On-hand stock for the requester's own company, any active user.
+
+    Stock is the warehouse domain - the one role that must never be blocked
+    from it - so any active user of the tenant may list it.
+    """
+    denial: Optional[Exception] = None
+    scoped_company_id: Optional[int] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        else:
+            scoped_company_id = int(user["company_id"])
+
+    if denial is not None:
+        raise denial
+    assert scoped_company_id is not None
+    return db.list_stock_quants(scoped_company_id, limit=limit)
 
 
 def trial_balance_secure(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:

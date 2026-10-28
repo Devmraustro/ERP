@@ -107,6 +107,12 @@ def build(*, smoke: bool) -> int:
         # default and console window for a business application: errors must
         # be visible, and --smoke output must be capturable.
         "--console",
+        # Bundle the vendored official SCF chart source next to the payload
+        # (sys._MEIPASS/vendor): dz_erp.localization.vendor_data_dir() is
+        # frozen-build aware and refuses to invent a substitute chart when
+        # the data is absent. ~1.6 MB, MPL-2.0 data — see the dependency and
+        # licence register.
+        f"--add-data={REPO_ROOT / 'vendor'}{os.pathsep}vendor",
     ]
     for hidden in UVICORN_HIDDEN_IMPORTS:
         args.append(f"--hidden-import={hidden}")

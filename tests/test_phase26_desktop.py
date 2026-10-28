@@ -8,10 +8,11 @@ What this phase must prove:
    destroying data, and invalid values are refused at start-up.
 2. **Mode A really works**: an embedded loopback service (ephemeral port,
    127.0.0.1 only) built from the same ``serve.build_app`` as a deployment
-   boots, first-run creates exactly one company + admin and refuses to
-   overwrite an existing installation, the client logs in over HTTP, reads
-   the lists and the trial balance, the security-log environment variable is
-   restored after app construction, and shutdown is clean.
+   boots, first-run creates exactly one company + admin + the official SCF
+   chart of accounts (Phase 27) and refuses to overwrite an existing
+   installation, the client logs in over HTTP, reads the lists and the trial
+   balance, the security-log environment variable is restored after app
+   construction, and shutdown is clean.
 3. **Errors are typed and actionable** at the client boundary.
 4. **The GUI really constructs** (when PySide6 is installed, offscreen) and
    switches to right-to-left layout for Arabic.
@@ -170,7 +171,11 @@ def test_mode_a_full_cycle_start_login_read_stop(tmp_path: Path) -> None:
         admin_username="admin",
         admin_password=_SMOKE_PASSWORD,
     )
-    assert user >= 1
+    # Phase 27: first run now seeds the official SCF chart, so bootstrap
+    # reports what it loaded and the account listing below is *not* empty.
+    assert user["user_id"] >= 1
+    assert user["company_id"] >= 1
+    assert user["accounts_loaded"] >= 50
 
     # The security-log environment variable is process-global; the service
     # must restore whatever was there after constructing the app.
@@ -196,8 +201,14 @@ def test_mode_a_full_cycle_start_login_read_stop(tmp_path: Path) -> None:
         session = client.session()
         assert session["username"] == "admin"
         assert session["role"] == "admin"
-        # A fresh first-run database is empty: lists exist and answer, empty.
-        assert client.accounts()["accounts"] == []
+        # Phase 27: a fresh first-run database seeds the official SCF chart,
+        # while products/documents/invoices start empty. The chart invariant
+        # (>= 50 accounts incl. 401) is asserted by the phase-27 suite; here
+        # the read endpoints must answer over HTTP with the seeded data.
+        accounts = client.accounts()
+        assert accounts["count"] == user["accounts_loaded"]
+        assert accounts["accounts"]
+        assert any(a["code"] == "401" for a in accounts["accounts"])
         assert client.products()["products"] == []
         assert client.documents()["documents"] == []
         assert client.invoices()["invoices"] == []

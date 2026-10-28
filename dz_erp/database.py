@@ -1652,3 +1652,97 @@ class ERPDatabase:
             "total_credit_dzd": format_dzd(total_credit),
             "balanced": True,
         }
+
+    # ------------------------------------------------------------------
+    # Phase 27 — read models for the review and navigation screens
+    # ------------------------------------------------------------------
+
+    def list_partners(self, company_id: Any, *, limit: Any = 500) -> List[Dict[str, Any]]:
+        """Supplier/customer master data for one company, ordered by name.
+
+        Scoped to the tenant like every read model; identifiers (NIF) are
+        business data the tenant already owns - no custody or credential
+        column is exposed.
+        """
+        cid = self._require_company_scope(company_id, "list_partners")
+        capped = self._read_limit(limit, "list_partners")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, name, partner_type, tax_regime, nif, wilaya_code
+                FROM partners
+                WHERE company_id = ?
+                ORDER BY name
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_stock_quants(self, company_id: Any, *, limit: Any = 500) -> List[Dict[str, Any]]:
+        """Per-warehouse on-hand stock for one company, warehouse then SKU.
+
+        The product join gives the display columns (SKU, label, unit) without
+        exposing costing internals; valuation stays a procurement concern.
+        """
+        cid = self._require_company_scope(company_id, "list_stock_quants")
+        capped = self._read_limit(limit, "list_stock_quants")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT q.warehouse_code AS warehouse_code,
+                       p.sku            AS sku,
+                       p.name           AS product_name,
+                       p.uom            AS uom,
+                       q.qty_on_hand    AS qty_on_hand
+                FROM stock_quants AS q
+                JOIN products AS p
+                  ON p.id = q.product_id AND p.company_id = q.company_id
+                WHERE q.company_id = ?
+                ORDER BY q.warehouse_code, p.sku
+                LIMIT ?
+                """,
+                (cid, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_extracted_fields(
+        self, company_id: Any, document_id: str, *, limit: Any = 500
+    ) -> List[Dict[str, Any]]:
+        """OCR-extracted fields of one document in review order.
+
+        Carries exactly what a reviewer needs to judge and correct a field -
+        the raw OCR text (immutable by trigger), the current normalized
+        value, the honest confidence triple and any human override with its
+        editor - and deliberately excludes ``bbox_json`` (geometry the UI
+        does not render). The caller must already be inside the tenant; the
+        secure wrapper above the API layer derives that scope from the
+        verified credential, never from an argument.
+        """
+        cid = self._require_company_scope(company_id, "list_extracted_fields")
+        capped = self._read_limit(limit, "list_extracted_fields")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, field_name, page_number, line_index, raw_text,
+                       normalized_value, confidence, confidence_kind,
+                       confidence_scope, confidence_calibrated,
+                       human_override_value, edited_by_id, edited_at,
+                       ocr_model_version
+                FROM ocr_extracted_fields
+                WHERE company_id = ? AND document_id = ?
+                ORDER BY page_number, COALESCE(line_index, 0), field_name
+                LIMIT ?
+                """,
+                (cid, document_id, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()

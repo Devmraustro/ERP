@@ -20,7 +20,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
@@ -47,7 +57,11 @@ from .procurement_stock import (
 from .security_audit import (
     JsonlSecurityLog,
     StructuredRedactingLogger,
+    list_extracted_fields_secure,
+    list_partners_secure,
+    list_stock_quants_secure,
     list_supplier_invoices_secure,
+    read_source_document_content_secure,
     read_source_document_file_secure,
     read_supplier_invoice_secure,
     trial_balance_secure,
@@ -707,5 +721,105 @@ def create_erp_fastapi_app(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except FinancialIntegrityError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Read-only listing endpoints for the review and navigation screens
+    # (Phase 27). Same contract as the Phase 25 listings: scope derived
+    # from the verified credential, limits clamped server-side, denials
+    # audited by the secure wrappers.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/partners")
+    def api_list_partners(
+        limit: int = 500,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Partner master data (suppliers/customers) for the caller's company."""
+        try:
+            rows = list_partners_secure(db, auth.user_id, limit=limit)
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "partners": rows, "count": len(rows)}
+
+    @app.get("/api/v1/stock")
+    def api_list_stock(
+        limit: int = 500,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Per-warehouse on-hand stock for the caller's company."""
+        try:
+            rows = list_stock_quants_secure(db, auth.user_id, limit=limit)
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "stock": rows, "count": len(rows)}
+
+    @app.get("/api/v1/documents/{document_id}/fields")
+    def api_list_document_fields(
+        document_id: str,
+        limit: int = 500,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """OCR-extracted fields of one document, in review order.
+
+        Raw OCR text, current values, honest confidence metadata and human
+        overrides - everything a reviewer needs; geometry (bbox) stays
+        internal. Cross-company attempts are audited by the secure wrapper.
+        """
+        # Clamp first through the same single-source helper every read model
+        # uses: a bad limit is a 422 contract error, never a mistaken 404 for
+        # the document (the secure wrapper re-clamps as defense in depth; its
+        # ValueError means "not found").
+        try:
+            db._read_limit(limit, "list_extracted_fields")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            rows = list_extracted_fields_secure(
+                db, auth.user_id, document_id, limit=limit
+            )
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "document_id": document_id, "fields": rows, "count": len(rows)}
+
+    @app.get("/api/v1/documents/{document_id}/content")
+    def api_get_document_content(
+        document_id: str,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Response:
+        """The decrypted source document bytes, for the review preview pane.
+
+        Reuses the audited per-document secure path unchanged - the access is
+        audit-logged exactly like every other document read. The response
+        carries the stored MIME type and original filename so the client can
+        preview (image) or hand off (PDF) without guessing.
+        """
+        try:
+            raw, doc = read_source_document_content_secure(
+                db=db,
+                vault=vault,
+                requesting_user_id=auth.user_id,
+                document_id=document_id,
+            )
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        filename = doc["filename"]
+        quoted = filename.replace('"', "'")
+        return Response(
+            content=raw,
+            media_type=doc["mime_type"],
+            headers={"Content-Disposition": f'inline; filename="{quoted}"'},
+        )
 
     return app

@@ -3,7 +3,9 @@
 
 import csv
 import json
+import os
 import re
+import sys
 import xml.etree.ElementTree as ET
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +20,42 @@ AZINAK_FIX_DIR = REPO_ROOT / "vendor" / "azinak_l10n_dz_account_fix" / "l10n_dz_
 TAGHRAS_STATE_XML = (
     REPO_ROOT / "vendor" / "taghrastech_odoo_l10n_dz" / "tt_l10n_dz_state" / "data" / "res_country_state.xml"
 )
+
+#: Environment override for the vendored SCF source data. Set by a packager
+#: (or an operator with a reviewed data copy) when the checkout-relative
+#: location does not apply, e.g. inside frozen PyInstaller builds.
+VENDOR_DATA_DIR_ENV = "ERP_VENDOR_DATA_DIR"
+
+
+def vendor_data_dir() -> Path:
+    """Resolve the vendored official chart source data, frozen-build aware.
+
+    Resolution order (explicit, documented, testable):
+
+    1. ``ERP_VENDOR_DATA_DIR`` - explicit override; a packager who moves the
+       data must say so rather than rely on search paths.
+    2. Frozen builds (PyInstaller): the data directory bundled next to the
+       executable payload (``sys._MEIPASS``); ``tools/build_desktop.py``
+       bundles ``vendor/`` with ``--add-data``.
+    3. The repository checkout location - the behaviour every existing test
+       and deployment relies on.
+
+    The official Odoo 18.0 ``l10n_dz`` template files are MPL-2.0 (Odoo's
+    module licence), used here as data under that licence; the fix and
+    wilaya add-ons are the vendored third-party repositories reviewed in
+    ``docs/DEPENDENCY_AND_LICENSE_REGISTER.md``. This function only locates
+    them - it never invents account mappings.
+    """
+    override = os.environ.get(VENDOR_DATA_DIR_ENV)
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate = Path(meipass) / "vendor"
+            if candidate.is_dir():
+                return candidate
+    return REPO_ROOT / "vendor"
 
 # Verified account-type fixes from azinak/l10n-dz-account-fix/models/migration.py
 ACCOUNT_TYPE_FIXES: Dict[str, Tuple[str, str]] = {
@@ -145,12 +183,37 @@ def validate_algerian_identifiers(
 
 def inspect_upstream_odoo_l10n_dz() -> Dict[str, Any]:
     """Directly parse the vendored official Odoo 18.0 l10n_dz files to produce verified evidence."""
-    template_py = (ODOO_L10N_DZ_DIR / "models" / "template_dz.py").read_text(encoding="utf-8")
+    vendor = vendor_data_dir()
+    odoo_dir = vendor / "odoo_18_l10n_dz"
+    taghras_state_xml = (
+        vendor / "taghrastech_odoo_l10n_dz" / "tt_l10n_dz_state" / "data" / "res_country_state.xml"
+    )
+    missing = [
+        str(relative)
+        for relative in (
+            odoo_dir / "models" / "template_dz.py",
+            odoo_dir / "data" / "template" / "account.account-dz.csv",
+            odoo_dir / "data" / "template" / "account.group-dz.csv",
+            odoo_dir / "data" / "template" / "account.tax-dz.csv",
+            odoo_dir / "data" / "tax_report.xml",
+            taghras_state_xml,
+        )
+        if not relative.is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "The official chart source data is incomplete or missing under "
+            f"{vendor}. Missing: {missing}. For a checkout this data lives in "
+            "vendor/; for a packaged application set the ERP_VENDOR_DATA_DIR "
+            "environment variable to the directory containing the reviewed "
+            "vendor data. No substitute chart is ever invented."
+        )
+    template_py = (odoo_dir / "models" / "template_dz.py").read_text(encoding="utf-8")
     receivable_match = re.search(r"'property_account_receivable_id':\s*'([^']+)'", template_py)
     official_receivable = receivable_match.group(1) if receivable_match else None
 
     accounts_by_code: Dict[str, Dict[str, Any]] = {}
-    with (ODOO_L10N_DZ_DIR / "data" / "template" / "account.account-dz.csv").open(encoding="utf-8") as fh:
+    with (odoo_dir / "data" / "template" / "account.account-dz.csv").open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             code = row["code"].strip()
@@ -165,7 +228,7 @@ def inspect_upstream_odoo_l10n_dz() -> Dict[str, Any]:
             }
 
     groups_by_code: Dict[str, Dict[str, str]] = {}
-    with (ODOO_L10N_DZ_DIR / "data" / "template" / "account.group-dz.csv").open(encoding="utf-8") as fh:
+    with (odoo_dir / "data" / "template" / "account.group-dz.csv").open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             prefix = row["code_prefix_start"].strip()
@@ -176,8 +239,8 @@ def inspect_upstream_odoo_l10n_dz() -> Dict[str, Any]:
             }
 
     # Inspect tax tags in account.tax-dz.csv vs tax_report.xml
-    tax_csv_text = (ODOO_L10N_DZ_DIR / "data" / "template" / "account.tax-dz.csv").read_text(encoding="utf-8")
-    tax_report_xml = (ODOO_L10N_DZ_DIR / "data" / "tax_report.xml").read_text(encoding="utf-8")
+    tax_csv_text = (odoo_dir / "data" / "template" / "account.tax-dz.csv").read_text(encoding="utf-8")
+    tax_report_xml = (odoo_dir / "data" / "tax_report.xml").read_text(encoding="utf-8")
     referenced_in_report = sorted(set(re.findall(r"E3B[0-9]{2}", tax_report_xml)))
     defined_in_tax_csv = sorted(set(re.findall(r"E3B[0-9]{2}", tax_csv_text)))
     orphaned_report_boxes = [
@@ -185,7 +248,7 @@ def inspect_upstream_odoo_l10n_dz() -> Dict[str, Any]:
     ]
 
     # Parse 69 Wilayas from TaghrasTech XML
-    tree = ET.parse(TAGHRAS_STATE_XML)
+    tree = ET.parse(taghras_state_xml)
     wilayas = []
     for rec in tree.findall(".//record[@model='res.country.state']"):
         name_el = rec.find("field[@name='name']")

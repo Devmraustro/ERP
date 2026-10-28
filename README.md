@@ -2,7 +2,7 @@
 
 Production-grade Algerian *Système Comptable Financier* (SCF) localization, procure-to-pay (`PO → Goods Receipt → 3-Way Match → SoD Approval → Idempotent GL Posting`), encrypted supplier invoice intake with OCR (`pdfplumber` + `RapidOCR PP-OCRv4`), and tamper-evident audit/backup architecture.
 
-## Desktop application — installed, local-first (Phases 25–26)
+## Desktop application - installed, local-first (Phases 25-27)
 
 The product is an **installed desktop application** (logiciel de gestion), not a website: launch
 `dz-erp` on the workstation, log in, and work with the accounting data that lives on that machine
@@ -26,18 +26,26 @@ to a company-hosted `python -m dz_erp.serve` deployment; a SQLite file shared ov
 explicitly **not** a supported multi-user architecture. Details, data locations, backup/uninstall
 rules and the honest gap list: `docs/DESKTOP_APPLICATION.md`.
 
-**Desktop-phase verification (this branch, Windows/CPython 3.12.10).** The new read-only client
-API passes 6/6 (`tests/test_phase25_read_api.py`: tenant scoping, audited warehouse-role denials,
+**Desktop-phase verification (this branch, Windows/CPython 3.12.10).** The read-only client API
+passes 6/6 (`tests/test_phase25_read_api.py`: tenant scoping, audited warehouse-role denials,
 clamped limits, POSTED-only balanced trial balance). The desktop suite passes 10/10
 (`tests/test_phase26_desktop.py`: secret-free config whitelist, corrupt-config recovery,
 loopback-only ephemeral embedded service, first-run overwrite refusal, full
-bootstrap→serve→login→read→logout→stop cycle, headless `--smoke` subprocess exit 0, offscreen Qt
-construction with the Arabic right-to-left switch). Full local suite: **620 passed, 20 skipped,
-0 failed, exit 0** (85 % coverage; see §2C–2D of
-`docs/QA_TEST_MATRIX_AND_RESULTS.md`). The PyInstaller one-file build succeeds (128.3 MiB,
-SHA-256 sidecar verified); executing the unsigned exe is blocked by this workstation's
-application-control policy (WinError 4551) and is recorded, not bypassed
-(`docs/DESKTOP_APPLICATION.md` §8.2).
+bootstrap→serve→login→read→logout→stop cycle over the seeded chart, headless `--smoke` subprocess
+exit 0, offscreen Qt construction with the Arabic right-to-left switch). Phase 27 adds 17 tests:
+the first run now seeds and exactly validates the **official SCF chart of accounts** (294 accounts;
+fail-closed when the vendored source is absent, resumable after an interrupted run;
+`tests/test_phase27_scf_first_run.py` 8/8), four authenticated review/navigation endpoints with
+audited cross-company denials and byte-exact document content (`tests/test_phase27_review_api.py`
+5/5), and the desktop review UI — invoice review dialog with honest confidence display, human
+correction preserving raw OCR, explicit submit→approve→post with server-enforced segregation of
+duties and duplicate-post refusal surfaced as errors (`tests/test_phase27_desktop_ui.py` 4/4).
+The OpenAPI protected-operation pin is 19 → 23. Full local suite at the Phase 27 head:
+**661 passed, 20 skipped, 0 failed, exit 0** (19 min 18 s; 85 % coverage — see §2C–2E of
+`docs/QA_TEST_MATRIX_AND_RESULTS.md`). The PyInstaller one-file build succeeds
+(128.3 MiB, SHA-256 sidecar verified) and now bundles the vendored SCF data for frozen builds;
+executing the unsigned exe is blocked by this workstation's application-control policy
+(WinError 4551) and is recorded, not bypassed (`docs/DESKTOP_APPLICATION.md` §8.2).
 
 ## Quick Verification
 

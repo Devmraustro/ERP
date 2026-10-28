@@ -158,22 +158,30 @@ balance) and exits 0. It creates a throwaway data directory (or honours
 
 ### 8.1 What is implemented vs. not (no aspirational claims)
 
-Implemented: first-run wizard; login; navigation with dashboard, SCF chart,
-products, documents (with upload), supplier invoices, trial balance; French/
-Arabic switching with RTL layout; about dialog; clean shutdown with token
-revocation.
+Implemented: first-run wizard (company + admin + **official SCF chart of
+accounts** seeded and exactly validated, `SetupBlockerError` when the verified
+vendor source is absent); login; navigation with dashboard, SCF chart,
+products, **suppliers & clients**, **stock**, documents (with upload), supplier
+invoices (**review dialog: extraction fields with honest confidence display,
+human correction via the authorized API, explicit submit-approval → approval →
+posting** with the server's segregation-of-duties and duplicate protections
+surfaced as readable errors; image/PDF preview), **invoice creation form
+(single-line MVP)**, trial balance; French/Arabic switching with RTL layout;
+about dialog; clean shutdown with token revocation; long operations (upload,
+review actions) run off the GUI thread.
 
 Known product gaps, deliberately not faked:
 
-- A first-run database starts with an **empty chart of accounts**. The
-  verified loader `localization.load_official_odoo_chart(db, company_id,
-  apply_fixes_immediately=True)` is the designated next increment, but it
-  reads the vendor template tree via the module path, which also needs a
-  bundled-data story for frozen builds — wiring it without that would trade
-  an honest gap for an untested one.
-- Not yet in the UI (the verified API and client methods exist; wiring is the
-  next increment): invoice creation/approval/posting forms, OCR field
-  correction screens, user administration, printed reports.
+- User administration screens are not yet in the UI (the verified API and
+  client methods exist).
+- Multi-line invoice editing, purchase-order/GRN matching screens and printed
+  reports are not in the UI; the API contract supports them.
+- Arabic OCR accuracy is **not** claimed: the extraction fields carry honest,
+  measured confidence (or "not measured"), and uncertain fields are visibly
+  routed to manual review. No representative Arabic-scan accuracy figure has
+  been measured on this branch.
+- The packaged-exe smoke run (below) has not been executed on a
+  policy-permitting host.
 
 The trial balance and all accounting figures remain subject to review by a
 qualified Algerian accountant; nothing here is a statutory certification.
@@ -193,16 +201,22 @@ python tools/build_desktop.py --check SHA256HEX dist\AlgerianERP.exe
 Measured on this workstation (PyInstaller 6.22.3, PySide6 6.11.2, Python
 3.12.10): the build succeeds — `dist\AlgerianERP.exe`, **128.3 MiB**, SHA-256
 `9fedbfb717f23eb4a87e89dc4bec987962b68d990e6d96ca01083db4bfd3cea5`, sidecar
-written and verified by `--check` (exit 0). Two execution findings recorded
-honestly: the first build attempt died with `attempted relative import with
-no known parent package` because PyInstaller executes a *script*, not a
-package `__main__` — fixed by the `dz_erp.desktop.launcher` entry module
-(absolute imports, full dependency graph bundled). Executing the resulting
-exe is then **blocked by this host's Windows application-control policy**
-(WinError 4551, "application control policy blocked this file") — an
-unsigned-binary distribution constraint of the test machine, not an
-application defect. The packaged smoke run therefore remains to be executed
-on a workstation whose policy permits it:
+written and verified by `--check` (exit 0). Since Phase 27 the build also
+bundles the vendored official SCF chart data (`--add-data`, ~1.6 MB, MPL-2.0)
+which `dz_erp.localization.vendor_data_dir()` resolves inside the frozen
+payload (`sys._MEIPASS/vendor`), with the `ERP_VENDOR_DATA_DIR` override as
+the explicit fallback. Three execution findings recorded honestly: the first
+build attempt died with `attempted relative import with no known parent
+package` because PyInstaller executes a *script*, not a package `__main__` —
+fixed by the `dz_erp.desktop.launcher` entry module (absolute imports, full
+dependency graph bundled). Executing the resulting exe is then **blocked by
+this host's Windows application-control policy** (WinError 4551, "application
+control policy blocked this file") — an unsigned-binary distribution
+constraint of the test machine, not an application defect. The Phase 27
+`--add-data` build has not been rebuilt/re-executed on this host for the same
+policy reason; the packaging change is verified by the frozen-resource unit
+test (`vendor_data_dir` frozen path) and must be re-proven by a packaged smoke
+run on a policy-permitting workstation:
 
 ```bat
 dist\AlgerianERP.exe --smoke    :: expected: the same JSON payload as §8, exit 0

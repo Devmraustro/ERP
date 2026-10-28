@@ -464,24 +464,25 @@ the persisted config is a secret-free whitelist.
 | `test_desktop_package_version_is_declared` | Package identity (`AlgerianERP`, `0.1.0`). |
 | `test_embedded_service_refuses_non_loopback_bind` | `host="0.0.0.0"` → `ValueError` ("loopback interface only"); a LAN-visible bind from the embedded service is a design violation, never a warning. |
 | `test_first_run_refuses_existing_installation` | Re-running first-run against a database that already has users raises and **changes nothing** — an "attacker" username cannot overwrite an existing admin. |
-| `test_mode_a_full_cycle_start_login_read_stop` | The real Mode A loop: bootstrap (company + admin, audit keys minted beside the DB) → embedded service on an **ephemeral** loopback port → `/healthz`-gated start → unauthenticated call refused locally → wrong password → **HTTP 401** → login → session, empty lists, balanced `0.00` trial balance → logout (server-side revoke) → stop. The `ERP_SECURITY_LOG_PATH` environment variable is restored after app construction (sentinel asserted), and `service.port` raises after stop. |
+| `test_mode_a_full_cycle_start_login_read_stop` | The real Mode A loop: bootstrap (company + admin, audit keys minted beside the DB) → embedded service on an **ephemeral** loopback port → `/healthz`-gated start → unauthenticated call refused locally → wrong password → **HTTP 401** → login → session, the seeded official SCF chart (294 accounts), empty products/documents/invoices lists, balanced `0.00` trial balance → logout (server-side revoke) → stop. The `ERP_SECURITY_LOG_PATH` environment variable is restored after app construction (sentinel asserted), and `service.port` raises after stop. |
 | `test_smoke_command_full_cycle` | `python -m dz_erp.desktop --smoke --data-dir …` as a **subprocess**: exit 0, JSON payload with status/user/port/base_url, and the user-provided data dir survives as evidence. |
-| `test_mainwindow_constructs_and_switches_to_rtl` | (requires PySide6, run with `QT_QPA_PLATFORM=offscreen`) The real `MainWindow` constructs against a live embedded service (6 navigation views), and switching to Arabic flips the application to `RightToLeft`, back to French to `LeftToRight`. |
+| `test_mainwindow_constructs_and_switches_to_rtl` | (requires PySide6, run with `QT_QPA_PLATFORM=offscreen`) The real `MainWindow` constructs against a live embedded service (8 navigation views), and switching to Arabic flips the application to `RightToLeft`, back to French to `LeftToRight`. |
 
 Headless Mode A smoke (also the CI-runnable proxy for "the installed app starts"), real output on
-this workstation (Python 3.12.10, exit code 0):
+this workstation (Python 3.12.10, exit code 0, re-measured at the Phase 27 head after the SCF
+first-run seeding landed — the port and temp path vary per run):
 
 ```json
 {
   "status": "ok",
   "version": "0.1.0",
   "mode": "local",
-  "base_url": "http://127.0.0.1:58263",
-  "port": 58263,
-  "data_dir": "C:\\Users\\rabdz\\AppData\\Local\\Temp\\dz-erp-smoke-doc",
+  "base_url": "http://127.0.0.1:62609",
+  "port": 62609,
+  "data_dir": "C:\\Users\\rabdz\\AppData\\Local\\Temp\\dz-erp-smoke-a4t13gun",
   "user": "admin",
   "role": "admin",
-  "accounts": 0,
+  "accounts": 294,
   "products": 0,
   "documents": 0,
   "invoices": 0,
@@ -490,18 +491,23 @@ this workstation (Python 3.12.10, exit code 0):
 }
 ```
 
-Honest gaps (also in `docs/DESKTOP_APPLICATION.md` §8.1): a first-run database starts with an
-**empty chart of accounts** (the verified loader `localization.load_official_odoo_chart` is the
-designated next increment, blocked on a bundled-data story for frozen builds); invoice
-create/approve/post forms, OCR field-correction screens and user administration are not yet wired
-into the UI (API + client methods exist). Packaging is build-script + SHA-256 sidecar; an
-unsigned-installer distribution is not claimed as solved.
+`"accounts": 294` is the official SCF chart seeded at first run (§2E) — a fresh install now starts
+with the complete Algerian chart of accounts rather than an empty one; products/documents/invoices
+start empty and fill through real workflows.
 
-**Full suite on this head (Windows/CPython 3.12.10, clean re-run after the two contract-pin
-fixes below): 620 passed, 20 skipped, 0 failed, exit 0** (36 min 48 s; the single warning is the
-benign third-party starlette/anyio `DeprecationWarning`). Coverage **85 %** (5,485 statements,
-804 missed): the statement count grew by ~910 with the desktop layer, and the drop from the 87 %
-Phase-24 baseline comes entirely from the two new GUI-heavy modules measured headless —
+Honest gaps (also in `docs/DESKTOP_APPLICATION.md` §8.1): the empty-chart gap of Phase 26 is closed
+(§2E). Still not wired into the UI: user administration screens, multi-line invoice editing and
+purchase-order/GRN matching screens (the verified API contract supports them). Arabic OCR accuracy
+is not claimed — extraction fields carry honest measured confidence (or "not measured") and
+uncertain fields are routed to manual review. Packaging remains build-script + SHA-256 sidecar; an
+unsigned-installer distribution is not claimed as solved, and the packaged smoke run is blocked on
+this host by application-control policy (documented in `docs/DESKTOP_APPLICATION.md` §8.2).
+
+**Full suite at the Phase 26 head** (`99fc41e`, Windows/CPython 3.12.10, clean re-run after the two
+contract-pin fixes below): 620 passed, 20 skipped, 0 failed, exit 0 (36 min 48 s; the single
+warning is the benign third-party starlette/anyio `DeprecationWarning`). Coverage **85 %** (5,485
+statements, 804 missed): the statement count grew by ~910 with the desktop layer, and the drop from
+the 87 % Phase-24 baseline comes entirely from the two new GUI-heavy modules measured headless —
 `desktop/ui.py` (58 %; widget bodies execute only in interactive Qt) and `desktop/app.py`
 (39 %; GUI orchestration) — while the modified core modules keep their prior profiles
 (`database.py` 93 %, `api.py` 83 %). The first run of this phase had exactly two failures, both
@@ -513,4 +519,81 @@ extras are exact-pinned and PySide6 stays out of the headless lockfile) and
 at 14 → 19 for the five new authenticated read endpoints; the public set is unchanged). Both
 re-verified green with their files (202 passed) and in the clean full run above. CI for this
 exact head is pending the authorized push (the workflow triggers on `pull_request`), which is
-reported, not assumed.
+reported, not assumed. The Phase 27 full-suite re-measurement on the new head is recorded in §2E.
+
+## 2E. Phase 27 — SCF first-run seeding, review/navigation API and desktop review UI — `Passed`
+
+Phase 27 turns the Phase 26 shell into a usable local-first ERP workflow: (A) first run seeds the
+**official SCF chart of accounts** (vendored Odoo 18.0 `l10n_dz`, MPL-2.0 — never an invented
+substitute) with exact validation and fail-closed missing-source handling; (B) four authenticated
+read endpoints for the review screens (`/api/v1/partners`, `/api/v1/stock`,
+`/api/v1/documents/{id}/fields`, `/api/v1/documents/{id}/content`) plus the human field-correction
+PATCH already verified in Phase 12; (C) the desktop UI wires suppliers/stock views, an invoice
+review dialog (fields with honest confidence display, correction, explicit submit → approve → post)
+and an invoice creation form; (D) this matrix. Locally (Python 3.12.10, ruff clean):
+
+- `tests/test_phase27_scf_first_run.py` — **8 passed in 10.67 s**
+- `tests/test_phase27_review_api.py` — **5 passed** (with the Phase 25 file: 18 passed in 14.72 s)
+- `tests/test_phase27_desktop_ui.py` — **4 passed** (with the Phase 26 file: 14 passed in 52.04 s)
+- Phase 8 contract tests after the OpenAPI pin update — 46 passed (`-k "openapi or forged"`)
+
+### A. SCF chart initialization at first run (`tests/test_phase27_scf_first_run.py`)
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_first_run_seeds_official_chart_exactly` | `bootstrap_first_run` loads the vendored official chart and the result is validated **exactly**: `accounts_loaded == len(accounts_by_code)` (**294**), key accounts **401/411/380/642** present, company defaults **411/401**, exactly **8** standard taxes, timbre rule **`LF-2025-CASH-TIMBRE`**, one `LOAD_CHART_TEMPLATE` audit event with `actor_user_id IS NULL`. The vendored CSV already defines 380/642, so the loader's defensive extra inserts are no-ops — the exact-count pin catches any source drift. |
+| `test_repeated_first_run_after_success_is_refused` | Re-running first-run against an existing install raises `RuntimeError` ("already contains users") and **changes nothing**: still one company, one user, the full chart. |
+| `test_missing_vendor_data_blocks_before_any_write` | With the verified source absent, `SetupBlockerError` fires **before any database write** — no database file exists afterwards — and the remediation (`ERP_VENDOR_DATA_DIR`) is named in the message. Restoring the real vendored source makes the same first run succeed. |
+| `test_loader_failure_rolls_back_to_clean_database` | A simulated chart-loader failure is compensated: the loader is atomic (its audit event rolls back with it), so the unpinned company row is deleted and the database is left with zero users/companies/accounts/groups/taxes/timbre rules. The retry then succeeds from a clean state. |
+| `test_admin_failure_leaves_resumable_state_and_retry_completes` | A simulated admin-creation failure happens **after** the chart commit audit-pinned the company (append-only chain), so the state is *resumable*: one company, chart present, no users. The retry reuses the **same company id**, re-runs the idempotent chart load and completes with exactly one user. |
+| `test_multiple_orphaned_companies_fail_closed` | Two partially initialized companies from interrupted runs → `SetupBlockerError` ("partially initialized companies"); the state is never guessed at. |
+| `test_double_chart_load_is_idempotent` | Reloading the official chart duplicates nothing (same exact count, 8 taxes) and both loads are honest, audited facts (2 events); the audit chain verifies valid. |
+| `test_vendor_data_dir_resolution_priority` | Resolution priority: explicit `ERP_VENDOR_DATA_DIR` override wins → a frozen build resolves its bundled copy (`sys._MEIPASS/vendor`) → otherwise the checkout's `vendor/` (so a genuinely missing source then fails closed in the pre-flight). This is the frozen-build story that can be unit-tested without executing a frozen exe. |
+
+### B. Review and navigation read API (`tests/test_phase27_review_api.py`)
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_review_reads_require_authentication` | All four new reads answer **401** without a server-issued token. |
+| `test_partners_and_stock_are_tenant_scoped_and_clamped` | Two tenants each see only their own partners/stock (scope from the verified credential); the server clamps `limit` (0 and 10 000 → **422**, including on the fields read — a bad limit is a contract error, never a mistaken 404 for the document); unscoped data-layer reads raise `TenantIsolationError`. |
+| `test_document_fields_are_tenant_scoped_and_geometry_free` | OCR field rows carry raw text (immutable), current value, honest confidence (`0.42` measured / `None` → "not measured" kind), human override — and never `bbox_json`. The other tenant's decoy field does not leak; a cross-company read is **403** and audited (`SECURITY_CROSS_COMPANY_READ_BLOCKED`, committed before the raise); an unknown document is **404**, not a cross-company hit. |
+| `test_document_content_returns_exact_bytes_and_metadata` | `/documents/{id}/content` returns the **exact stored bytes** with the stored MIME type and original filename; warehouse staff may read documents/partners/stock (their domain) while financial invoice reads stay **403** with the audited `SECURITY_UNAUTHORIZED_ROLE_READ_BLOCKED`; every successful content read is audited (`DOCUMENT_FILE_ACCESSED`); cross-company content read → 403 + `SECURITY_CROSS_COMPANY_FILE_ACCESS_BLOCKED`; unknown → 404. |
+| `test_field_correction_preserves_raw_and_confidence_and_audits` | The human correction PATCH stores the override while **raw OCR text and confidence are untouched** — the reviewer always sees what OCR originally said; `edited_by_id`/`edited_at` recorded; `OCR_HUMAN_FIELD_EDIT` audited; an unknown field is 404. |
+
+### C. Desktop review UI (`tests/test_phase27_desktop_ui.py`, offscreen Qt against the real embedded service)
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_new_views_present_and_rtl_switch` | The navigation exposes the **suppliers** and **stock** views with live data from the new endpoints, the dashboard reports all six counts, and the French/Arabic switch still flips `RightToLeft`/`LeftToRight` with the enlarged view set. |
+| `test_review_dialog_full_cycle_with_correction_and_audit` | The review dialog loads detail → OCR fields → document state → decrypted preview **off the GUI thread** (one chained worker, the document id coming from the detail); shows the state badge in lockstep with the invoice workflow; displays honest confidence ("non mesurée" for the unmeasured field); the human correction preserves raw OCR and confidence and writes the audit event; explicit submit → approval → posting; the trial balance is balanced with account 401 present; a **duplicate post is refused by the server and surfaced as a readable error** (no silent swallow, no double journal). Segregation of duties is inherited from the server: the admin who created the invoice cannot approve it — approval is done by a separate approver user through the same dialog. |
+| `test_review_dialog_surfaces_unauthorized_role` | A warehouse user opening the review dialog gets the server's **403 surfaced as an error** (never a silent empty grid) and the refusal is audited. |
+| `test_review_dialog_surfaces_unknown_invoice` | An unknown invoice id surfaces the server's **404** as the same readable error path. |
+
+### D. Contract updates and cross-phase consistency
+
+- OpenAPI protected-operation pin: **19 → 23** (`PROTECTED_GETS` extended with the four new paths;
+  the forged-header parametrization now covers them). The public set is unchanged.
+- `tests/test_phase26_desktop.py` updated for the seeded chart (return-dict contract, `count ==
+  accounts_loaded`, account 401 present) — **10 passed**, and its Mode-A row above now describes
+  the seeded chart.
+- A latent desktop-client bug found by the UI cycle test and fixed: a caller-supplied header (the
+  posting `Idempotency-Key`) collided with the authentication header in `ErpClient._request`;
+  headers now merge. Covered by the passing post cycle above.
+- A limit-clamp consistency fix found by the review-API test and fixed: the fields read clamps
+  through the same single-source helper every read model uses, so a bad limit is a **422** contract
+  error — never a mistaken 404 for the document (the wrapper re-clamps as defense in depth).
+
+**Full suite at the Phase 27 head** (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`,
+`pytest tests -q --cov=dz_erp --cov-report=term`): **661 passed, 20 skipped, 0 failed, exit 0 in
+19 min 18 s**; coverage **85 %** (6,033 statements, 935 missed — up from 5,485 statements at the
+Phase 26 head, with the statement growth covered at 85 %). Per module: `api.py` 85 %,
+`database.py` 94 %, `security_audit.py` 77 %, `localization.py` 94 %, `desktop/service.py` 87 %,
+`desktop/ui.py` 63 % (widget bodies still execute only in interactive Qt; the review/create UI
+tests raised it from 58 %), `desktop/app.py` 39 %. The single warning is the benign third-party
+starlette/anyio `DeprecationWarning`. An earlier same-day attempt of this exact suite degraded
+environmentally (8 h wall clock; the three subprocess-worker tests of
+`test_phase9_process_boundary.py` failed with a 600 s `subprocess` budget under system load) —
+those three pass in isolation and in file-order sequence with the Phase 27 files ahead of them
+(269 passed in 2 min 04 s), and the clean re-run above is the recorded result. No test was
+suppressed, weakened or skipped to obtain it. CI for this exact head is pending the authorized
+push (the workflow triggers on `pull_request`), which is reported, not assumed.

@@ -922,6 +922,11 @@ PROTECTED_GETS = [
     "/api/v1/auth/session",
     "/api/v1/invoices/1",
     "/api/v1/documents/does-not-exist/file",
+    # Phase 27 review/navigation reads must be authenticated like the rest.
+    "/api/v1/partners",
+    "/api/v1/stock",
+    "/api/v1/documents/does-not-exist/fields",
+    "/api/v1/documents/does-not-exist/content",
 ]
 
 
@@ -1269,10 +1274,12 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
         "POST /api/v1/auth/token",
     ], f"unexpected public set: {sorted(public)}"
     # 14 original protected operations + the 5 Phase 25 read/report endpoints
-    # (accounts, products, documents, invoices, accounting/trial-balance).
+    # (accounts, products, documents, invoices, accounting/trial-balance)
+    # + the 4 Phase 27 review/navigation endpoints (partners, stock,
+    # documents/{id}/fields, documents/{id}/content).
     # The count pin catches accidental surface changes; the desktop read
     # endpoints are authenticated like every other protected operation.
-    assert len(protected) == 19, f"expected 19 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert len(protected) == 23, f"expected 23 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

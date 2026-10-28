@@ -60,8 +60,12 @@ class ErpClient:
         return {"Authorization": f"Bearer {self._token}"}
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        # Callers may pass extra headers (e.g. the posting Idempotency-Key);
+        # they must merge with the authentication header, not collide with it.
+        extra = kwargs.pop("headers", None) or {}
+        kwargs["headers"] = {**extra, **self._headers()}
         try:
-            response = self._client.request(method, path, headers=self._headers(), **kwargs)
+            response = self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
             raise ErpApiError(0, f"Connection to the ERP service failed: {exc}") from exc
         if response.status_code >= 400:
@@ -125,6 +129,49 @@ class ErpClient:
 
     def invoice(self, invoice_id: int) -> Dict[str, Any]:
         return self._request("GET", f"/api/v1/invoices/{invoice_id}")
+
+    # ------------------------------------------------------------------
+    # review and navigation reads (Phase 27 endpoints)
+    # ------------------------------------------------------------------
+
+    def partners(self, *, limit: int = 500) -> Dict[str, Any]:
+        return self._request("GET", "/api/v1/partners", params={"limit": limit})
+
+    def stock(self, *, limit: int = 500) -> Dict[str, Any]:
+        return self._request("GET", "/api/v1/stock", params={"limit": limit})
+
+    def document_fields(self, document_id: str, *, limit: int = 500) -> Dict[str, Any]:
+        return self._request(
+            "GET", f"/api/v1/documents/{document_id}/fields", params={"limit": limit}
+        )
+
+    def document_content(self, document_id: str) -> Dict[str, Any]:
+        """The decrypted source bytes plus preview metadata - never JSON-parsed.
+
+        The UI uses this for the review preview pane; the exact bytes come
+        from the audited server-side document read.
+        """
+        try:
+            response = self._client.get(
+                f"/api/v1/documents/{document_id}/content", headers=self._headers()
+            )
+        except httpx.HTTPError as exc:
+            raise ErpApiError(0, f"Connection to the ERP service failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise ErpApiError(response.status_code, _detail_from(response))
+        return {
+            "content": response.content,
+            "media_type": response.headers.get("content-type", "application/octet-stream"),
+            "filename": response.headers.get("content-disposition", ""),
+        }
+
+    def edit_extracted_field(self, document_id: str, field_name: str, new_value: str) -> Dict[str, Any]:
+        """Persist a human correction; the server preserves raw OCR + confidence."""
+        return self._request(
+            "PATCH",
+            f"/api/v1/documents/{document_id}/fields",
+            json={"field_name": field_name, "new_value": new_value},
+        )
 
     # ------------------------------------------------------------------
     # document intake

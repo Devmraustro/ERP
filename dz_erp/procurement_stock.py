@@ -65,6 +65,99 @@ def _check_user_and_tenant(conn: Any, company_id: int, user_id: int, allowed_rol
     return user
 
 
+def _source_invoice_mismatches(
+    conn: Any,
+    company_id: int,
+    invoice: Any,
+    evaluation: Dict[str, Any],
+) -> List[str]:
+    """Compare the reviewed source values with the financial invoice payload.
+
+    Review completeness alone is insufficient: a perfectly reviewed source
+    document must not authorize a different invoice payload. This comparison
+    is deliberately performed from the current rows in the caller's IMMEDIATE
+    transaction and is repeated at submit and approval.
+    """
+    fields = {item["field_name"]: item for item in evaluation["fields"]}
+    mismatches: List[str] = []
+
+    def source_value(name: str) -> Optional[str]:
+        item = fields.get(name)
+        return None if item is None or item["status"] == "missing" else item["value"]
+
+    source_number = source_value("invoice_number")
+    if source_number is None or normalize_invoice_ref(source_number) != normalize_invoice_ref(
+        str(invoice["supplier_invoice_no"])
+    ):
+        mismatches.append("INVOICE_NUMBER_SOURCE_MISMATCH")
+
+    source_date = source_value("invoice_date")
+    if source_date is None or str(source_date).strip() != str(invoice["invoice_date"]).strip():
+        mismatches.append("INVOICE_DATE_SOURCE_MISMATCH")
+
+    source_currency = source_value("currency_code")
+    if source_currency is None or str(source_currency).strip().upper() != str(invoice["currency_code"]).strip().upper():
+        mismatches.append("CURRENCY_SOURCE_MISMATCH")
+
+    for field_name, invoice_column in (
+        ("amount_ht_dzd", "amount_ht_dzd"),
+        ("amount_tva_dzd", "amount_tva_dzd"),
+        ("amount_timbre_dzd", "amount_timbre_dzd"),
+        ("amount_ttc_dzd", "amount_ttc_dzd"),
+    ):
+        raw_source = source_value(field_name)
+        # A missing timbre is explicitly permitted by the review policy and is
+        # equivalent to zero only for this comparison. Other missing totals
+        # fail closed rather than silently defaulting.
+        if raw_source is None and field_name == "amount_timbre_dzd":
+            raw_source = "0.00"
+        try:
+            if raw_source is None or round_dzd(raw_source) != round_dzd(invoice[invoice_column]):
+                mismatches.append(f"{field_name.upper()}_SOURCE_MISMATCH")
+        except (ValueError, TypeError, ArithmeticError):
+            mismatches.append(f"{field_name.upper()}_SOURCE_UNPARSEABLE")
+
+    supplier = conn.execute(
+        "SELECT nif FROM partners WHERE id = ? AND company_id = ?",
+        (invoice["supplier_id"], company_id),
+    ).fetchone()
+    source_nif = source_value("supplier_nif")
+    if (
+        supplier is None
+        or not supplier["nif"]
+        or source_nif is None
+        or "".join(ch for ch in str(source_nif) if ch.isdigit())
+        != "".join(ch for ch in str(supplier["nif"]) if ch.isdigit())
+    ):
+        mismatches.append("SUPPLIER_NIF_SOURCE_MISMATCH")
+
+    source_lines = evaluation["lines"]
+    # The review policy intentionally allows documents with no extracted line
+    # items: the invoice lines are then entered by a human and there is no
+    # source quantity evidence to compare. Do not interpret "no extracted
+    # lines" as "the invoice must have zero lines". When source lines exist,
+    # their count and quantities must match exactly.
+    if source_lines:
+        invoice_lines = conn.execute(
+            "SELECT qty FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ? ORDER BY id",
+            (company_id, invoice["id"]),
+        ).fetchall()
+        if len(source_lines) != len(invoice_lines):
+            mismatches.append("LINE_COUNT_SOURCE_MISMATCH")
+        else:
+            for index, (source_line, invoice_line) in enumerate(zip(source_lines, invoice_lines), start=1):
+                try:
+                    source_qty = round_qty(to_decimal(str(source_line["value"])))
+                    invoice_qty = round_qty(to_decimal(str(invoice_line["qty"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_UNPARSEABLE")
+                    continue
+                if source_qty != invoice_qty:
+                    mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_MISMATCH")
+
+    return mismatches
+
+
 def _document_review_gate(
     conn: Any,
     db: ERPDatabase,
@@ -116,6 +209,25 @@ def _document_review_gate(
     ]
     evaluation = evaluate_document_review_policy(dict(doc), fields, decisions)
     if evaluation["satisfied"]:
+        source_mismatches = _source_invoice_mismatches(conn, company_id, invoice, evaluation)
+        if source_mismatches:
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                action_type=f"INVOICE_{action}_BLOCKED_SOURCE_MISMATCH",
+                target_model="supplier_invoices",
+                target_id=str(invoice["id"]),
+                after_state={
+                    "document_id": document_id,
+                    "mismatches": source_mismatches[:20],
+                    "mismatches_truncated": len(source_mismatches) > 20,
+                },
+            )
+            return FinancialIntegrityError(
+                "DOCUMENT_INVOICE_MISMATCH: the invoice payload differs from its reviewed source document — "
+                + "; ".join(source_mismatches[:20])
+            )
         return None
     blocking = evaluation["blocking"]
     db.append_audit_event(

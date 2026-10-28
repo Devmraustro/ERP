@@ -169,6 +169,7 @@ def _make_invoice(
     document_id=None,
     *,
     invoice_no: str = "FAC-2026-0001",
+    invoice_date: str = "2026-02-14",
     line_qty: str = "2",
     unit_price: str = "500.00",
     amount_ht: str = "1000.00",
@@ -179,7 +180,7 @@ def _make_invoice(
     line_ht = str((Decimal(line_qty) * Decimal(unit_price)).quantize(Decimal("0.01")))
     return create_and_validate_supplier_invoice(
         db=db, company_id=1, user_id=user_id, supplier_id=7,
-        supplier_invoice_no=invoice_no, invoice_date="2026-02-14",
+        supplier_invoice_no=invoice_no, invoice_date=invoice_date,
         lines=[{"sku": "SKU-1", "description": "Widgets", "qty": line_qty,
                 "unit_price_dzd": unit_price, "tax_rate": "19", "line_ht_dzd": line_ht}],
         amount_ht_dzd=amount_ht, amount_tva_dzd=amount_tva, amount_ttc_dzd=amount_ttc,
@@ -353,6 +354,75 @@ def test_approval_recheck_refuses_a_document_disturbed_after_submit(tmp_path: Pa
     assert decided["workflow_state"] == "Rejected"
 
 
+def test_approval_rechecks_invoice_payload_against_reviewed_source(tmp_path: Path) -> None:
+    """A payload altered after submission must be blocked at approval too."""
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    submitted = submit_invoice_for_approval(
+        db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"]
+    )
+    assert submitted["workflow_state"] == "PendingApproval"
+
+    # Simulate an out-of-band payload change after the submit-time check.
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoices SET amount_ht_dzd = ? WHERE company_id = ? AND id = ?",
+            ("2000.00", 1, invoice["invoice_id"]),
+        )
+
+    with pytest.raises(FinancialIntegrityError, match="AMOUNT_HT_DZD_SOURCE_MISMATCH"):
+        decide_invoice_approval(
+            db, company_id=1, approver_user_id=3,
+            invoice_id=invoice["invoice_id"], approve=True,
+        )
+
+    assert any(
+        action[1] == "INVOICE_APPROVAL_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_reviewed_source_invoice_number_must_match_invoice_payload(tmp_path: Path) -> None:
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"], invoice_no="FAC-2026-9999")
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    with pytest.raises(FinancialIntegrityError, match="INVOICE_NUMBER_SOURCE_MISMATCH"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    assert any(
+        action[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_reviewed_source_amounts_and_line_quantity_must_match_invoice(tmp_path: Path) -> None:
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    # This payload is internally consistent (2,000 + 19% TVA = 2,380),
+    # but it does not match the reviewed source (1,000 + 190 = 1,190; qty 2).
+    invoice = _make_invoice(
+        db, doc["document_id"], line_qty="4", unit_price="500.00",
+        amount_ht="2000.00", amount_tva="380.00", amount_ttc="2380.00",
+    )
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    with pytest.raises(FinancialIntegrityError, match="AMOUNT_HT_DZD_SOURCE_MISMATCH"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    assert any(
+        action[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
 def test_legacy_invoice_without_document_is_unaffected(tmp_path: Path) -> None:
     """The fail-closed gate must not slow the fully-typed, document-less flow."""
     db, _vault, _ = _make_env(tmp_path)
@@ -450,7 +520,8 @@ def test_manual_transcription_route_is_satisfiable_with_honest_provenance(tmp_pa
     # And the invoice lifecycle runs on the transcribed document.
     invoice = _make_invoice(
         db, doc["document_id"], invoice_no="FAC-AR-2026-77",
-        line_qty="1", amount_ht="500.00", amount_tva="95.00", amount_ttc="595.00",
+        invoice_date="2026-02-20", line_qty="1",
+        amount_ht="500.00", amount_tva="95.00", amount_ttc="595.00",
     )
     submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
     approved = decide_invoice_approval(

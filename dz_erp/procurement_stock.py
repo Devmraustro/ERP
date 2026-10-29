@@ -76,7 +76,10 @@ def _source_invoice_mismatches(
     Review completeness alone is insufficient: a perfectly reviewed source
     document must not authorize a different invoice payload. This comparison
     is deliberately performed from the current rows in the caller's IMMEDIATE
-    transaction and is repeated at submit and approval.
+    transaction and is repeated at submit and approval. Both reviewable line
+    elements — quantity and unit price — are compared against the invoice's
+    lines in their canonical 6-decimal forms, with exact equality: the price
+    the reviewer bound to the paper is the price the invoice must carry.
     """
     fields = {item["field_name"]: item for item in evaluation["fields"]}
     mismatches: List[str] = []
@@ -134,18 +137,35 @@ def _source_invoice_mismatches(
     source_lines = evaluation["lines"]
     # The review policy intentionally allows documents with no extracted line
     # items: the invoice lines are then entered by a human and there is no
-    # source quantity evidence to compare. Do not interpret "no extracted
-    # lines" as "the invoice must have zero lines". When source lines exist,
-    # their count and quantities must match exactly.
+    # source line evidence to compare. Do not interpret "no extracted lines"
+    # as "the invoice must have zero lines". When source lines exist, their
+    # count, quantities and unit prices must match exactly.
+    #
+    # Line association invariant: invoice lines are matched to source lines by
+    # row order — source lines sorted by their extraction ``line_index``,
+    # invoice lines by insertion ``id``. The invoice line table stores no
+    # supplier SKU to join on, so entering the invoice's lines in a different
+    # order than the paper's rows is itself a mismatch and is flagged
+    # positionally, never silently rematched (the swap regression test pins
+    # this).
     if source_lines:
         invoice_lines = conn.execute(
-            "SELECT qty FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ? ORDER BY id",
+            "SELECT qty, unit_price_dzd FROM supplier_invoice_lines"
+            " WHERE company_id = ? AND invoice_id = ? ORDER BY id",
             (company_id, invoice["id"]),
         ).fetchall()
         if len(source_lines) != len(invoice_lines):
             mismatches.append("LINE_COUNT_SOURCE_MISMATCH")
         else:
-            for index, (source_line, invoice_line) in enumerate(zip(source_lines, invoice_lines), start=1):
+            line_prices = evaluation.get("line_prices") or []
+            if len(line_prices) != len(source_lines):
+                # The evaluator emits one price evaluation per extracted line
+                # row; a divergence means a corrupted evaluation. Refuse to
+                # compare rather than guess which price belongs to which line.
+                mismatches.append("LINE_PRICE_EVIDENCE_INCONSISTENT")
+            for index, (source_line, invoice_line, price_eval) in enumerate(
+                zip(source_lines, invoice_lines, line_prices), start=1
+            ):
                 try:
                     source_qty = round_qty(to_decimal(str(source_line["value"])))
                     invoice_qty = round_qty(to_decimal(str(invoice_line["qty"])))
@@ -154,6 +174,18 @@ def _source_invoice_mismatches(
                     continue
                 if source_qty != invoice_qty:
                     mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_MISMATCH")
+                # zip truncates to the shortest, so a short price list can
+                # only shrink the compared prefix — the count divergence was
+                # already flagged above, which blocks regardless.
+                raw_source_price = price_eval["value"]
+                try:
+                    source_price = round_qty(to_decimal(str(raw_source_price)))
+                    invoice_price = round_qty(to_decimal(str(invoice_line["unit_price_dzd"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_UNPARSEABLE")
+                    continue
+                if raw_source_price is None or source_price != invoice_price:
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISMATCH")
 
     return mismatches
 

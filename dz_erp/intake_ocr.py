@@ -1726,8 +1726,9 @@ def decide_extracted_field_review(
       stay immutable). On a *missing* field this is the manual-transcription
       entry point: it creates the row with honest provenance
       (``human-manual-entry``, no measured confidence) rather than fabricating
-      an engine reading. On a line row it rewrites the quantity and recomputes
-      the line amount.
+      an engine reading. On a line row it rewrites the quantity — or, for
+      ``line_unit_price`` decisions, the unit price — and recomputes the line
+      amount.
     * ``FLAGGED`` — cannot be verified. Blocks the document until superseded.
     * ``NOT_PRESENT`` — the field legitimately does not exist on the document
       (optional fields only; a required critical field must be transcribed,
@@ -1742,6 +1743,7 @@ def decide_extracted_field_review(
         DECISIONS_REQUIRING_VALUE,
         FIELD_DECISIONS,
         LINE_ITEM_FIELD,
+        LINE_PRICE_FIELD,
         ReviewPolicyValueError,
     )
 
@@ -1750,9 +1752,9 @@ def decide_extracted_field_review(
         raise ReviewPolicyValueError(
             f"Unknown review decision {decision!r}; expected one of {FIELD_DECISIONS}."
         )
-    if field_name == LINE_ITEM_FIELD and line_index is None:
+    if field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD) and line_index is None:
         raise ReviewPolicyValueError("A line-item decision requires line_index.")
-    if field_name != LINE_ITEM_FIELD and line_index is not None:
+    if field_name not in (LINE_ITEM_FIELD, LINE_PRICE_FIELD) and line_index is not None:
         raise ReviewPolicyValueError("line_index is only valid for line-item decisions.")
     if decision in DECISIONS_REQUIRING_VALUE and value in (None, ""):
         raise ReviewPolicyValueError(f"{decision} requires a value.")
@@ -1852,6 +1854,7 @@ def _apply_field_decision(
         HUMAN_ENTRY_MODEL,
         HUMAN_ENTRY_RAW,
         LINE_ITEM_FIELD,
+        LINE_PRICE_FIELD,
         ReviewPolicyValueError,
         TEXT_FALLBACK_RULE,
         rule_for,
@@ -1859,14 +1862,16 @@ def _apply_field_decision(
     )
 
     user_id = int(user["id"])
-    is_line = field_name == LINE_ITEM_FIELD
+    is_line = field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD)
     if is_line:
+        # Both line decisions bind to the row extraction wrote: the line JSON
+        # payload lives on the single ``line_item_json`` field row per index.
         row = conn.execute(
             """
             SELECT * FROM ocr_extracted_fields
             WHERE company_id = ? AND document_id = ? AND field_name = ? AND line_index = ?
             """,
-            (company_id, document_id, field_name, line_index),
+            (company_id, document_id, LINE_ITEM_FIELD, line_index),
         ).fetchone()
     else:
         row = conn.execute(
@@ -1883,15 +1888,35 @@ def _apply_field_decision(
     if row is not None:
         current_value = row["normalized_value"]
         if is_line:
-            # Quantities are compared in the canonical 6-decimal form.
             try:
                 payload = json.loads(str(current_value))
-                current_value = f"{round_qty(to_decimal(str(payload.get('qty')))):.6f}"
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError):
                 raise FinancialIntegrityError(
                     "LINE_PAYLOAD_UNPARSEABLE: the line item JSON cannot be reviewed as-is; "
                     "flag it and rebuild the line on the invoice."
                 ) from None
+            if field_name == LINE_PRICE_FIELD:
+                # An absent or malformed extracted price is not reviewable
+                # as-is (current value: none). The honest repair is
+                # transcription — CORRECTED with the price the paper shows.
+                raw_price = payload.get("unit_price_dzd")
+                try:
+                    current_value = (
+                        None
+                        if raw_price in (None, "")
+                        else f"{round_qty(to_decimal(str(raw_price))):.6f}"
+                    )
+                except (ValueError, TypeError):
+                    current_value = None
+            else:
+                # Quantities are compared in the canonical 6-decimal form.
+                try:
+                    current_value = f"{round_qty(to_decimal(str(payload.get('qty')))):.6f}"
+                except (ValueError, TypeError):
+                    raise FinancialIntegrityError(
+                        "LINE_PAYLOAD_UNPARSEABLE: the line item JSON cannot be reviewed as-is; "
+                        "flag it and rebuild the line on the invoice."
+                    ) from None
 
     if decision == DECISION_CONFIRMED:
         if row is None:
@@ -1904,7 +1929,10 @@ def _apply_field_decision(
                 "CONFIRMED requires expected_value: state the value you reviewed."
             )
         if is_line:
-            seen = _canonical_line_qty(expected_value)
+            if field_name == LINE_PRICE_FIELD:
+                seen = _canonical_line_price(expected_value)
+            else:
+                seen = _canonical_line_qty(expected_value)
             if seen != current_value:
                 raise FinancialIntegrityError(
                     f"FIELD_VALUE_CHANGED_SINCE_READ: expected {expected_value!r}, "
@@ -1961,7 +1989,10 @@ def _apply_field_decision(
                 (company_id, document_id, field_name),
             ).fetchone()
         elif is_line:
-            _rewrite_line_quantity(conn, row, reviewed_value)
+            if field_name == LINE_PRICE_FIELD:
+                _rewrite_line_unit_price(conn, row, reviewed_value)
+            else:
+                _rewrite_line_quantity(conn, row, reviewed_value)
             conn.execute(
                 "UPDATE ocr_extracted_fields SET edited_by_id = ?, edited_at = ? WHERE id = ?",
                 (user_id, now_iso, row["id"]),
@@ -2090,6 +2121,15 @@ def _canonical_line_qty(value: Optional[str]) -> Optional[str]:
         return None
 
 
+def _canonical_line_price(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    try:
+        return f"{round_qty(to_decimal(str(value))):.6f}"
+    except (ValueError, TypeError):
+        return None
+
+
 def _rewrite_line_quantity(conn: Any, row: Any, new_qty: str) -> None:
     """Rewrite one line row's quantity and recompute its HT amount in place.
 
@@ -2103,6 +2143,26 @@ def _rewrite_line_quantity(conn: Any, row: Any, new_qty: str) -> None:
     discount = to_decimal(payload.get("discount_pct", "0.00"))
     line_ht = round_dzd(qty * unit_price * ((Decimal("100.00") - discount) / Decimal("100.00")))
     payload["qty"] = f"{round_qty(qty):.6f}"
+    payload["line_ht_dzd"] = format_dzd(line_ht)
+    conn.execute(
+        "UPDATE ocr_extracted_fields SET normalized_value = ? WHERE id = ?",
+        (json.dumps(payload, ensure_ascii=False), row["id"]),
+    )
+
+
+def _rewrite_line_unit_price(conn: Any, row: Any, new_price: str) -> None:
+    """Rewrite one line row's unit price and recompute its HT amount in place.
+
+    The line JSON is extraction output, so the correction keeps every other
+    reading untouched and recomputes the line amount from the corrected price
+    exactly like invoice validation does (qty × PU × discount).
+    """
+    payload = json.loads(str(row["normalized_value"]))
+    unit_price = to_decimal(new_price)
+    qty = to_decimal(payload.get("qty", "0"))
+    discount = to_decimal(payload.get("discount_pct", "0.00"))
+    line_ht = round_dzd(qty * unit_price * ((Decimal("100.00") - discount) / Decimal("100.00")))
+    payload["unit_price_dzd"] = f"{round_qty(unit_price):.6f}"
     payload["line_ht_dzd"] = format_dzd(line_ht)
     conn.execute(
         "UPDATE ocr_extracted_fields SET normalized_value = ? WHERE id = ?",

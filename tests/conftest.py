@@ -26,11 +26,12 @@ def complete_document_field_review():
 
     Simulates a thorough reviewer: every extracted required header field is
     CONFIRMED at exactly its current stored value, every extracted line
-    quantity is CONFIRMED, and every optional policy field the extraction did
-    not find is asserted NOT_PRESENT. The document is then re-evaluated and
-    the helper raises unless it is satisfied, so a caller can never silently
-    proceed with a half-reviewed document. Tests that need a *different*
-    decision flow (corrections, flags, staleness) do not use this helper.
+    quantity and line unit price is CONFIRMED, and every optional policy field
+    the extraction did not find is asserted NOT_PRESENT. The document is then
+    re-evaluated and the helper raises unless it is satisfied, so a caller can
+    never silently proceed with a half-reviewed document. Tests that need a
+    *different* decision flow (corrections, flags, staleness) do not use this
+    helper.
 
     NOTE: CONFIRMED binds the decision to the current value — this helper is
     only valid before any concurrent edit, which holds for its callers.
@@ -87,6 +88,17 @@ def complete_document_field_review():
                 decision="CONFIRMED",
                 expected_value=lev["value"],
                 line_index=lev["line_index"],
+            )
+        for pev in first["line_prices"]:
+            decide_extracted_field_review(
+                db,
+                company_id=company_id,
+                user_id=reviewer_user_id,
+                document_id=document_id,
+                field_name="line_unit_price",
+                decision="CONFIRMED",
+                expected_value=pev["value"],
+                line_index=pev["line_index"],
             )
         final = evaluate()
         assert final["satisfied"], f"field review incomplete: {final['blocking']}"

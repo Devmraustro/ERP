@@ -742,3 +742,76 @@ starlette/anyio `DeprecationWarning`. The total count reconciles exactly: 686 (P
 24 phase-29 tests = 710. No test was suppressed, weakened or skipped to obtain this result. CI for
 this exact head is pending the authorized push (the workflow triggers on `pull_request`), which is
 reported, not assumed.
+
+### C. Follow-up on the same phase: reviewed source line unit prices are compared (`fix/phase29-invoice-line-price-consistency`)
+
+PR #4 bound invoice approval to the reviewed source but compared line quantities only — it named
+per-line unit prices as the explicit follow-up. This branch closes that gap. The prerequisite was
+verified first: the extracted line payload carries `unit_price_dzd`, but no decision could bind to
+it, so the per-line unit price becomes its own decided review element (`line_unit_price`), keyed by
+the same `line_index`, bound to the canonical 6-decimal form that invoice and purchase-order lines
+store (`PU` is quantized exactly like a quantity everywhere it is persisted). CONFIRMED binds the
+price the reviewer saw; CORRECTED transcribes or repairs it and rewrites the line payload with the
+recomputed line amount (`qty × PU × (100 − discount)/100`) without staling the quantity decision of
+the same line; NOT_PRESENT is refused for line elements; an absent or malformed extracted price has
+no reviewable current value, so the only repair is an attributed transcription. The
+submit/approval consistency gate now also requires each invoice line price to equal its reviewed
+source price by exact 6-decimal equality (no floats, no tolerance; all conversions via
+`to_decimal`/`round_qty`/`round_dzd`), inside the same IMMEDIATE transaction, with the same
+attributed, bounded, fail-closed audit (`DOCUMENT_INVOICE_MISMATCH`,
+`INVOICE_{SUBMIT,APPROVAL}_BLOCKED_SOURCE_MISMATCH`, details truncated at 20). Lines are associated
+positionally — the invoice line table stores no supplier SKU to join on — and a transposed order is
+itself a flagged mismatch, never silently rematched. No schema migration is needed
+(`ocr_field_reviews.field_name` is free TEXT; the immutability trigger already permits
+`normalized_value` updates).
+
+Deliberate boundary — per-line `line_ht_dzd` is **not** compared: the extracted payload carries it,
+but it is a derived value (recomputed from qty × PU × discount on every correction), never a decided
+one, and the extracted-totals arithmetic does not cross-check per-line sums — so there is no
+reviewed evidence to compare and no remediation path for a legitimate misread. Header HT, TVA and
+TTC totals **are** decided and compared, and invoice-internal validation pins each line HT to
+`qty × PU × (1 − discount)`. The remaining slack (a per-line `discount_pct` nobody decides) is a
+known, documented limitation, not a silent one. The extraction regex `([0-9]+(?:\.[0-9]+)?)` cannot
+produce a negative or malformed price from a real extraction; only out-of-band tampering can, and
+the fail-closed paths below cover it.
+
+New regression instances in `tests/test_phase29_ocr_review_policy.py` (27 → 37):
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_reviewed_source_line_unit_price_must_match_invoice` | A matching line quantity does not license a different price: 2 × 625.00 (+19 %) is internally consistent but differs from the reviewed 2 × 500.00 — refused `LINE_1_PRICE_SOURCE_MISMATCH`, audited, chain valid. |
+| `test_swapped_invoice_line_prices_are_flagged_not_silently_matched` | Transposed prices with identical header totals and row-wise matching quantities are flagged on **both** positions (`LINE_1_`/`LINE_2_PRICE_SOURCE_MISMATCH`), with no quantity flag — positional association, never unordered-set matching. |
+| `test_missing_or_malformed_source_price_blocks_until_transcribed` (absent + malformed) | A price that is not on file cannot be confirmed (`FIELD_VALUE_CHANGED_SINCE_READ`); the document blocks as `REQUIRED_FIELD_NOT_DECIDED:line_unit_price[0]`; a CORRECTED transcription rewrites the payload (`500.000000`) and the line amount (`1000.00`), and the matching invoice then flows. |
+| `test_invoice_line_price_tampered_after_submit_blocks_approval` | An invoice line price changed out-of-band after submission is caught by the approval recheck (`INVOICE_APPROVAL_BLOCKED_SOURCE_MISMATCH`, chain valid). |
+| `test_invoice_line_price_unparseable_blocks_submission` | An invoice-side price left unparseable out-of-band is refused as `LINE_1_PRICE_SOURCE_UNPARSEABLE` (audited) — the comparison never silently skips a price because a value is unreadable. |
+| `test_source_price_changed_after_decision_blocks_and_rebinds_fail_closed` | A source price edited after the reviewer bound it goes `decision_stale` (`FIELD_FLAGGED:line_unit_price[0]`), the gate refuses on the review itself, a CORRECTED transcription re-binds to the current value, and the previously matching invoice is then refused on price — fail closed in both directions. |
+| `test_duplicate_identical_lines_match_positionally` | Two identical source rows and two identical invoice lines match deterministically positionally and the invoice flows; ambiguity is resolved by order, never by unordered-set rematching. |
+| `test_line_price_decision_binds_canonically_and_correction_recomputes` | "500.00" ≡ "500.000000"; `600,50` (French decimal) lands on `600.500000`; NOT_PRESENT refused; a CORRECTED price rewrites the payload and recomputes the line amount without staling the bound quantity; exact replay is idempotent; a negative transcription is refused (`FIELD_VALUE_NEGATIVE_AMOUNT`); zero binds canonically (`0.000000`, line amount recomputed to `0.00`). |
+| `test_sub_centime_price_identity_is_enforced_at_six_decimals` | A 3-decimal misread confirmed as read (500.004) flags the header-identical centime invoice (500.00) — exact identity, never rounded into agreement; transcribing the printed price re-satisfies the policy and the same invoice flows. |
+| `test_legacy_invoice_without_document_is_unaffected` | The fully-typed, document-less invoice path still validates → approves → posts untouched. |
+
+Cross-tenant isolation is covered by the existing `test_cross_tenant_decisions_are_impossible_and_reads_are_audited`
+(unchanged): every gate query is company-scoped (`source_documents`, `ocr_extracted_fields`,
+`ocr_field_reviews`, `supplier_invoice_lines`, `partners`), and the full suite re-proves the
+invoice-creation, approval, posting, trial-balance, duplicate-post, migration and recovery behavior
+it always covered. No test was weakened or skipped.
+
+Local verification (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`, on this branch's tree):
+
+- `tests/test_phase29_ocr_review_policy.py` — **37 passed** (18.33 s).
+- `python tools/staging_acceptance.py` — **40/40 checks, exit 0** (the API-driven review completion
+  now decides `line_unit_price` as well).
+- Ruff on the CI scope (`dz_erp tests tools`) — clean; `compileall` — clean; dependency graph — OK;
+  hash-lock — OK (51 pinned distributions, 1,277 hashes); risk register — 31 rows, consistent;
+  `cv2`/`RapidOCR` import assertion — OK; phase-22 doc-consistency tests — **15/15 passed**.
+- Full suite and coverage at this head: recorded in the closing paragraph below.
+
+**Full suite at the line-price head** (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`,
+`pytest tests -q --cov=dz_erp --cov-report=term-missing --cov-report=xml`): **723 passed, 20 skipped, 0 failed, exit 0 in 22 min 53 s**.
+Coverage **85 %** (6,844 statements, 1,002 missed; from 6,740 statements at
+the Phase 29 head). Per module: `review_policy.py` 90 % (258 statements),
+`intake_ocr.py` 92 %, `procurement_stock.py` 83 %, `api.py` 87 %,
+`database.py` 94 %, `decimal_utils.py` 89 %. The total count reconciles exactly:
+710 (Phase 29 head) + 3 PR #4 tests + 10 new instances (9 functions, one parametrized ×2) = 723.
+No test was suppressed, weakened or skipped to obtain this result. CI for this exact head is
+reported with the PR, not assumed.

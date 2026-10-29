@@ -59,6 +59,7 @@ from dz_erp.review_policy import (
     DECISION_CORRECTED,
     DECISION_FLAGGED,
     DECISION_NOT_PRESENT,
+    ReviewPolicyValueError,
     evaluate_document_review_policy,
 )
 
@@ -164,6 +165,73 @@ def _upload_standard_doc(db: ERPDatabase, vault: PrivateDocumentVault, *, user_i
     return _upload_doc(db, vault, render_synthetic_invoice_pdf(_SPEC), user_id=user_id)
 
 
+_TWO_LINE_SPEC = {
+    "supplier_name": "SPARTE SARL",
+    "invoice_number": "FAC-2026-0001",
+    "invoice_date": "2026-02-14",
+    "supplier_nif": "000216001234567",
+    "supplier_rc": "16/00-0991216B12",
+    "supplier_ai": "16019912316",
+    "payment_method": "BANK_TRANSFER",
+    "amount_ht_dzd": "1000.00",
+    "amount_tva_dzd": "190.00",
+    "amount_timbre_dzd": "0.00",
+    "amount_ttc_dzd": "1190.00",
+    "lines": [
+        {"sku": "SKU-1", "description": "Anchors", "qty": "1", "unit_price_dzd": "400.00",
+         "tax_rate": "19", "line_ht_dzd": "400.00"},
+        {"sku": "SKU-2", "description": "Bolts", "qty": "1", "unit_price_dzd": "600.00",
+         "tax_rate": "19", "line_ht_dzd": "600.00"},
+    ],
+}
+
+
+def _upload_two_line_doc(db: ERPDatabase, vault: PrivateDocumentVault, *, user_id: int = 2):
+    return _upload_doc(db, vault, render_synthetic_invoice_pdf(_TWO_LINE_SPEC), user_id=user_id)
+
+
+_DUP_LINE_SPEC = {
+    "supplier_name": "SPARTE SARL",
+    "invoice_number": "FAC-2026-0001",
+    "invoice_date": "2026-02-14",
+    "supplier_nif": "000216001234567",
+    "supplier_rc": "16/00-0991216B12",
+    "supplier_ai": "16019912316",
+    "payment_method": "BANK_TRANSFER",
+    "amount_ht_dzd": "1000.00",
+    "amount_tva_dzd": "190.00",
+    "amount_timbre_dzd": "0.00",
+    "amount_ttc_dzd": "1190.00",
+    "lines": [
+        {"sku": "SKU-1", "description": "Anchors", "qty": "1", "unit_price_dzd": "500.00",
+         "tax_rate": "19", "line_ht_dzd": "500.00"},
+        {"sku": "SKU-1", "description": "Anchors", "qty": "1", "unit_price_dzd": "500.00",
+         "tax_rate": "19", "line_ht_dzd": "500.00"},
+    ],
+}
+
+
+def _upload_dup_line_doc(db: ERPDatabase, vault: PrivateDocumentVault, *, user_id: int = 2):
+    return _upload_doc(db, vault, render_synthetic_invoice_pdf(_DUP_LINE_SPEC), user_id=user_id)
+
+
+def _set_line_payload(db: ERPDatabase, document_id: str, mutate) -> dict:
+    """Rewrite the first line row's JSON payload out-of-band (extraction is otherwise immutable)."""
+    with db.transaction() as conn:
+        row = conn.execute(
+            "SELECT id, normalized_value FROM ocr_extracted_fields WHERE company_id = 1"
+            " AND document_id = ? AND field_name = 'line_item_json' AND line_index = 0",
+            (document_id,),
+        ).fetchone()
+        payload = json.loads(row["normalized_value"])
+        mutate(payload)
+        conn.execute(
+            "UPDATE ocr_extracted_fields SET normalized_value = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), row["id"]),
+        )
+    return payload
+
+
 def _make_invoice(
     db: ERPDatabase,
     document_id=None,
@@ -176,13 +244,16 @@ def _make_invoice(
     amount_tva: str = "190.00",
     amount_ttc: str = "1190.00",
     user_id: int = 2,
+    lines=None,
 ):
-    line_ht = str((Decimal(line_qty) * Decimal(unit_price)).quantize(Decimal("0.01")))
+    if lines is None:
+        line_ht = str((Decimal(line_qty) * Decimal(unit_price)).quantize(Decimal("0.01")))
+        lines = [{"sku": "SKU-1", "description": "Widgets", "qty": line_qty,
+                  "unit_price_dzd": unit_price, "tax_rate": "19", "line_ht_dzd": line_ht}]
     return create_and_validate_supplier_invoice(
         db=db, company_id=1, user_id=user_id, supplier_id=7,
         supplier_invoice_no=invoice_no, invoice_date=invoice_date,
-        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": line_qty,
-                "unit_price_dzd": unit_price, "tax_rate": "19", "line_ht_dzd": line_ht}],
+        lines=lines,
         amount_ht_dzd=amount_ht, amount_tva_dzd=amount_tva, amount_ttc_dzd=amount_ttc,
         document_id=document_id,
     )
@@ -228,6 +299,12 @@ def _confirm_extracted(db: ERPDatabase, company_id: int, document_id: str, user_
             db, company_id=company_id, user_id=user_id, document_id=document_id,
             field_name="line_item_json", decision="CONFIRMED",
             expected_value=lev["value"], line_index=lev["line_index"],
+        )
+    for pev in ev["line_prices"]:
+        decide_extracted_field_review(
+            db, company_id=company_id, user_id=user_id, document_id=document_id,
+            field_name="line_unit_price", decision="CONFIRMED",
+            expected_value=pev["value"], line_index=pev["line_index"],
         )
     final = _evaluate(db, company_id, document_id)
     assert final["satisfied"], final["blocking"]
@@ -297,7 +374,7 @@ def test_field_review_satisfies_the_gate_and_approval_rechecks_it(tmp_path: Path
             " WHERE document_id = ? ORDER BY id",
             (doc["document_id"],),
         ).fetchall()
-    assert len(rows) >= 9  # 8 required header fields + 1 line quantity (+ NOT_PRESENTs)
+    assert len(rows) >= 10  # 8 required header fields + line quantity + line price (+ NOT_PRESENTs)
     # Confirmed and honest-absent only: no correction, flag or stale record.
     assert {r["decision"] for r in rows} <= {"CONFIRMED", "NOT_PRESENT"}
     assert all(r["reviewed_by_id"] == 2 for r in rows)
@@ -421,6 +498,376 @@ def test_reviewed_source_amounts_and_line_quantity_must_match_invoice(tmp_path: 
         for action in _audit_actions(db)
     )
     assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_reviewed_source_line_unit_price_must_match_invoice(tmp_path: Path) -> None:
+    """A matching line quantity does not license a different unit price.
+
+    2 × 625.00 = 1250.00 (+19% TVA) is internally consistent, but the reviewed
+    source line says 2 × 500.00 — only the per-line price comparison tells this
+    apart from a legitimate invoice.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(
+        db, doc["document_id"], line_qty="2", unit_price="625.00",
+        amount_ht="1250.00", amount_tva="237.50", amount_ttc="1487.50",
+    )
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    with pytest.raises(FinancialIntegrityError, match="LINE_1_PRICE_SOURCE_MISMATCH"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    assert any(
+        action[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_swapped_invoice_line_prices_are_flagged_not_silently_matched(tmp_path: Path) -> None:
+    """Row order is the documented association invariant, and it is enforced.
+
+    The invoice line table stores no supplier SKU to join on, so source and
+    invoice lines are compared positionally. A payload whose prices are
+    transposed must be flagged on both rows — not silently matched as an
+    unordered set of (qty, price) pairs.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_two_line_doc(db, vault)
+    # Same lines, transposed prices: 600.00 + 400.00 sums to the same header
+    # totals the source shows (1000.00 / 190.00 / 1190.00), and both
+    # quantities still match row-by-row — only the order is wrong.
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[
+            {"sku": "SKU-1", "description": "Anchors", "qty": "1",
+             "unit_price_dzd": "600.00", "tax_rate": "19", "line_ht_dzd": "600.00"},
+            {"sku": "SKU-2", "description": "Bolts", "qty": "1",
+             "unit_price_dzd": "400.00", "tax_rate": "19", "line_ht_dzd": "400.00"},
+        ],
+    )
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    with pytest.raises(FinancialIntegrityError) as excinfo:
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    message = str(excinfo.value)
+    assert "LINE_1_PRICE_SOURCE_MISMATCH" in message
+    assert "LINE_2_PRICE_SOURCE_MISMATCH" in message
+    # Quantities matched row-by-row; nothing else was flagged.
+    assert "QUANTITY_SOURCE_MISMATCH" not in message
+    assert any(
+        action[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+
+
+def _drop_price(payload: dict) -> None:
+    payload.pop("unit_price_dzd", None)
+
+
+def _garble_price(payload: dict) -> None:
+    payload["unit_price_dzd"] = "N/A"
+
+
+@pytest.mark.parametrize("mutate", [_drop_price, _garble_price], ids=["absent", "malformed"])
+def test_missing_or_malformed_source_price_blocks_until_transcribed(
+    tmp_path: Path, mutate
+) -> None:
+    """Price evidence that is absent or unparseable is fail-closed, and the
+    reviewer's only repair is an attributed transcription (CORRECTED)."""
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    _set_line_payload(db, doc["document_id"], mutate)
+
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is False
+    assert "REQUIRED_FIELD_NOT_DECIDED:line_unit_price[0]" in evaluation["blocking"]
+
+    # A price that is not on file cannot be confirmed — there is no value to
+    # bind to; the reviewer must transcribe what the paper shows.
+    with pytest.raises(FinancialIntegrityError, match="FIELD_VALUE_CHANGED_SINCE_READ"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_unit_price", decision="CONFIRMED",
+            expected_value="500.00", line_index=0,
+        )
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision=DECISION_CORRECTED,
+        value="500.00", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["unit_price_dzd"] == "500.000000"
+    assert payload["line_ht_dzd"] == "1000.00"  # 2 × 500.00, recomputed
+
+    # The repaired evidence satisfies the policy and the matching invoice flows.
+    _confirm_extracted(db, 1, doc["document_id"])
+    invoice = _make_invoice(db, doc["document_id"])
+    submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert submitted["workflow_state"] == "PendingApproval"
+
+
+def test_invoice_line_price_tampered_after_submit_blocks_approval(tmp_path: Path) -> None:
+    """The approval gate rechecks line prices: a payload price changed between
+    submission and approval cannot ride through."""
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    submitted = submit_invoice_for_approval(
+        db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"]
+    )
+    assert submitted["workflow_state"] == "PendingApproval"
+
+    # Out-of-band change of the invoice line's price after the submit-time check.
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoice_lines SET unit_price_dzd = ? WHERE invoice_id = ?",
+            ("600.000000", invoice["invoice_id"]),
+        )
+
+    with pytest.raises(FinancialIntegrityError, match="LINE_1_PRICE_SOURCE_MISMATCH"):
+        decide_invoice_approval(
+            db, company_id=1, approver_user_id=3,
+            invoice_id=invoice["invoice_id"], approve=True,
+        )
+
+    assert any(
+        action[1] == "INVOICE_APPROVAL_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_invoice_line_price_unparseable_blocks_submission(tmp_path: Path) -> None:
+    """A malformed invoice-side price cannot ride through either direction.
+
+    The invoice schema keeps ``unit_price_dzd`` as TEXT; if an out-of-band write
+    leaves it unparseable, the exact comparison must refuse to guess and fail
+    closed (`LINE_1_PRICE_SOURCE_UNPARSEABLE`), never silently skip the price.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoice_lines SET unit_price_dzd = ? WHERE invoice_id = ?",
+            ("n/a", invoice["invoice_id"]),
+        )
+
+    with pytest.raises(FinancialIntegrityError, match="LINE_1_PRICE_SOURCE_UNPARSEABLE"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert any(
+        action[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH"
+        for action in _audit_actions(db)
+    )
+
+
+def test_source_price_changed_after_decision_blocks_and_rebinds_fail_closed(tmp_path: Path) -> None:
+    """A source price edited after the reviewer bound it cannot be pushed through.
+
+    The bound decision goes stale (the evidence the reviewer confirmed no longer
+    exists), the gate refuses on the review itself, a CORRECTED transcription
+    re-binds to the current payload value, and the previously matching invoice
+    is then refused on price — fail closed in both directions.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    # Out-of-band change of the source price after the binding decision.
+    _set_line_payload(db, doc["document_id"], lambda p: p.update({"unit_price_dzd": "555.00"}))
+
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is False
+    assert "FIELD_FLAGGED:line_unit_price[0]" in evaluation["blocking"]
+    with pytest.raises(FinancialIntegrityError, match="DOCUMENT_REVIEW_UNSATISFIED"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    # Re-bind: the transcription is bound to the *current* payload value and
+    # re-satisfies the review — but the invoice still says 500.00, so the
+    # consistency gate now refuses on price.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision=DECISION_CORRECTED,
+        value="555.00", line_index=0,
+    )
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is True
+    with pytest.raises(FinancialIntegrityError, match="LINE_1_PRICE_SOURCE_MISMATCH"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+
+def test_duplicate_identical_lines_match_positionally(tmp_path: Path) -> None:
+    """Ambiguous identities (two identical rows) resolve deterministically.
+
+    No supplier SKU joins source and invoice lines, so identical adjacent rows
+    are matched positionally: both are decided, both match, and the invoice
+    flows — there is no unordered-set rematching to hide a difference.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_dup_line_doc(db, vault)
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert len(evaluation["lines"]) == 2 and len(evaluation["line_prices"]) == 2
+
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[
+            {"sku": "SKU-1", "description": "Anchors", "qty": "1",
+             "unit_price_dzd": "500.00", "tax_rate": "19", "line_ht_dzd": "500.00"},
+            {"sku": "SKU-1", "description": "Anchors", "qty": "1",
+             "unit_price_dzd": "500.00", "tax_rate": "19", "line_ht_dzd": "500.00"},
+        ],
+    )
+    _confirm_extracted(db, 1, doc["document_id"])
+    submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert submitted["workflow_state"] == "PendingApproval"
+
+
+def test_line_price_decision_binds_canonically_and_correction_recomputes(tmp_path: Path) -> None:
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+
+    # "500.00" extracted, canonical "500.000000": the reviewer states either form.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision="CONFIRMED",
+        expected_value="500.00", line_index=0,
+    )
+    # A price decision alone does not satisfy the document: the quantity of
+    # the same line is a separate, still-undecided element.
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is False
+    assert "REQUIRED_FIELD_NOT_DECIDED:line_item_json[0]" in evaluation["blocking"]
+
+    # NOT_PRESENT is not available for line elements — the row exists.
+    with pytest.raises(ReviewPolicyValueError, match="NOT_PRESENT is not valid for line items"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_unit_price", decision=DECISION_NOT_PRESENT, line_index=0,
+        )
+
+    # Bind the quantity too, so the price correction below proves that it
+    # does not stale the quantity decision of the same line.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_item_json", decision="CONFIRMED",
+        expected_value="2.000000", line_index=0,
+    )
+
+    # Correction rewrites the price and recomputes the line amount; the
+    # already-bound quantity decision is not staled by a price correction.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision=DECISION_CORRECTED, value="600", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["unit_price_dzd"] == "600.000000"
+    assert payload["line_ht_dzd"] == "1200.00"  # 2 × 600.00, recomputed
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["lines"][0]["satisfied"] is True
+    assert evaluation["line_prices"][0]["satisfied"] is True
+
+    # French decimal input lands on the same canonical value...
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision=DECISION_CORRECTED, value="600,50", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["unit_price_dzd"] == "600.500000"
+    assert payload["line_ht_dzd"] == "1201.00"  # 2 × 600.50, recomputed
+    # ...and the decision binds to the canonical form, idempotently.
+    first = decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision="CONFIRMED",
+        expected_value="600.500000", line_index=0,
+    )
+    assert first["idempotent_replay"] is False
+    replay = decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision="CONFIRMED",
+        expected_value="600.500000", line_index=0,
+    )
+    assert replay["idempotent_replay"] is True
+
+    # Zero and negative prices follow the existing amount-class rules: a
+    # negative transcription is refused outright; zero binds canonically and
+    # the recomputed line amount follows.
+    with pytest.raises(ReviewPolicyValueError, match="FIELD_VALUE_NEGATIVE_AMOUNT"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_unit_price", decision=DECISION_CORRECTED,
+            value="-1", line_index=0,
+        )
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_unit_price", decision=DECISION_CORRECTED,
+        value="0", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["unit_price_dzd"] == "0.000000"
+    assert payload["line_ht_dzd"] == "0.00"  # 2 × 0.00, recomputed
+
+
+def test_sub_centime_price_identity_is_enforced_at_six_decimals(tmp_path: Path) -> None:
+    """The paper's price is compared exactly, never rounded into agreement.
+
+    A source price bound at sub-centime precision (a misread third decimal the
+    reviewer confirmed as read) is a *different price* from the centime price
+    on any internally-consistent invoice — flagged, never silently rounded.
+    The reviewer's repair is to transcribe the printed centime price.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    # The extraction read three decimals (500.004); the reviewer confirms it
+    # as read — the binding carries the full precision.
+    _set_line_payload(db, doc["document_id"], lambda p: p.update({"unit_price_dzd": "500.004"}))
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    # Header-identical invoice at the centime price (2 × 500.00): every total,
+    # quantity and the invoice number match; only the exact price comparison
+    # separates it.
+    invoice = _make_invoice(db, doc["document_id"])
+    with pytest.raises(FinancialIntegrityError) as excinfo:
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert "LINE_1_PRICE_SOURCE_MISMATCH" in str(excinfo.value)
+    assert "AMOUNT_HT_DZD_SOURCE_MISMATCH" not in str(excinfo.value)
+
+    # A second reviewer corrects the misread to the printed centime price:
+    # the payload and its line amount become consistent with the paper, and
+    # the same invoice then flows.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=4, document_id=doc["document_id"],
+        field_name="line_unit_price", decision=DECISION_CORRECTED, value="500.00", line_index=0,
+    )
+    _confirm_extracted(db, 1, doc["document_id"])
+    submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert submitted["workflow_state"] == "PendingApproval"
 
 
 def test_legacy_invoice_without_document_is_unaffected(tmp_path: Path) -> None:

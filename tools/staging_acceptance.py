@@ -304,8 +304,9 @@ def run(state: Path) -> int:
     # ------------------------------------------------------------ field review
     # Phase 29: the field review is enforced, not advisory. The reviewer
     # completes it through the documented API: every extracted required field
-    # (and extracted line quantity) is CONFIRMED at exactly its current value,
-    # and every optional field the extraction did not find is asserted absent.
+    # (and every extracted line quantity and line unit price) is CONFIRMED at
+    # exactly its current value, and every optional field the extraction did
+    # not find is asserted absent.
     verdict = client.get(
         f"/api/v1/documents/{document['document_id']}/review-policy",
         headers={"Authorization": f"Bearer {clerk}"},
@@ -353,6 +354,19 @@ def run(state: Path) -> int:
                     "decision": "CONFIRMED",
                     "expected_value": lev["value"],
                     "line_index": lev["line_index"],
+                },
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        for pev in body["line_prices"]:
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json={
+                    "field_name": "line_unit_price",
+                    "decision": "CONFIRMED",
+                    "expected_value": pev["value"],
+                    "line_index": pev["line_index"],
                 },
             )
             if resp.status_code != 200:

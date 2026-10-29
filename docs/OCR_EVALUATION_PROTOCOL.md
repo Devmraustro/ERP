@@ -196,7 +196,16 @@ required-field review, or whose extracted totals are arithmetically inconsistent
 submission and re-checked at approval (`INVOICE_SUBMIT_BLOCKED_UNREVIEWED` /
 `INVOICE_APPROVAL_BLOCKED_UNREVIEWED` in `dz_erp/procurement_stock.py`). A measured score can only
 mark a field `low_confidence` — harder scrutiny, never acceptance: satisfaction always requires an
-explicit, attributed human decision bound to the exact value that was reviewed. The
+explicit, attributed human decision bound to the exact value that was reviewed. On extracted line
+rows two elements are separately decided — the quantity (`line_item_json`) and the unit price
+(`line_unit_price`), both bound to the canonical 6-decimal form the invoice and PO lines store —
+so a correctly reviewed quantity cannot stand in for a price nobody decided. Review completeness
+alone is still insufficient: inside the same transaction the gates re-compare the invoice payload
+with the reviewed source (invoice number, date, currency, supplier NIF, HT/TVA/timbre/TTC, and
+each line's quantity and unit price), refusing a mismatch as `DOCUMENT_INVOICE_MISMATCH`. Source
+and invoice lines are associated by row order — the invoice line table stores no supplier SKU to
+join on — so entering the invoice's lines in a different order than the paper's rows is itself a
+flagged mismatch, never silently rematched; the swap regression test pins this. The
 `low_confidence_threshold` values in `REVIEW_POLICY` are therefore review-effort knobs, not
 false-accept guarantees. Calibration itself is still unmeasured: the 59 available OCR observations
 are too few for 5 bins, and they come from synthetic documents.

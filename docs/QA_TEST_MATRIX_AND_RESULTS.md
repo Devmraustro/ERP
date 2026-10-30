@@ -1100,3 +1100,52 @@ credential-free, which is stricter than before, not weaker.
    validation (invoice stays in `NeedsReview`) even when the rate is 0/9/19 %.
 3. `E2_droit_de_timbre` now appears in the G50 traceability array, so
    `traceability_count` for a period containing stamp duty is one higher per timbre entry.
+
+---
+
+## 2L. Phase 37 — deployment assets are guarded like code (`tests/test_phase37_deployment_assets.py`) — `Passed`
+
+A Dockerfile, a compose file and an environment example are load-bearing: a weakened one
+becomes a production incident no unit test would catch. They cannot be *executed* here (no
+container runtime), so these tests verify exactly what can honestly be verified, and nothing is
+recorded as run that was not run.
+
+| Test | What it proves |
+| --- | --- |
+| `test_image_is_pinned_to_the_interpreter_floor_and_hash_locked` | `FROM python:3.11.17` (the safe-restore floor, not "latest 3.11"), `--require-hashes` + `--no-deps` against the lockfile |
+| `test_image_runs_unprivileged_and_bakes_in_no_secret_state` | `USER erp` at fixed uid 10001 with no home; no `ERP_VAULT_KEY`/`ERP_AUDIT_HMAC_SECRET`/database in the image; exec-form entrypoint so PID 1 gets SIGTERM; healthcheck against `/healthz` |
+| `test_stack_keeps_the_security_properties_it_claims` | Port published to `127.0.0.1` only; `read_only: true`; `cap_drop: ALL`; `no-new-privileges`; tmpfs `/tmp`; **one replica** (per-process limiter, single SQLite writer); state and logs as volumes; bootstrap behind an explicit profile |
+| `test_every_environment_variable_the_code_reads_is_documented` | **Drift gate**: every `ERP_*` variable the code reads is documented in `ops/erp.env.example`, except the two secrets, which must not be given values in a committed file |
+| `test_env_example_states_the_rate_limiting_bounds` | The throttle variables and their honest per-process scope appear where an operator reads them |
+| `test_dockerignore_keeps_state_and_secrets_out_of_the_build_context` | `.dockerignore` excludes `.git`, databases, key registries, rotation journals and `ops/erp.env` — a layer is forever |
+
+Measured: **6 passed**, 0.04 s. `ops/erp.env.example` completeness was checked against the code
+as it stands (19 `ERP_*` variables read, 17 documented, 2 classified as secrets).
+
+---
+
+## 2M. Phase 38 — migration matrix (`tests/test_phase38_migration_matrix.py`) — `Passed`
+
+Detailed rules and the migration inventory are in `docs/MIGRATION_AND_DATA_SAFETY.md`.
+
+| Test | What it proves |
+| --- | --- |
+| `test_any_single_missing_column_is_restored[…]` (14 parametrised cases) | Every migrated column is restored when it is the only one missing — no migration can hide behind another |
+| `test_a_database_missing_every_migrated_column_converges` | The worst realistic case: a dump several phases old converges in one open |
+| `test_a_fresh_database_needs_no_migration_and_is_complete` | A new file is born complete, including the rebuilt confidence columns |
+| `test_running_the_migration_twice_changes_nothing` | Idempotency proved by comparing the full `sqlite_master` dump |
+| `test_data_and_the_audit_chain_survive_the_upgrade` | Row counts per table unchanged and the hash chain verifies identically before and after |
+| `test_legacy_rows_get_null_not_a_fabricated_value` | Legacy `evidence_json` and `extraction_route` are `NULL`, never a fabricated decision |
+| `test_no_column_is_dropped_by_a_migration` | Migrations only add |
+| `test_a_half_applied_upgrade_is_repaired_on_the_next_open` | An interrupted upgrade finishes on the next start, it does not stay broken |
+| `test_a_database_with_the_new_columns_but_an_old_value_shape_still_opens` | Legacy `NULL`s in new columns do not break the migrations |
+| `test_the_rebuild_migration_is_atomic` | The table rebuild does not use `executescript()` (which would commit the pending transaction) |
+| `test_migrations_never_touch_production_data_paths` | No migration opens its own connection; an upgrade cannot commit a partial result outside the caller's transaction |
+
+Measured: **24 passed**, 1.98 s.
+
+### What is still unverified
+
+No migration has been exercised against production-sized data. Every figure here comes from
+synthetic databases of a few rows; lock duration and wall-clock time at scale remain
+`BLOCKED_EXTERNAL` until a copy of real state is available.

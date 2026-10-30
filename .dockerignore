@@ -1,0 +1,30 @@
+# Build context hygiene: leave state, secrets and history out of the image.
+# Anything here that leaks into the context can end up in a layer, and a layer is
+# forever.
+.git
+.github
+tests
+benchmarks
+__pycache__
+*.pyc
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.log
+*.jsonl
+*.keys.json
+*.rotation.jsonl
+*.rotation.lock
+*.pem
+*.key
+ops/erp.env
+.env
+.env.*
+!ops/erp.env.example
+vault/
+artifacts/
+dist/
+build/
+.venv/
+venv/

@@ -17,6 +17,7 @@ record bound to the presented credential.
 
 import os
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .auth import (
@@ -50,6 +52,7 @@ from .intake_ocr import (
     upload_and_process_supplier_document,
 )
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
+from .rate_limit import RequestThrottle
 from .procurement_stock import (
     create_and_validate_supplier_invoice,
     revalidate_supplier_invoice,
@@ -202,6 +205,7 @@ def create_erp_fastapi_app(
     token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
     trusted_proxies: Optional[TrustedProxyPolicy] = None,
     docs_enabled: bool = False,
+    throttle: Optional[RequestThrottle] = None,
 ) -> FastAPI:
     # Secure default: docs disabled unless explicitly enabled for local development
     docs_url = "/docs" if docs_enabled else None
@@ -235,6 +239,71 @@ def create_erp_fastapi_app(
     # explicitly configured, X-Forwarded-For is ignored and the direct peer
     # address is used.  See dz_erp/net.py.
     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
+    # Failed-authentication and (optionally) per-client request throttling.
+    # See dz_erp/rate_limit.py: in-process, per worker, fail-closed, audited.
+    # A fresh instance per application keeps counters from leaking between
+    # independently-created apps in one process (tests, or a desktop client that
+    # hosts the app alongside an embedded server); the environment still supplies
+    # the policy, and a deployment runs exactly one app per process.
+    app.state.throttle = throttle if throttle is not None else RequestThrottle()
+
+    # ------------------------------------------------------------------
+    # Request logging and the optional per-client ceiling
+    # ------------------------------------------------------------------
+    # Every request gets a correlation id, echoed as X-Request-Id so a user can
+    # quote it and an operator can find the line.  Only the method, the *path*
+    # (never the query string, never headers, never a body) and the outcome are
+    # recorded: the structured logger redacts anything secret-bearing that a
+    # caller passes to it explicitly.
+    @app.middleware("http")
+    async def _log_request(request: Request, call_next: Any) -> Any:
+        corr_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+        peer_ip = request.client.host if request.client else None
+        client_ip = app.state.proxy_policy.resolve_client_ip(
+            peer_ip, request.headers.get("X-Forwarded-For")
+        )
+        allowed, retry_after = app.state.throttle.request_allowed(client_ip or peer_ip or "unknown")
+        if not allowed:
+            logger.log(
+                "WARNING",
+                "SECURITY_RATE_LIMITED",
+                corr_id,
+                method=request.method,
+                path=request.url.path,
+                client_ip=client_ip,
+                retry_after_seconds=retry_after,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Try again later."},
+                headers={"Retry-After": str(retry_after), "X-Request-Id": corr_id},
+            )
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.log(
+                "ERROR",
+                "HTTP_REQUEST_FAILED",
+                corr_id,
+                method=request.method,
+                path=request.url.path,
+                duration_ms=round((time.monotonic() - started) * 1000, 2),
+            )
+            raise
+        duration_ms = round((time.monotonic() - started) * 1000, 2)
+        response.headers["X-Request-Id"] = corr_id
+        logger.log(
+            "INFO",
+            "HTTP_REQUEST",
+            corr_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            client_ip=client_ip,
+        )
+        return response
 
     def _authenticate(
         request: Request,
@@ -351,6 +420,27 @@ def create_erp_fastapi_app(
         # actually arrived through a configured trusted proxy.
         peer_ip = request.client.host if request.client else None
         client_ip = app.state.proxy_policy.resolve_client_ip(peer_ip, x_forwarded_for)
+        # Throttle before verifying the password: a wrong guess costs the server
+        # a password hash, so an unbounded endpoint is both a credential-stuffing
+        # and a denial-of-service lever.  The key is (client, account) so one
+        # locked-out account cannot deny service to everyone else.
+        throttle = app.state.throttle
+        client_key = client_ip or (peer_ip or "unknown")
+        blocked, retry_after = throttle.login_blocked(client_key, body.username)
+        if blocked:
+            logger.log(
+                "WARNING",
+                "SECURITY_AUTH_RATE_LIMITED",
+                corr_id,
+                username=body.username,
+                client_ip=client_key,
+                retry_after_seconds=retry_after,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed authentication attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
         try:
             result = app.state.auth_manager.issue_token(
                 body.username,
@@ -359,7 +449,18 @@ def create_erp_fastapi_app(
                 user_agent=user_agent,
             )
         except AuthError as exc:
-            logger.log("WARNING", "AUTH_LOGIN_REJECTED", corr_id, code=exc.code, username=body.username)
+            # Count the failure *after* the decision, so a throttled attempt is
+            # recorded but cannot consume another slot.
+            _allowed, retry_after = throttle.record_login_failure(client_key, body.username)
+            logger.log(
+                "WARNING",
+                "AUTH_LOGIN_REJECTED",
+                corr_id,
+                code=exc.code,
+                username=body.username,
+                client_ip=client_key,
+                retry_after_seconds=retry_after,
+            )
             raise HTTPException(
                 status_code=exc.status_code,
                 detail=exc.detail,
@@ -367,6 +468,8 @@ def create_erp_fastapi_app(
             ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # A legitimate user who mistyped a few times is not left locked out.
+        throttle.record_login_success(client_key, body.username)
         logger.log("INFO", "AUTH_TOKEN_ISSUED", corr_id, username=result["user"]["username"])
         return result
 

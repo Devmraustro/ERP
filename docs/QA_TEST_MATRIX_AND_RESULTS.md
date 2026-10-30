@@ -1007,3 +1007,39 @@ Nothing was deleted or merged: duplicate extraction rows remain stored evidence.
 No UNIQUE constraint was added, because a constraint cannot distinguish a
 legitimate re-extraction artefact from an operator error, and enforcing one on
 historical data would either fail the migration or silently drop rows.
+
+---
+
+## 2J. Phase 35 — authentication throttling and request logging (`tests/test_phase35_api_rate_limiting_and_request_logging.py`) — `Passed`
+
+The token endpoint accepted unlimited guesses: a wrong password cost a 401 and nothing else,
+while the server paid for a full password hash each time. That is a credential-stuffing target
+and a denial-of-service lever in one. Every request was also unattributable in the log.
+
+| Test | What it proves |
+| --- | --- |
+| `test_sliding_window_counts_and_expires_fail_closed` | The window counts, refuses, keeps counting a refused attempt, and genuinely expires — a throttle, not a lockout |
+| `test_a_disabled_limiter_never_interferes` | `limit=0` disables a rule rather than blocking everything |
+| `test_login_key_is_case_and_space_insensitive_per_account` | `" Admin "` and `"admin"` share one budget; different clients do not |
+| `test_policy_description_is_secret_free` | The operator-facing description contains no credential-bearing field |
+| `test_repeated_wrong_passwords_are_throttled_and_audited` | The 4th attempt is 429 with `Retry-After`, the correct password is **not** verified once throttled, and `SECURITY_AUTH_RATE_LIMITED` is recorded |
+| `test_throttling_one_account_does_not_deny_service_to_another` | Locking `admin_a` leaves `clerk_a` working — no system-wide denial |
+| `test_a_successful_login_clears_the_counter` | Mistyping then succeeding restores the budget |
+| `test_the_throttle_expires_so_no_one_is_locked_out_forever` | After the window, the correct password works again |
+| `test_forwarded_for_cannot_escape_the_limit_without_a_trusted_proxy` | Rotating `X-Forwarded-For` from an untrusted peer still hits 429 — the bypass that matters |
+| `test_a_trusted_proxy_addresses_clients_separately` | Behind a **declared** proxy the forwarded address is the identity: one noisy client does not penalise another |
+| `test_every_response_carries_a_correlation_id` | A supplied `X-Request-Id` is echoed; otherwise a UUIDv4 is issued (including on 401) |
+| `test_request_log_records_path_status_and_duration` | `HTTP_REQUEST` carries method, path, status and a float duration |
+| `test_no_password_or_token_is_ever_logged` | Neither the password, the wrong password, nor the bearer token appears anywhere in the log |
+| `test_the_request_log_lands_in_the_durable_security_sink` | Records reach `JsonlSecurityLog` on disk, still credential-free |
+| `test_global_ceiling_is_off_by_default_and_enforces_when_configured` | 40 requests pass with the default; with `requests_per_minute=5`, attempts 6–7 are 429 and audited with the path |
+| `test_throttle_defaults_come_from_the_environment` | Environment configuration applies, and garbage (`not-a-number`, `-5`, `-1`) falls back to the documented default rather than disabling the control |
+
+Measured (Linux, CPython 3.11.2, pytest 8.3.5): **16 passed**, 2.28 s. The surrounding API and
+authentication suites (`test_phase25_read_api`, `test_phase27_review_api`,
+`test_phase28_user_admin`, `test_phase7_authentication_remediation`,
+`test_phase5_security_audit_backup`) → 99 passed, 1 failed, and that one failure is
+`restore_and_verify_backup`'s Python 3.11.17 interpreter floor, identical to the baseline.
+
+The honest limit of this control is documented rather than hidden: counters live in process
+memory, so the bound is per worker and a multi-replica deployment must also limit at the proxy.

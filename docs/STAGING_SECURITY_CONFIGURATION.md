@@ -191,6 +191,44 @@ which parse as a network).
 ERP_TRUSTED_PROXIES=10.0.0.0/8,127.0.0.1
 ```
 
+### 4.2 Authentication throttling is on by default
+
+Unlimited password guesses are both a credential-stuffing and a denial-of-service lever: each
+wrong password costs the server a deliberately expensive hash. `POST /api/v1/auth/token` is
+throttled per `(client address, username)` **before** the password is verified, and every
+refusal is logged as `SECURITY_AUTH_RATE_LIMITED` with the `Retry-After` value.
+
+```
+ERP_AUTH_FAILURE_LIMIT=10               # failed attempts per (client, account)
+ERP_AUTH_FAILURE_WINDOW_SECONDS=300     # sliding window
+ERP_RATE_LIMIT_PER_MINUTE=0             # optional overall per-client ceiling; 0 = disabled
+```
+
+What this is, stated plainly: an **in-process sliding window**, so with `--workers N` the
+effective ceiling is `N × limit` and it is not shared across containers. It is a real bound for
+the single-process deployment this repository ships; multi-replica deployments must *also*
+configure a limiter at the reverse proxy, because no code in this repository can see the other
+replicas' counters. The window expires, so a throttled user is never locked out permanently, and
+a successful login clears the counter so mistyping is not punished.
+
+Two properties are deliberate and must not be "optimised" away:
+
+* the key includes the **account**, so one attacker cannot deny service to every user;
+* the client address comes from the trusted-proxy policy (§4.1), so `X-Forwarded-For` cannot be
+  rotated to escape the limit unless a proxy is explicitly trusted.
+
+This is not a replacement for account lockout policy, MFA, or a proxy-side limit; it is the
+minimum that stops the endpoint being free.
+
+### 4.3 Every request is correlated and logged
+
+Each response carries `X-Request-Id` (the caller's value if supplied, otherwise a UUIDv4) and is
+recorded as `HTTP_REQUEST` with method, **path only**, status and duration. Query strings,
+headers and bodies are never recorded, and the structured logger redacts credential-shaped
+values, so a password or bearer token cannot reach the log even by accident. Verified by
+`test_no_password_or_token_is_ever_logged` and
+`test_the_request_log_lands_in_the_durable_security_sink`.
+
 ---
 
 ## 5. No real customer or financial data

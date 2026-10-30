@@ -940,6 +940,17 @@ coverage 6.0.0, ruff 0.14.0, hash-locked dependency set):
 * `ruff check dz_erp tests tools` → All checks passed; `compileall` clean; `tools/verify_dependency_graph.py` → OK; `tools/generate_hash_lock.py --check` → 51 distributions / 1,277 hashes, no drift; `cv2 4.11.0` and `RapidOCR` import OK; `tools/staging_acceptance.py` → 38/40 (the two failures are the restore check and its dependent restart check, same interpreter floor); `tools/risk_register_counts.py` → 36 rows consistent; `pytest tests/test_phase22_register_and_docs_consistency.py` → 15 passed; `git diff --check` clean; secret scan over the whole diff → no matches.
 * The protected-operation pin in `tests/test_phase8_upload_boundary_and_ci.py` moves from 28 to 29 with the new `POST /api/v1/invoices/{invoice_id}/revalidate` endpoint documented in the comment — the assertion itself is not relaxed.
 
-No Algerian SCF, TVA, timbre or G50 rule was changed, no external production
-gate was marked verified, and the CI result for the exact published SHA is
-recorded with the pull request rather than assumed here.
+No Algerian SCF, TVA, timbre or G50 rule was changed and no external production
+gate was marked verified.
+
+**CI on the exact published SHA `f8facf036f76d75b7ed6e23bd5d4e9adbc12062e`
+(GitHub Actions run 41089747877) — 3/3 jobs success, zero non-success steps:**
+Python 3.11 (hash-locked install, dependency graph, cv2/RapidOCR import, ruff,
+compileall, full suite with coverage, staging acceptance, risk-register
+validation), Python 3.12 (full suite; the two Linux-only steps are skipped by
+design), and Windows 3.12.10 (rotation/migration/backup/recovery suite and
+staging acceptance). The restore paths that this host cannot run below Python
+3.11.17 are consequently proven green in CI — on CI, not here. Per-step log text
+is not retrievable from this sandbox (the log host is outside the allowlist), so
+the CI evidence cited is the run, job and per-step conclusions from the GitHub
+API, not copied console output.

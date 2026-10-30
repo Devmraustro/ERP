@@ -695,3 +695,23 @@ reported here as passes.
 * Production-scale concurrency is still not validated; the Phase 33 race test
   proves *exactly-one* credit note under a two-thread barrier on an isolated
   SQLite database, which is a functional result, not a volume result.
+
+### 14.9 Publication
+
+| Item | Value |
+|---|---|
+| Phase 33 code, tests and docs | `f8facf036f76d75b7ed6e23bd5d4e9adbc12062e` (`arena/7f12d627-erp`) |
+| Parent | `2a2b9b14de0cf792356488d645f20e5c4d4ad565` (Phase 32 head, unchanged) |
+| Pull request | **#7** — kept **open** and **Draft**; its base is the Phase 32 stack (`fix/phase29-invoice-discount-and-line-net-consistency`, PR #6 head) |
+| CI on `f8facf0` | run **41089747877** — **3/3 jobs success**: Python 3.11 full suite + hash-locked install + dependency graph + ruff + compileall + staging acceptance + risk-register validation (14 steps), Python 3.12 full suite (12 steps, 2 by design skipped), Windows rotation/backup/recovery + staging (11 steps). **Zero non-success steps.** |
+| Local verification | §14.7 (Python 3.11.2; the restore paths are environment-blocked locally and pass in CI) |
+
+The session's working branch is fixed (`arena/7f12d627-erp`), and PR #7 already
+targets the Phase 32 head, so the Phase 33 commits are appended there rather
+than opening a second PR from the same branch — GitHub rejects a second PR for
+the same head/base pair. The PR therefore carries Phase 32 (audit) and Phase 33
+(remediation) as one additive stack; it remains Draft and unmerged, and PRs
+#3–#6 are untouched.
+
+Nothing was merged, closed, rebased or force-pushed; `main` is untouched and no
+file was deleted.

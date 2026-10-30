@@ -79,6 +79,18 @@ why the go/no-go record distinguishes the two.
 | B3 | CI passes on Linux but the deployment is Windows (or vice versa) | Medium | Medium | `.github/workflows/ci.yml` `verify-windows` job | Rotation/backup suite runs on Windows in CI | Engineering | Do not weaken the Windows job to make it fast | Mitigated |
 | B4 | Secrets reach logs, reports or a crash dump | **High** if present | Low | Redaction tests; `monitor`/`status` contain no key material; drill exits no material | `StructuredRedactingLogger`, assertions on CLI output | Engineering | Keep the "no material in output" assertions next to any new report | Mitigated |
 
+### Phase 32 integration-audit findings
+
+Audit record: `docs/PHASE32_INDEPENDENT_INTEGRATION_AUDIT.md`; reproductions in
+`tests/test_phase32_cross_phase_integration_audit.py`.
+
+| ID | Risk | Sev | Likelihood | Evidence | Control in place | Owner | Action | Status |
+|---|---|---|---|---|---|---|---|---|
+| P1 | A non-numeric amount (`NaN`, `Infinity`) is accepted and stored as TEXT in a money column, and an invalid decision value returns an unhandled 500 instead of a 422 | Medium | Low (requires a malformed client payload; no UI path) | `tests/test_phase32_cross_phase_integration_audit.py` `test_s_*`, `test_s2_*`; `dz_erp/decimal_utils.py` `_require_finite` | Fixed in Phase 32: `to_decimal` refuses every non-finite value, so the API answers 422 with a machine-readable reason and nothing is written; the affected invoice could never reach `Validated`, so no posting path existed | Engineering | Keep the non-finite regression tests mandatory in CI | **Mitigated** (fixed with regression tests) |
+| P2 | An invoice in `NeedsReview` has no in-product correction path: no service re-validates an existing invoice, and re-creating the corrected invoice with the same supplier number is refused as a duplicate of the broken draft | Medium | Medium (any keying error or OCR-driven mismatch) | `test_t_a_needs_review_invoice_has_no_recovery_path`; `dz_erp/procurement_stock.py` `create_and_validate_supplier_invoice` | Fail-closed (a broken draft can never be posted) but operationally terminal for that paper invoice | Product owner | Add an explicit re-validation service limited to `NeedsReview`/`DuplicateRejected` drafts, or allow an authorised superseding draft; regression test: broken draft → corrected draft posts once | **Open** (accepted for staging only) |
+| P3 | A failed duplicate-invoice attempt rewrites the linked source document's `workflow_state` to `DuplicateRejected`, drifting the evidence away from the valid invoice that cites it and closing field review on that document | Medium | Low–Medium (needs a second creation attempt against the same paper) | `test_t_a_needs_review_invoice_has_no_recovery_path`; document state UPDATE in `create_and_validate_supplier_invoice` | Refused attempts never post; the citing invoice keeps its own state and payload hash | Engineering | Only refresh the document state from an invoice that becomes its owner (`Validated`/`NeedsReview`), never from a rejected attempt | **Open** (accepted for staging only) |
+| P4 | `modify_draft_invoice_line` moves the invoice to `NeedsReview` but leaves the linked document in `PendingApproval` and the approval request in `PENDING`, so the evidence and the approval queue no longer describe the invoice | Low | Medium (any post-submission price correction) | `test_u_draft_modification_desynchronises_document_and_approval_request` | Approval and posting are both refused afterwards, so no money effect; the drift is visible in the audit trail | Engineering | In the same transaction set the document to `NeedsReview` and mark the pending request `INVALIDATED` | **Open** (accepted for staging only) |
+| P5 | A second reversal of the same invoice is refused only by `UNIQUE(company_id, entry_number)` and surfaces as an unhandled `sqlite3.IntegrityError` (HTTP 500) rather than a documented business refusal | Low | Low (requires a second reversal request with a new idempotency key) | `test_w_a_second_reversal_of_the_same_invoice_is_refused` | No double credit was possible: exactly one posted credit note, ledger balanced | Engineering | Check for an existing `IN_REFUND` request before creating another and map the residual constraint violation to a 409 | **Open** (operational; no financial exposure observed) |
 ---
 
 ## 2. Summary
@@ -89,9 +101,9 @@ Counted from the rows above; the register is the source of truth, not this table
 |---|---:|---:|---:|---:|---:|
 | Critical | 0 | 1 (S7) | 0 | 1 (D1) | 2 |
 | High | 5 (S1, S3, C1, C2, C6) | 10 (S6, C3, C7, D2, D3, D5, D8, O1, O3, B4) | 1 (S2) | 0 | 16 |
-| Medium | 3 (C4, C5, D4) | 6 (S4, S5, D6, O2, B2, B3) | 2 (D7, O4) | 0 | 11 |
-| Low | 0 | 0 | 2 (O5, B1) | 0 | 2 |
-| **Total** | **8** | **17** | **5** | **1** | **31** |
+| Medium | 5 (C4, C5, D4, P2, P3) | 7 (S4, S5, D6, O2, B2, B3, P1) | 2 (D7, O4) | 0 | 14 |
+| Low | 2 (P4, P5) | 0 | 2 (O5, B1) | 0 | 4 |
+| **Total** | **12** | **18** | **5** | **1** | **36** |
 
 The shape is the point:
 

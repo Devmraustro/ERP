@@ -293,6 +293,11 @@ CREATE TABLE IF NOT EXISTS ocr_field_reviews (
     decision        TEXT NOT NULL CHECK (decision IN ('CONFIRMED', 'CORRECTED', 'FLAGGED', 'NOT_PRESENT')),
     reviewed_value  TEXT,
     note            TEXT,
+    -- Phase 34: which extraction rows this decision actually reviewed (JSON).
+    -- Nullable on purpose: decisions taken before this column existed reviewed
+    -- the only row there was, and a NULL binding is read as "covers a single
+    -- row", never as "covers any number of rows".
+    evidence_json   TEXT,
     reviewed_by_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     reviewed_at     TEXT NOT NULL
 );
@@ -900,6 +905,7 @@ class ERPDatabase:
         self._migrate_review_policy(conn)
         self._migrate_approval_binding(conn)
         self._migrate_document_routing(conn)
+        self._migrate_review_evidence(conn)
 
     def _migrate_review_policy(self, conn: sqlite3.Connection) -> None:
         """Phase 29 review-policy schema, idempotently, on pre-existing databases.
@@ -953,6 +959,23 @@ class ERPDatabase:
             return
         if "source_review_fingerprint" not in cols:
             conn.execute("ALTER TABLE approval_requests ADD COLUMN source_review_fingerprint TEXT")
+
+    def _migrate_review_evidence(self, conn: sqlite3.Connection) -> None:
+        """Phase 34: record which extraction rows a review decision covered.
+
+        Additive and idempotent — one nullable column, no default, no rewrite.
+        A decision recorded before this phase keeps ``NULL``, which the policy
+        reads as "the single row that existed when it was made". If a document
+        turns out to hold several rows for that field, a ``NULL`` binding does
+        *not* authorise any of them: the field stays blocked until a reviewer
+        resolves the duplicate explicitly. That is the fail-closed direction,
+        and it never deletes or merges a stored extraction row.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_field_reviews)").fetchall()}
+        if not cols:
+            return
+        if "evidence_json" not in cols:
+            conn.execute("ALTER TABLE ocr_field_reviews ADD COLUMN evidence_json TEXT")
 
     def _migrate_document_routing(self, conn: sqlite3.Connection) -> None:
         """Add the review-routing columns to `source_documents`, leaving old rows NULL.

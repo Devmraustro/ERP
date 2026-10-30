@@ -1706,6 +1706,7 @@ def decide_extracted_field_review(
     expected_value: Optional[str] = None,
     note: Optional[str] = None,
     line_index: Optional[int] = None,
+    selected_row_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Record one human review decision on an extracted field (Phase 29).
 
@@ -1715,6 +1716,13 @@ def decide_extracted_field_review(
     field is undecided, flagged, or stale.
 
     Decision semantics (closed vocabulary):
+
+    ``selected_row_id`` (Phase 34) names *which* extraction row the reviewer is
+    treating as authoritative when several rows claim the same logical field.
+    It is optional: without it the value in ``expected_value`` selects the row,
+    and if the rows all agree the choice is immaterial. The recorded evidence
+    always lists every row id of the group, so a row that appears later cannot
+    ride an older decision.
 
     * ``CONFIRMED`` — the current value matches the paper. Requires
       ``expected_value``: the reviewer states what they saw, and a value that
@@ -1825,11 +1833,46 @@ def decide_extracted_field_review(
                     expected_value=expected_value,
                     note=note,
                     now_iso=now_iso,
+                    selected_row_id=selected_row_id,
                 )
     if denial is not None:
         raise denial
     assert result is not None
     return result
+
+
+def _decision_current_value(row: Any, field_name: str) -> Optional[str]:
+    """The canonical value a review decision would be compared against.
+
+    Used to pick, among several extraction rows claiming one logical field, the
+    row whose value the reviewer says they read. Any parse failure yields
+    ``None`` here: this helper only *selects* a row, it never validates one —
+    the authoritative comparison still runs against the chosen row below.
+    """
+    from .review_policy import LINE_DISCOUNT_FIELD, LINE_ITEM_FIELD, LINE_PRICE_FIELD
+
+    if row is None:
+        return None
+    if field_name not in (LINE_ITEM_FIELD, LINE_PRICE_FIELD, LINE_DISCOUNT_FIELD):
+        value = row["normalized_value"]
+        return None if value is None else str(value)
+    try:
+        payload = json.loads(str(row["normalized_value"]))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        if field_name == LINE_PRICE_FIELD:
+            raw = payload.get("unit_price_dzd")
+            return None if raw in (None, "") else f"{round_qty(to_decimal(str(raw))):.6f}"
+        if field_name == LINE_DISCOUNT_FIELD:
+            raw = payload.get("discount_pct")
+            return None if raw in (None, "") else format_dzd(to_decimal(str(raw)))
+        raw = payload.get("qty")
+        return None if raw in (None, "") else f"{round_qty(to_decimal(str(raw))):.6f}"
+    except (ValueError, TypeError):
+        return None
 
 
 def _apply_field_decision(
@@ -1846,9 +1889,11 @@ def _apply_field_decision(
     expected_value: Optional[str],
     note: Optional[str],
     now_iso: str,
+    selected_row_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Apply one validated decision inside the caller's transaction."""
     from .review_policy import (
+        _covered_row_ids,
         DECISION_CONFIRMED,
         DECISION_CORRECTED,
         DECISION_FLAGGED,
@@ -1866,24 +1911,48 @@ def _apply_field_decision(
     user_id = int(user["id"])
     is_line = field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD, LINE_DISCOUNT_FIELD)
     if is_line:
-        # Both line decisions bind to the row extraction wrote: the line JSON
-        # payload lives on the single ``line_item_json`` field row per index.
-        row = conn.execute(
+        # Every line decision binds to the ``line_item_json`` rows extraction
+        # wrote for this index. Normally that is one row; if an operator or a
+        # re-extraction left several, they are all fetched here so the decision
+        # explicitly covers the group instead of silently addressing whichever
+        # row the database happened to return first (Phase 34).
+        group_rows = conn.execute(
             """
             SELECT * FROM ocr_extracted_fields
             WHERE company_id = ? AND document_id = ? AND field_name = ? AND line_index = ?
+            ORDER BY page_number, id
             """,
             (company_id, document_id, LINE_ITEM_FIELD, line_index),
-        ).fetchone()
+        ).fetchall()
     else:
-        row = conn.execute(
+        group_rows = conn.execute(
             """
             SELECT * FROM ocr_extracted_fields
             WHERE company_id = ? AND document_id = ? AND field_name = ?
               AND line_index IS NULL
+            ORDER BY page_number, id
             """,
             (company_id, document_id, field_name),
-        ).fetchone()
+        ).fetchall()
+    group_row_ids = [int(r["id"]) for r in group_rows]
+    row = group_rows[0] if group_rows else None
+    if len(group_rows) > 1 and selected_row_id is not None:
+        # An explicit selection wins, but only if it names a row of this group:
+        # a decision cannot be pointed at another document's evidence.
+        chosen = next((r for r in group_rows if int(r["id"]) == int(selected_row_id)), None)
+        if chosen is None:
+            raise FinancialIntegrityError(
+                f"EXTRACTION_ROW_NOT_IN_GROUP: row {selected_row_id} does not belong to "
+                f"{field_name} on document {document_id}."
+            )
+        row = chosen
+    elif len(group_rows) > 1 and decision != DECISION_CORRECTED and expected_value is not None:
+        # Otherwise prefer the row whose stored value is the one the reviewer
+        # says they read, so a conflict is resolved *towards* what they saw.
+        for candidate in group_rows:
+            if _decision_current_value(candidate, field_name) == str(expected_value):
+                row = candidate
+                break
 
     rule = rule_for(field_name)
     current_value: Optional[str] = None
@@ -2062,6 +2131,28 @@ def _apply_field_decision(
             )
         reviewed_value = None
 
+    # Phase 34: record exactly which extraction rows this decision reviewed.
+    # ``row_ids`` is every row claiming the logical field, so the resolution is
+    # bound to the evidence set it was made against: if another row appears
+    # later, the binding no longer matches and the field goes back to blocked.
+    # ``selected_row_id`` names the row treated as authoritative (for a
+    # transcription, the row the human's value was written to).
+    selected_row = row if row is not None else None
+    if selected_row is not None and int(selected_row["id"]) not in group_row_ids:
+        group_row_ids = sorted(set(group_row_ids) | {int(selected_row["id"])})
+    evidence = json.dumps(
+        {
+            "row_ids": sorted(group_row_ids),
+            "selected_row_id": None if selected_row is None else int(selected_row["id"]),
+            "group_size": len(group_row_ids),
+            "selected_source": (
+                "transcription" if decision == DECISION_CORRECTED
+                else ("human_selection" if len(group_row_ids) > 1 else "single_row")
+            ),
+        },
+        sort_keys=True,
+    )
+
     # Idempotency: an identical repeat of the current latest decision is a
     # replay of that decision, not a new event.
     latest = conn.execute(
@@ -2073,8 +2164,18 @@ def _apply_field_decision(
         """,
         (company_id, document_id, field_name, line_index),
     ).fetchone()
+    # A replay must also cover the same evidence. If the extraction row set
+    # changed since that decision (a duplicate appeared or was removed), the
+    # identical decision is a *re-binding* to the new set and needs its own
+    # recorded row — otherwise the stored binding would keep describing rows
+    # that are no longer the whole group, and the field could never be resolved.
+    latest_covered = _covered_row_ids(latest)
+    if latest_covered is None:
+        latest_covered = {int(row["id"])} if row is not None else set()
+    same_evidence = latest_covered == set(group_row_ids)
     if (
         latest is not None
+        and same_evidence
         and latest["decision"] == decision
         and latest["reviewed_value"] == reviewed_value
         and latest["reviewed_by_id"] == user_id
@@ -2088,6 +2189,7 @@ def _apply_field_decision(
             "reviewed_by_id": user_id,
             "reviewed_at": latest["reviewed_at"],
             "note": latest["note"],
+            "evidence": json.loads(evidence),
             "idempotent_replay": True,
         }
 
@@ -2095,10 +2197,11 @@ def _apply_field_decision(
         """
         INSERT INTO ocr_field_reviews (
             company_id, document_id, field_name, line_index, decision,
-            reviewed_value, note, reviewed_by_id, reviewed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reviewed_value, note, evidence_json, reviewed_by_id, reviewed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (company_id, document_id, field_name, line_index, decision, reviewed_value, note, user_id, now_iso),
+        (company_id, document_id, field_name, line_index, decision, reviewed_value, note,
+         evidence, user_id, now_iso),
     )
     decision_id = int(cur.lastrowid)
     db.append_audit_event(
@@ -2119,6 +2222,7 @@ def _apply_field_decision(
             "reviewed_value": reviewed_value,
             "note": note,
             "reviewed_by": user["username"],
+            "evidence": json.loads(evidence),
         },
     )
     return {
@@ -2127,6 +2231,7 @@ def _apply_field_decision(
         "line_index": line_index,
         "decision": decision,
         "reviewed_value": reviewed_value,
+        "evidence": json.loads(evidence),
         "reviewed_by_id": user_id,
         "reviewed_at": now_iso,
         "note": note,

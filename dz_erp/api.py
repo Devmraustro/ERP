@@ -171,6 +171,11 @@ class FieldDecisionInput(BaseModel):
     expected_value: Optional[str] = None
     note: Optional[str] = None
     line_index: Optional[int] = None
+    # Phase 34: when several extraction rows claim the same field, name the one
+    # the reviewer treats as authoritative. Omitting it falls back to the row
+    # whose value matches ``expected_value``; either way the decision covers
+    # every row of the group or the field stays blocked.
+    selected_row_id: Optional[int] = None
 
 
 class UserCreateInput(BaseModel):
@@ -547,6 +552,7 @@ def create_erp_fastapi_app(
                 expected_value=body.expected_value,
                 note=body.note,
                 line_index=body.line_index,
+                selected_row_id=body.selected_row_id,
             )
         except (AuthorizationError, TenantIsolationError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc

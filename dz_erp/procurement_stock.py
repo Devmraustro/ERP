@@ -610,6 +610,7 @@ def _document_review_gate(
     actor_user_id: int,
     *,
     action: str,
+    audit: bool = True,
 ) -> Optional[FinancialIntegrityError]:
     """Phase 29 fail-closed gate: the linked document's field review must hold.
 
@@ -674,24 +675,31 @@ def _document_review_gate(
             )
         return None
     blocking = evaluation["blocking"]
-    db.append_audit_event(
-        conn=conn,
-        company_id=company_id,
-        actor_user_id=actor_user_id,
-        action_type=f"INVOICE_{action}_BLOCKED_UNREVIEWED",
-        target_model="supplier_invoices",
-        target_id=str(invoice["id"]),
-        after_state={
-            "document_id": document_id,
-            "document_state": doc["workflow_state"],
-            "blocking": blocking[:20],
-            "blocking_truncated": len(blocking) > 20,
-        },
-    )
-    return FinancialIntegrityError(
+    audit_state = {
+        "document_id": document_id,
+        "document_state": doc["workflow_state"],
+        "blocking": blocking[:20],
+        "blocking_truncated": len(blocking) > 20,
+    }
+    if audit:
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            action_type=f"INVOICE_{action}_BLOCKED_UNREVIEWED",
+            target_model="supplier_invoices",
+            target_id=str(invoice["id"]),
+            after_state=audit_state,
+        )
+    # Returned rather than raised: the caller decides, so that a caller which
+    # must roll its transaction back can record the refusal durably afterwards.
+    denial = FinancialIntegrityError(
         "DOCUMENT_REVIEW_UNSATISFIED: invoice cannot proceed while its source document "
         "has undecided, flagged or stale field reviews — " + "; ".join(blocking[:20])
     )
+    denial.audit_action_type = f"INVOICE_{action}_BLOCKED_UNREVIEWED"
+    denial.audit_after_state = audit_state
+    return denial
 
 
 def create_purchase_order(
@@ -2048,7 +2056,81 @@ def post_supplier_invoice(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     req_hash = hashlib.sha256(f"{company_id}:{invoice_id}:POST".encode("utf-8")).hexdigest()
+    try:
+        return _post_supplier_invoice_in_transaction(
+            db, company_id, accountant_user_id, invoice_id, idempotency_key, req_hash, now_iso
+        )
+    except _RefusedAttempt as refusal:
+        _refuse_posting_and_recover(db, company_id, accountant_user_id, invoice_id, refusal, now_iso)
+        raise refusal from None
 
+
+def _refuse_posting_and_recover(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    invoice_id: int,
+    refusal: _RefusedAttempt,
+    now_iso: str,
+) -> None:
+    """Record a posting refusal durably and leave the invoice repairable.
+
+    A review that turns invalid between approval and posting must not strand the
+    invoice: once it is ``Approved`` the source document refuses field decisions
+    (``FIELD_REVIEW_CLOSED``), so refusing the posting alone would leave the
+    invoice permanently unpostable with nobody able to resolve the evidence.
+    The refused attempt is therefore followed, in one transaction, by the same
+    recoverable transition Phase 33 defined for a stale approval: the approval
+    basis is invalidated with a reason and an actor, the approved digest is
+    cleared, and the invoice and its document both return to ``NeedsReview``.
+    Nothing is posted and the ledger is untouched; the repaired invoice has to
+    be re-validated, re-submitted and re-approved by the normal workflow.
+    """
+    with db.transaction() as conn:
+        inv = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ?",
+            (invoice_id, company_id),
+        ).fetchone()
+        if inv is not None and inv["workflow_state"] == "Approved":
+            _invalidate_approval_requests(
+                conn,
+                company_id,
+                invoice_id,
+                reason="SOURCE_REVIEW_INVALID_AT_POSTING",
+                actor_user_id=user_id,
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE supplier_invoices
+                SET workflow_state = 'NeedsReview', approved_payload_sha256 = NULL
+                WHERE id = ? AND company_id = ?
+                """,
+                (invoice_id, company_id),
+            )
+            _refresh_document_state(
+                conn, company_id, inv["document_id"], "NeedsReview", invoice_id=invoice_id
+            )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type=refusal.audit_action_type,
+            target_model=refusal.audit_target_model,
+            target_id=refusal.audit_target_id,
+            after_state={**refusal.audit_after_state, "invoice_returned_to": "NeedsReview"},
+        )
+
+
+def _post_supplier_invoice_in_transaction(
+    db: ERPDatabase,
+    company_id: int,
+    accountant_user_id: int,
+    invoice_id: int,
+    idempotency_key: str,
+    req_hash: str,
+    now_iso: str,
+) -> Dict[str, Any]:
     with db.transaction() as conn:
         _check_user_and_tenant(conn, company_id, accountant_user_id, ("accountant", "admin"))
 
@@ -2082,6 +2164,28 @@ def post_supplier_invoice(
         if not inv["approved_payload_sha256"] or inv["payload_sha256"] != inv["approved_payload_sha256"]:
             raise FinancialIntegrityError(
                 "APPROVAL_PAYLOAD_HASH_MISMATCH: Invoice was modified after approval; re-validation and approval required."
+            )
+
+        # Phase 34 defence in depth: the review gate is re-run at posting, in the
+        # same IMMEDIATE transaction that writes the journal entry. An extraction
+        # row that appeared (or a decision that went stale) between approval and
+        # posting cannot therefore reach the ledger — posting enforces the same
+        # fail-closed rule as submission and approval, not a weaker one. The
+        # denial is raised *after* the transaction commits its audit event, so
+        # the refusal is durable evidence (commit-then-refuse).
+        post_gate_denial = _document_review_gate(
+            conn, db, company_id, inv, accountant_user_id, action="POSTING", audit=False
+        )
+        if post_gate_denial is not None:
+            # Leave the transaction by rolling it back, then record the refusal
+            # in its own transaction: nothing of the posting attempt survives,
+            # but the refusal does.
+            raise _RefusedAttempt(
+                str(post_gate_denial),
+                action_type=post_gate_denial.audit_action_type,
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state=post_gate_denial.audit_after_state,
             )
 
         lines = conn.execute("SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)).fetchall()

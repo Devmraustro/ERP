@@ -954,3 +954,56 @@ staging acceptance). The restore paths that this host cannot run below Python
 is not retrievable from this sandbox (the log host is outside the allowlist), so
 the CI evidence cited is the run, job and per-step conclusions from the GitHub
 API, not copied console output.
+
+---
+
+## 2I. Phase 34 — duplicate OCR extraction rows must not fail open (`tests/test_phase34_ocr_duplicate_row_integrity.py`) — `Passed`
+
+Phase 29 made field review *enforced*, but it assumed one logical field is one row
+in `ocr_extracted_fields`. Nothing enforced that assumption, and the policy did not
+act on the flag it raised. Reproduced on `852f389f` before any change: a fully
+reviewed document plus a second `amount_ht_dzd` row holding `5555.00` produced
+`conflicting_extraction` on the field **and** `satisfied: true`, so the invoice
+validated and was submitted for approval.
+
+| Weakness | Resolution |
+|---|---|
+| `conflicting_extraction` / duplicate rows never affected `satisfied` | A duplicate group is its own blocking reason, `DUPLICATE_EXTRACTION_ROWS:<field>`; the field cannot be satisfied at all while the group is unresolved |
+| `rows[0]` was silently adopted as "the" value | The group is reported with every row id (`duplicate_row_ids`), and the evaluated `value` follows the reviewer's explicit selection, never insertion order |
+| A decision keyed by `(field_name, line_index)` authorised any later row | Each decision records `evidence_json` = `{row_ids, selected_row_id, group_size, selected_source}`; satisfaction requires the binding to cover **exactly** the rows present now |
+| Line-level duplicates were blocked only by accident | Line rows are grouped by logical index; a duplicate index blocks quantity, price and discount with the same reason code |
+| Nothing re-checked the review at posting | Posting re-runs the same gate inside the posting transaction; a refusal rolls the attempt back, records the refusal durably, invalidates the approval and returns the invoice to `NeedsReview` (no dead-end) |
+
+| Test | What it proves |
+| --- | --- |
+| `test_1_duplicate_header_rows_with_identical_values_still_block` | Identical duplicates are record-integrity evidence: the system never decides which of two equal rows is redundant |
+| `test_2_duplicate_header_rows_with_different_values_block_until_resolved` | **The regression**: the conflicting duplicate that used to submit is refused at submission and audited |
+| `test_3_duplicate_rows_on_different_pages_block_and_are_all_named` | Page scope does not make a duplicate benign; every row is listed so the reviewer chooses with the evidence visible |
+| `test_4_duplicate_line_rows_with_the_same_index_block_every_element` | A cloned line blocks quantity, price and discount, and the displayed value never follows the clone |
+| `test_5_distinct_line_indices_are_not_duplicates` | Two real lines stay two lines — the fix does not collapse evidence |
+| `test_6_explicit_reviewer_resolution_records_identity_value_and_evidence` | The resolution is attributed (actor, timestamp, note), names the selected row and the whole group, and appears in the audit chain |
+| `test_6b_selection_cannot_name_another_documents_row` | A selection cannot be pointed at another document's evidence (`EXTRACTION_ROW_NOT_IN_GROUP`) |
+| `test_7_unresolved_duplicates_block_every_required_field_type` | Money, identity and date fields all block, with the right diagnosis (not a misleading "not decided") |
+| `test_8_recorded_alternate_reading_is_a_distinct_concept` | `conflict_values_json` (intake-recorded alternate reading) stays separate from duplicate *rows* and neither masks the other; resolution still works the Phase 29 way |
+| `test_9_a_row_appearing_after_resolution_stales_the_decision` | The binding is to the evidence *set*; a third row re-opens the field, and re-resolution is possible (no dead-end) and idempotent once the set is stable |
+| `test_10_submission_is_blocked_and_the_refusal_is_audited` | `INVOICE_SUBMIT_BLOCKED_UNREVIEWED`, invoice stays `Validated`, no approval row, no journal entry |
+| `test_11_approval_is_blocked_when_a_duplicate_appears_after_submission` | `INVOICE_APPROVAL_BLOCKED_UNREVIEWED`, invoice stays `PendingApproval`, nothing posted |
+| `test_12_posting_re_runs_the_gate_so_a_late_duplicate_cannot_reach_the_ledger` | Posting refuses, records `INVOICE_POSTING_BLOCKED_UNREVIEWED`, invalidates the approval (`SOURCE_REVIEW_INVALID_AT_POSTING`), returns the invoice and document to `NeedsReview`, then the repaired invoice posts exactly once and balances at 1190.00 |
+| `test_13_duplicate_evidence_is_tenant_scoped` | Another tenant cannot decide on the document and sees no part of its duplicate set |
+| `test_14_concurrent_review_and_submission_cannot_race_past_the_gate` | Two threads (resolution + submission) always end in one coherent state, with a valid audit chain |
+| `test_15_evidence_column_migrates_idempotently_and_keeps_legacy_decisions` | `ocr_field_reviews.evidence_json` is additive and nullable; `DROP COLUMN` round trip; legacy `NULL` bindings still satisfy a single-row field and do **not** cover a duplicate set |
+| `test_16_a_flagged_duplicate_cannot_be_confirmed_into_satisfaction` | FLAG/NOT_PRESENT are observations, not selections: neither launders an unresolved group, and no row is deleted |
+| `test_17_transcription_resolves_the_group_without_deleting_rows` | A human transcription supersedes the group, both rows keep their raw evidence, the invoice posts once and balances |
+| `test_18_json_extraction_never_duplicates_a_field` | The intake path itself writes one row per logical field (guards the assumption this phase closes) |
+
+Measured on this host (Linux, CPython 3.11.2, pytest 8.3.5):
+
+* `pytest tests/test_phase34_ocr_duplicate_row_integrity.py -q` → **19 passed**, 4.43 s.
+* Phase 29 + 32 + 33 + OCR/Arabic/doc-consistency suites → **196 passed, 1 skipped** (the skip is the interpreter floor).
+* Full suite → **815 passed, 20 failed, 7 skipped**, 214 s, 77 % coverage; the 20 failures are `diff`-identical to the pre-change baseline and are all `restore_and_verify_backup`'s interpreter floor.
+* `ruff check dz_erp tests tools` → All checks passed; `compileall` clean; risk-register summary consistent.
+
+Nothing was deleted or merged: duplicate extraction rows remain stored evidence.
+No UNIQUE constraint was added, because a constraint cannot distinguish a
+legitimate re-extraction artefact from an operator error, and enforcing one on
+historical data would either fail the migration or silently drop rows.

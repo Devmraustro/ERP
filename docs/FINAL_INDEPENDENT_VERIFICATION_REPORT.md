@@ -6,14 +6,15 @@ re-derived from the repository, the remote, the CI API or a command run on this
 host during this pass. Nothing was merged, closed, rebased, marked ready or
 deployed.
 
-**Verified code head:** `0df3c33ff6fd96f59d04374b8c00006902ab62ed`
+**Verified code head:** `486306290356b859c17fcc416ba7d3ac26cb4689` (green CI,
+build 3/3 — §3)
 **Branch:** `arena/7f12d627-erp` · **PR:** #7 (Draft) · **Base of the chain:** `852f389f…` on `origin/main` = `4fc1364a…`
 
 ---
 
 ## 1. Commits, parents, branch, remote
 
-`git rev-parse HEAD` = `0df3c33f…`; `git rev-list --left-right --count HEAD...origin/arena/7f12d627-erp` = `0 0`; working tree clean.
+`git rev-parse HEAD` = `4863062…`; `git rev-list --left-right --count HEAD...origin/arena/7f12d627-erp` = `0 0`; working tree clean.
 
 | # | Commit | Parent | Subject |
 |---|---|---|---|
@@ -26,8 +27,14 @@ deployed.
 | 7 | `93be276f42eae65b00d6c9e56fd7ca1632061c4e` | `8b1b56c9…` | docs: independent verification report, blockers, tracker |
 | 8 | `6fb650da47bb299cb001320ad49d1347b60c0742` | `93be276f…` | fix(api): bound limiter state + shared backend (**P39, F-01**) |
 | 9 | `0df3c33ff6fd96f59d04374b8c00006902ab62ed` | `6fb650da…` | feat(accounting): immutable stamp-duty provenance (**P40, F-04**) |
+| 10 | `71ac9d6295e3d24d76e770caba7de36d90e4e018` | `0df3c33f…` | Phase 41 migration evidence by schema generation + F-06 decision; Phase 42 log review |
+| 11 | `486306290356b859c17fcc416ba7d3ac26cb4689` | `71ac9d6…` | Fix the Phase 41 backup round-trip test (report returns an open database, not a path) |
 
 Linear, single-parent, no merges, no rewritten history.
+
+This report is delivered by a documentation-only commit on top of the verified
+code head `4863062`; nothing in it depends on that commit's content, and the CI
+run in §3 is the one recorded against the code head.
 
 ## 2. PR containment and dependency chain
 
@@ -41,45 +48,62 @@ the same branch and therefore land in the same PR.
 | #4 | `99864bab` | `phase29/ocr-failclosed` | yes | MERGEABLE / CLEAN |
 | #5 | `c466cea7` | `fix/phase29-source-invoice-consistency` | yes | MERGEABLE / CLEAN |
 | #6 | `e4e47b3b` | `fix/phase29-invoice-line-price-consistency` | yes | MERGEABLE / CLEAN |
-| #7 | `0df3c33f` | `fix/phase29-invoice-discount-and-line-net-consistency` | **yes** | MERGEABLE / CLEAN |
+| #7 | `4863062` | `fix/phase29-invoice-discount-and-line-net-consistency` | **yes** | MERGEABLE / CLEAN |
 
 The chain is linear (#3 → #4 → #5 → #6 → #7). No base, head, draft state, label or
 title was changed by this pass.
 
 ## 3. CI on the exact head
 
-CI runs on push to the branch (`pull_request` + `push` triggers). The run for the
-final head `0df3c33f` was **not yet complete when this report was written**; the
-last completed run on this branch is **`41133729524`** on `93be276f`, which is
-green (3/3 jobs). The authoritative run for `0df3c33f` is the one the branch shows
-after this push; its job table is appended to the PR checks and must be read
-there, not inferred from an earlier commit.
-
-Verified green run on the exact previous head:
-
 | Field | Value |
 |---|---|
-| Run | **41133729524** |
-| Head SHA | `93be276f42eae65b00d6c9e56fd7ca1632061c4e` |
-| Conclusion | `success`, 3/3 jobs |
+| Run | **41141070516** |
+| Head SHA | `486306290356b859c17fcc416ba7d3ac26cb4689` |
+| Event / conclusion | `pull_request` · **`success`**, 3/3 jobs |
+| Started (UTC) | 2026-10-30T22:53:40Z |
 
-| Job | Result | Relevant steps |
-|---|---|---|
-| Test, coverage and static checks (Python 3.11) | **success** | full suite with coverage, isolated synthetic staging acceptance, risk-register summary |
-| Test, coverage and static checks (Python 3.12) | **success** | full suite with coverage (staging steps skipped by matrix design) |
-| Key rotation, backup and recovery on Windows (3.12.10) | **success** | key rotation, migration, backup/restore, logging, recovery |
+| Job | Result | Window (UTC) | Steps of interest |
+|---|---|---|---|
+| Test, coverage and static checks (Python 3.11) | **success** | 22:53:44 → 22:58:01 | ruff; full suite with coverage; isolated synthetic staging acceptance; risk-register summary |
+| Test, coverage and static checks (Python 3.12) | **success** | 22:53:43 → 23:04:40 | ruff; full suite with coverage (staging steps skipped by matrix design) |
+| Key rotation, backup and recovery on Windows (3.12.10) | **success** | 22:53:43 → 22:57:10 | ruff; key rotation, migration, backup/restore, logging, recovery; Windows staging acceptance |
 
-**Limitation, stated plainly:** CI artefact download is blocked from this sandbox
-(egress is limited to the GitHub API host — `gh run download 41133729524`
-returns `EOF`). The numeric pass counts *inside CI* therefore cannot be read
-here; the CI claim is step-level. Numeric counts below are from this host.
+### 3.1 The intermediate run that failed, and what it proved
+
+Run **`41139689290`** on `71ac9d6` (the Phase 41/42 commit) came back
+**`failure`**: both Linux jobs failed, the Windows job passed. Job logs and
+artefacts are not retrievable from this sandbox (`gh run view --log-failed` →
+`EOF` from `results-receiver.actions.githubusercontent.com`; `gh api
+.../artifacts/<id>/zip` → the same block), so the failing test name could not be
+read directly.
+
+It was reconstructed by reasoning about what differs between this host and CI:
+exactly one test in the new suite is skipped here and executes there — the backup
+round-trip, gated on CPython ≥ 3.11.17 (this host is 3.11.2). Executing that test
+body here with the interpreter gate faked reproduced the defect deterministically:
+
+```
+TypeError: expected str, bytes or os.PathLike object, not ERPDatabase
+  at Path(report["restored_db"])
+```
+
+`restore_and_verify_backup()` returns `restored_db` as the **reopened
+`ERPDatabase`** whose audit chain it has just re-verified — not a path. Fixed in
+`4863062` by reading `.db_path` and by additionally asserting the restore landed
+outside the source directory. The authoritative confirmation is the green run
+above; the fix is *not* claimed on the strength of the local probe alone.
+
+**Limitation, stated plainly:** CI artefact download is unavailable here, so the
+numeric pass counts *inside CI* cannot be quoted. The CI claim is step-level
+(all jobs and steps `success`). Numeric counts in §4 are from this host.
 
 ## 4. Test suite on this host, against a re-measured baseline
 
 ```bash
 python -m pytest -q --cov=dz_erp --cov-report=term
-# 942 passed, 20 failed, 7 skipped in 191.53 s   (head 0df3c33f)
+# 960 passed, 20 failed, 8 skipped in 232.50 s   (head 4863062)
 # baseline 852f389f: 796 passed, 20 failed, 7 skipped
+# coverage: 79 %  (7795 statements, 1660 missed)
 ```
 
 The 20 failures are byte-identical in name to the baseline set and every one is
@@ -88,7 +112,9 @@ the safe-restore interpreter floor on CPython 3.11.2
 subprocess variant, or the assertion that message pre-empts). They are green in
 CI on 3.11.17/3.12.10.
 
-Delta accounting: 942 − 796 = **146 new tests**, all from this workstream:
+Delta accounting: collected tests went from 823 to 988 — **165 new tests**, all
+from this workstream, of which 164 pass here and 1 is skipped by the interpreter
+floor (960 − 796 = 164 passing, 8 − 7 = 1 skipped):
 
 | Suite | Tests |
 |---|---|
@@ -100,7 +126,7 @@ Delta accounting: 942 − 796 = **146 new tests**, all from this workstream:
 | `tests/test_phase39_bounded_rate_limiting.py` | 32 |
 | `tests/test_phase40_timbre_rule_provenance.py` | 22 |
 | `tests/test_phase41_migration_evidence.py` | 17 (16 passed, 1 skipped locally by design) |
-| **total** | **146** (145 run locally) |
+| **total** | **165** (164 run locally) |
 
 Static gates: `ruff check dz_erp tests tools` clean; `compileall` clean;
 `test_phase22_register_and_docs_consistency.py` 15 passed;
@@ -232,10 +258,10 @@ choose. Rotation is implemented and bounded; off-host shipping is not.
 ## 12. Reproduce
 
 ```bash
-git rev-parse HEAD        # 0df3c33ff6fd96f59d04374b8c00006902ab62ed
+git rev-parse HEAD        # 486306290356b859c17fcc416ba7d3ac26cb4689
 git rev-parse origin/arena/7f12d627-erp
 python -m ruff check dz_erp tests tools
-python -m pytest -q --cov=dz_erp --cov-report=term        # 942 / 20 / 7
+python -m pytest -q --cov=dz_erp --cov-report=term        # 960 / 20 / 8
 python -m pytest tests/test_phase39_bounded_rate_limiting.py \
                  tests/test_phase40_timbre_rule_provenance.py \
                  tests/test_phase41_migration_evidence.py -q  # 32 + 22 + (16 passed, 1 skipped)

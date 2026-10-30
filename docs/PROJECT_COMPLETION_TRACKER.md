@@ -48,7 +48,7 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | 21 | P40 | F-04: rule identity, content hash, snapshot, append-only ledger, mutation guards, posting re-check, legacy handling, reversal inheritance | **DONE** | `dz_erp/localization.py`, `dz_erp/database.py`, `dz_erp/procurement_stock.py`, `dz_erp/security_audit.py` | `tests/test_phase40_timbre_rule_provenance.py` (22) | 22 passed | `0df3c33` |
 | 22 | P41 | Migration evidence by schema generation: checksums, FKs, indexes, interruption, large tables, backup→restore | **DONE** (structural) / **BLOCKED_EXTERNAL** (production scale) | `tests/test_phase41_migration_evidence.py`, `docs/MIGRATION_AND_DATA_SAFETY.md` | 17 tests | 16 passed, 1 skipped locally by interpreter floor; runs in CI | committed |
 | 23 | P42 | Logging and retention review | **DONE** (review) / **BLOCKED_EXTERNAL** (retention period) | `docs/LOG_RETENTION_AND_ACCESS.md` | — | Content verified credential-free; retention is a DPO determination | — |
-| 24 | P39/P40 | Full-suite regression | **DONE** | — | `pytest -q --cov=dz_erp` | 942 passed, 20 failed (interpreter floor, same names as baseline), 7 skipped | — |
+| 24 | P39/P40 | Full-suite regression | **DONE** | — | `pytest -q --cov=dz_erp` | 960 passed, 20 failed (interpreter floor, same set as baseline), 8 skipped, 79 % coverage | — |
 
 ## Where the workstream stands
 

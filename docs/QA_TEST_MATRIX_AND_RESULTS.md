@@ -902,3 +902,44 @@ the Phase 30 head). Per module: `review_policy.py` 91 % (281 statements), `intak
 `decimal_utils.py` 89 %. The total count reconciles exactly: 723 (Phase 30 head) + 11 new
 instances = 734. No test was suppressed, weakened or skipped to obtain this result. CI for this
 exact head is reported with the PR, not assumed.
+
+---
+
+## 2H. Phase 33 — recoverable invoice lifecycle and accounting error semantics (`tests/test_phase33_invoice_lifecycle.py`) — `Passed`
+
+Phase 32's independent audit (`docs/PHASE32_INDEPENDENT_INTEGRATION_AUDIT.md`)
+reported four reproducible findings and, by design, did not fix them. Phase 33
+reproduces all four on the verified Phase 32 head
+`2a2b9b14de0cf792356488d645f20e5c4d4ad565` and remediates them with one rule
+behind every change: **an attempt that is refused must leave the books, the
+evidence and the audit chain exactly as they were, while the refusal itself
+becomes durable, attributed evidence.**
+
+| Finding | What was wrong (Phase 32 tree) | What the test now pins |
+| :--- | :--- | :--- |
+| P32-F2 | `NeedsReview` was terminal: no service re-validated an invoice, and re-creating it was refused as a duplicate of the broken draft | correction + re-validation on the same invoice identity, every prerequisite re-run, previous attempts preserved, digest recomputed so a rejected result can never authorise posting |
+| P32-F3 | a refused duplicate attempt rewrote the *original* document's `workflow_state` to `DuplicateRejected` | no document write on refusal, one paper = one live invoice, refusal audited independently |
+| P32-F4 | modification left the document `PendingApproval` and the request `PENDING` while the invoice became `NeedsReview`, with no binding to the approved payload | explicit `INVALIDATED` + state sync + payload/fingerprint binding, legacy `NULL` binding tolerated |
+| P32-F5 | a second reversal escaped as `sqlite3.IntegrityError` (HTTP 500) from a unique constraint | `INVOICE_ALREADY_REVERSED` domain refusal (409) detected before the insert, attributed audit, exactly one credit note under a race |
+
+| Test group | Cases | What they prove |
+| :--- | ---: | :--- |
+| `test_f2_*` | 12 | correct-in-place and post the result; repeated re-validation is idempotent and each attempt is audited; a failed re-validation is recorded and still blocks submission; the approved digest is the corrected one, never the rejected one; `PendingApproval`/`Approved`/`Posted`/`Rejected` refuse re-validation (4 params); a duplicate-rejected draft is correctable; re-validation cannot steal another invoice's reference; the reviewed-source gate survives re-validation; document-less legacy invoices are correctable; role and tenant scoping; HTTP `200` / `409` |
+| `test_f3_*` | 3 | the refused attempt leaves both documents and the original invoice byte-identical, records actor/company/document/reference/reason with `document_state_touched: false`; a second live invoice on an owned document is refused `DOCUMENT_ALREADY_INVOICED` with one invoice remaining; duplicate detection stays company-scoped |
+| `test_f4_*` | 8 | price/quantity/discount modifications each invalidate the approval, re-derive the exact line net and header totals and invalidate every request with actor + reason; document and invoice stay consistent; a corrected manual invoice can be resubmitted and approved; an obsolete request cannot authorise a modified invoice; approval is bound to the source-review fingerprint; a legacy `NULL` fingerprint still works; rejection of a modified invoice is never gated |
+| `test_f5_*` | 5 | first reversal succeeds and the second is a domain conflict with an attributed audit event and an HTTP `409`; a two-thread `threading.Barrier` race yields exactly one credit note and a balanced ledger; cross-company attempts are refused; an entry-number collision is mapped to `REVERSAL_ENTRY_UNIQUE_CONFLICT` |
+| `test_invariants_*`, `test_migration_*` | 3 | posted journal entries and their lines are never rewritten by any later refused operation; a full lifecycle (broken → corrected → posted → reversed) stays balanced with one `INVOICE_REVALIDATED` and one `REVERSAL_POSTED`; the additive `approval_requests.source_review_fingerprint` column migrates idempotently, and a `DROP COLUMN` round trip proves the pre-Phase-33 schema still reads and approves |
+
+Exact measured evidence on this host (Linux, Python **3.11.2**, pytest 8.3.5,
+coverage 6.0.0, ruff 0.14.0, hash-locked dependency set):
+
+* `pytest tests/test_phase33_invoice_lifecycle.py -q` → **33 passed**, 4.96 s.
+* `pytest tests/test_phase32_cross_phase_integration_audit.py tests/test_phase29_ocr_review_policy.py -q` → **92 passed, 1 skipped**, 12.02 s. The three Phase 32 characterisation tests (`T`, `U`, `W`) were converted into resolution assertions and `T2` was added; none was deleted, skipped or weakened.
+* `pytest tests/test_phase8_upload_boundary_and_ci.py -q` → 204 passed, 2 failed. Both failures are the interpreter floor (`Safe backup restore requires Python 3.11.17+`), an environment limit of this host, not an application result.
+* Full suite with coverage → **796 passed, 20 failed, 7 skipped**, 162.05 s, coverage **77 %** (7,116 statements, 1,623 missed; `api.py` 86 %, `database.py` 94 %, `procurement_stock.py` 87 %). All 20 failures are the same interpreter floor in `security_audit.py`'s restore gate; no application assertion failed, and none is recorded as a pass.
+* `ruff check dz_erp tests tools` → All checks passed; `compileall` clean; `tools/verify_dependency_graph.py` → OK; `tools/generate_hash_lock.py --check` → 51 distributions / 1,277 hashes, no drift; `cv2 4.11.0` and `RapidOCR` import OK; `tools/staging_acceptance.py` → 38/40 (the two failures are the restore check and its dependent restart check, same interpreter floor); `tools/risk_register_counts.py` → 36 rows consistent; `pytest tests/test_phase22_register_and_docs_consistency.py` → 15 passed; `git diff --check` clean; secret scan over the whole diff → no matches.
+* The protected-operation pin in `tests/test_phase8_upload_boundary_and_ci.py` moves from 28 to 29 with the new `POST /api/v1/invoices/{invoice_id}/revalidate` endpoint documented in the comment — the assertion itself is not relaxed.
+
+No Algerian SCF, TVA, timbre or G50 rule was changed, no external production
+gate was marked verified, and the CI result for the exact published SHA is
+recorded with the pull request rather than assumed here.

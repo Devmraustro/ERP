@@ -1311,18 +1311,22 @@ def test_s2_non_numeric_decision_values_are_a_422(env, field):
 # ---------------------------------------------------------------------------
 # T. FINDINGS P32-F2 / P32-F3 — NeedsReview dead-end and document state drift
 # ---------------------------------------------------------------------------
-def test_t_a_needs_review_invoice_has_no_recovery_path(env):
-    """FINDINGS P32-F2/P32-F3 (Medium): NeedsReview is a terminal dead-end.
+def test_t_a_needs_review_invoice_recovers_in_place_without_drifting_evidence(env):
+    """RESOLVED in Phase 33 (was FINDING P32-F2/P32-F3, Medium).
 
-    (a) nothing re-validates an invoice out of ``NeedsReview`` — the only
-        writer of ``Validated`` is invoice creation;
-    (b) re-creating the corrected invoice with the same supplier number is
-        refused as an exact duplicate of the broken draft, so the paper
-        invoice can never be booked without out-of-band SQL;
-    (c) the failed duplicate attempt still overwrites the *linked source
-        document's* workflow_state to ``DuplicateRejected``, drifting the
-        evidence away from the invoice it backs.
+    ``NeedsReview`` is no longer a terminal dead-end and a refused duplicate
+    attempt no longer rewrites the evidence:
+
+    (a) ``revalidate_supplier_invoice`` corrects and re-validates the *same*
+        invoice identity, re-running every validation prerequisite;
+    (b) re-creating the invoice behind the same paper is refused outright with
+        a documented domain error instead of silently minting a duplicate;
+    (c) the linked source document keeps the state its invoice relies on.
+
+    See ``tests/test_phase33_invoice_lifecycle.py`` (P32-F2/P32-F3 matrix).
     """
+    from dz_erp.procurement_stock import revalidate_supplier_invoice
+
     db, vault, _client = env
     document_id = _upload(db, vault)["document_id"]
     _review_all(db, 1, document_id)
@@ -1334,25 +1338,58 @@ def test_t_a_needs_review_invoice_has_no_recovery_path(env):
     )
     assert broken["workflow_state"] == "NeedsReview"
 
-    corrected = _create_invoice(db, document_id=document_id, lines=[_invoice_line("2", "500.00")])
-    assert corrected["workflow_state"] == "DuplicateRejected"
-    assert any("EXACT_DUPLICATE_INVOICE_REF" in e for e in corrected["validation_errors"])
+    correct = revalidate_supplier_invoice(
+        db, 1, 2, broken["invoice_id"],
+        amount_ht_dzd="1000.00", amount_tva_dzd="190.00", amount_ttc_dzd="1190.00",
+    )
+    assert correct["invoice_id"] == broken["invoice_id"]
+    assert correct["workflow_state"] == "Validated"
+    assert correct["payload_sha256"] != broken["payload_sha256"]
+
+    with pytest.raises(FinancialIntegrityError, match="DOCUMENT_ALREADY_INVOICED"):
+        _create_invoice(db, document_id=document_id, lines=[_invoice_line("2", "500.00")])
 
     with db.transaction() as conn:
         doc_state = conn.execute(
             "SELECT workflow_state FROM source_documents WHERE id = ?", (document_id,)
         ).fetchone()["workflow_state"]
-    assert doc_state == "DuplicateRejected"  # evidence row drifted away from its invoice
+        invoices = conn.execute(
+            "SELECT COUNT(*) AS n FROM supplier_invoices WHERE document_id = ?", (document_id,)
+        ).fetchone()["n"]
+    assert doc_state == "Validated"  # the evidence follows the invoice it backs
+    assert invoices == 1
+    assert _journal_entries(db) == []
 
-    # A NeedsReview document is not linkable and no longer accepts decisions, so
-    # there is no in-product repair either.
-    with pytest.raises(FinancialIntegrityError, match="FIELD_REVIEW_CLOSED"):
-        decide_extracted_field_review(
-            db, company_id=1, user_id=2, document_id=document_id,
-            field_name="invoice_number", decision="CORRECTED", value="FAC-2026-0001",
-        )
+
+def test_t2_a_previous_failed_validation_never_authorizes_posting(env):
+    """RESOLVED in Phase 33: only the approved payload digest can be posted."""
+    from dz_erp.procurement_stock import revalidate_supplier_invoice
+
+    db, vault, _client = env
+    document_id = _upload(db, vault)["document_id"]
+    _review_all(db, 1, document_id)
+    broken = _create_invoice(
+        db, document_id=document_id,
+        lines=[_invoice_line("2", "500.00")],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+    rejected_hash = broken["payload_sha256"]
+    assert broken["workflow_state"] == "NeedsReview"
     with pytest.raises(FinancialIntegrityError, match="must be 'Validated'"):
         submit_invoice_for_approval(db, 1, 2, broken["invoice_id"])
+
+    corrected = revalidate_supplier_invoice(
+        db, 1, 2, broken["invoice_id"],
+        amount_ht_dzd="1000.00", amount_tva_dzd="190.00", amount_ttc_dzd="1190.00",
+    )
+    submit_invoice_for_approval(db, 1, 2, broken["invoice_id"])
+    decide_invoice_approval(db, 1, 3, broken["invoice_id"], approve=True)
+    with db.transaction() as conn:
+        inv = conn.execute(
+            "SELECT approved_payload_sha256 FROM supplier_invoices WHERE id = ?",
+            (broken["invoice_id"],),
+        ).fetchone()
+    assert inv["approved_payload_sha256"] == corrected["payload_sha256"] != rejected_hash
     assert _journal_entries(db) == []
 
 
@@ -1360,12 +1397,16 @@ def test_t_a_needs_review_invoice_has_no_recovery_path(env):
 # U. FINDING P32-F4 — draft modification leaves the document and the approval
 #    request out of step with the invoice
 # ---------------------------------------------------------------------------
-def test_u_draft_modification_desynchronises_document_and_approval_request(env):
-    """FINDING P32-F4 (Low/Medium): modify_draft_invoice_line drifts state.
+def test_u_draft_modification_invalidates_the_approval_and_syncs_the_document(env):
+    """RESOLVED in Phase 33 (was FINDING P32-F4, Low/Medium).
 
-    The invoice moves to ``NeedsReview`` while its linked source document stays
-    ``PendingApproval``, and the ``approval_requests`` row stays ``PENDING``
-    even though no approval can be decided for that invoice any more.
+    A financial modification now invalidates the approval basis explicitly: the
+    request becomes ``INVALIDATED`` with a reason and an actor, the invoice and
+    its source document both return to ``NeedsReview``, and the approved payload
+    digest is cleared — so the pre-modification approval can never authorize the
+    modified payload.
+
+    See ``tests/test_phase33_invoice_lifecycle.py`` (P32-F4 matrix).
     """
     db, vault, _client = env
     document_id, invoice_id = _reviewed_invoice(db, vault)
@@ -1374,22 +1415,27 @@ def test_u_draft_modification_desynchronises_document_and_approval_request(env):
         line_id = conn.execute(
             "SELECT id FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)
         ).fetchone()["id"]
-    modify_draft_invoice_line(db, 1, 2, invoice_id, line_id, "560.00")
+    result = modify_draft_invoice_line(db, 1, 2, invoice_id, line_id, "560.00")
+    assert result["approval_invalidated"] is True
 
     with db.transaction() as conn:
         inv_state = conn.execute(
-            "SELECT workflow_state FROM supplier_invoices WHERE id = ?", (invoice_id,)
-        ).fetchone()["workflow_state"]
+            "SELECT workflow_state, approved_payload_sha256 FROM supplier_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
         doc_state = conn.execute(
             "SELECT workflow_state FROM source_documents WHERE id = ?", (document_id,)
         ).fetchone()["workflow_state"]
-        pending = conn.execute(
-            "SELECT COUNT(*) AS n FROM approval_requests WHERE target_id = ? AND decision = 'PENDING'",
+        requests = conn.execute(
+            "SELECT decision, reason FROM approval_requests WHERE target_id = ? ORDER BY id",
             (invoice_id,),
-        ).fetchone()["n"]
-    assert inv_state == "NeedsReview"
-    assert doc_state == "PendingApproval"  # drifted: nothing is pending for it
-    assert pending == 1  # orphaned pending approval request
+        ).fetchall()
+    assert inv_state["workflow_state"] == "NeedsReview"
+    assert inv_state["approved_payload_sha256"] is None
+    assert doc_state == "NeedsReview"  # no longer claims a pending approval
+    assert [dict(r) for r in requests] == [
+        {"decision": "INVALIDATED", "reason": "PAYLOAD_MODIFIED_AFTER_SUBMISSION"}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1421,11 +1467,15 @@ def test_v_cash_invoice_timbre_must_be_evidenced_before_submission(env):
 # W. Duplicate reversal is refused (no second credit note)
 # ---------------------------------------------------------------------------
 def test_w_a_second_reversal_of_the_same_invoice_is_refused(env):
-    """Reversing twice must not double-credit; today a raw UNIQUE helps us.
+    """Reversing twice must not double-credit, and the refusal is a domain error.
 
-    FINDING P32-F5 (Low): the refusal comes from the ``journal_entries``
-    UNIQUE(company_id, entry_number) constraint and surfaces as an unhandled
-    ``sqlite3.IntegrityError`` (HTTP 500), not a documented business refusal.
+    RESOLVED in Phase 33 (was FINDING P32-F5, Low): the second attempt is
+    detected *before* any insert and refused with a documented
+    ``INVOICE_ALREADY_REVERSED`` (HTTP 409) plus an attributed audit event,
+    instead of surfacing an unhandled ``sqlite3.IntegrityError``. The original
+    posted entry and the first credit note are left untouched.
+
+    See ``tests/test_phase33_invoice_lifecycle.py`` (P32-F5 matrix).
     """
     db, vault, _client = env
     _document_id, invoice_id = _reviewed_invoice(db, vault)
@@ -1436,11 +1486,9 @@ def test_w_a_second_reversal_of_the_same_invoice_is_refused(env):
     decide_reversal_approval(db, 1, 3, cn, approve=True)
     post_reversal(db, 1, 4, cn, "revp-1")
 
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
-        second = create_reversal_request(db, 1, 4, invoice_id, "again", "rev-2")
-        submit_reversal_for_approval(db, 1, 4, second["credit_note_invoice_id"])
-        decide_reversal_approval(db, 1, 3, second["credit_note_invoice_id"], approve=True)
-        post_reversal(db, 1, 4, second["credit_note_invoice_id"], "revp-2")
+    with pytest.raises(FinancialIntegrityError, match="INVOICE_ALREADY_REVERSED") as refused:
+        create_reversal_request(db, 1, 4, invoice_id, "again", "rev-2")
+    assert not isinstance(refused.value, sqlite3.IntegrityError)
 
     with db.transaction() as conn:
         refunds = conn.execute(

@@ -12,6 +12,14 @@ recommended remediation and no code change, because each needs a product
 decision rather than a mechanical correction (§9). No file under `docs/` that
 records an external gate was converted into a claim of completion.
 
+> **Phase 33 addendum.** The four findings this report left open (P32-F2 … P32-F5)
+> were subsequently reproduced and remediated on a dedicated Phase 33 branch
+> stacked on this report's verified head. The finding texts in §8 are preserved
+> **exactly as they were raised in Phase 32** and describe the Phase 32 state;
+> §14 records the remediation, the state-machine changes, the tests that now
+> assert the resolved behaviour, and the evidence. §11 (external production
+> gates) is unchanged — nothing in Phase 33 closes an external gate.
+
 **Method.** Every claim below is either (a) a command run on this host against
 the verified Phase 31 tree, with its exit code, or (b) a GitHub API fact about
 the exact published SHA. Nothing is asserted from a phase's own test report. The
@@ -200,10 +208,19 @@ skipped (environment), 0 failed, 7.08 s**.
 | Q | backup + isolated restore after posting | posted invoice, journal entry and review decisions survive; restored ledger balances at 1190.00 and the restored audit chain verifies | **skipped on this host** (§10) — executed in CI |
 | R | pre-Phase-29 database migration | column/table/trigger restored, no row loss, repeat run is a no-op, trigger still enforced | pass |
 | S/S2 | non-numeric amounts and decision values | 422, nothing persisted (P32-F1 regression, 5 + 4 params) | pass |
-| T | `NeedsReview` recovery path | **characterisation of P32-F2/F3** — no recovery, duplicate refusal, document state drift | pass (documents the finding) |
-| U | draft modification state drift | **characterisation of P32-F4** — invoice `NeedsReview`, document `PendingApproval`, orphan `PENDING` approval | pass (documents the finding) |
+| T | `NeedsReview` recovery path | **P32-F2/F3 regression** (Phase 33) — corrected in place to `Validated`, duplicate re-creation refused `DOCUMENT_ALREADY_INVOICED`, document follows its invoice | pass |
+| T2 | previous failed validation authorizes posting? | **P32-F2 regression** (Phase 33) — approved digest is the corrected one, never the rejected one | pass |
+| U | draft modification state drift | **P32-F4 regression** (Phase 33) — request `INVALIDATED` (`PAYLOAD_MODIFIED_AFTER_SUBMISSION`), invoice and document both `NeedsReview`, approved digest cleared | pass |
 | V | CASH invoice timbre vs reviewed evidence | `AMOUNT_TIMBRE_DZD_SOURCE_MISMATCH` | pass |
-| W | second reversal of the same invoice | refused (raw `sqlite3.IntegrityError` — P32-F5), one posted credit note | pass |
+| W | second reversal of the same invoice | **P32-F5 regression** (Phase 33) — `INVOICE_ALREADY_REVERSED` domain refusal, one posted credit note, original entry untouched | pass |
+
+Sections T, U and W originally *characterised* the open findings; Phase 33
+converted them into resolution assertions (`T2` was added) rather than deleting
+or skipping them. The findings-as-found behaviour remains reproducible from the
+Phase 32 tree at `9092e42a`; the Phase 33 matrix
+[`tests/test_phase33_invoice_lifecycle.py`](../tests/test_phase33_invoice_lifecycle.py)
+now carries the detailed evidence. File totals after Phase 33: **45 collected,
+44 passed, 1 skipped (Q — interpreter floor), 0 failed**.
 
 No existing test was weakened, deleted or skipped, and no assertion was relaxed
 to obtain these results.
@@ -246,6 +263,8 @@ to obtain these results.
 
 ### P32-F2 — `NeedsReview` is a terminal dead-end · **Medium** · reported, not fixed
 
+**Status after Phase 33:** RESOLVED — `revalidate_supplier_invoice` (service) and `POST /api/v1/invoices/{invoice_id}/revalidate` (API) correct and re-validate the same invoice identity. See §14.1.
+
 * **Where:** `dz_erp/procurement_stock.py` (no function re-validates an existing
   invoice; the only writer of `Validated` is
   `create_and_validate_supplier_invoice`), `dz_erp/api.py` (no correction
@@ -269,6 +288,8 @@ to obtain these results.
 
 ### P32-F3 — A failed duplicate attempt rewrites the linked document's state · **Medium** · reported, not fixed
 
+**Status after Phase 33:** RESOLVED — a refused attempt never writes the document's state, and a second live invoice on one document is refused before any insert. See §14.2.
+
 * **Where:** `create_and_validate_supplier_invoice`, the tail
   `UPDATE source_documents SET workflow_state = ?` (the *new* invoice's state).
 * **Reproduction:** upload + fully review document D, create invoice A
@@ -290,6 +311,8 @@ to obtain these results.
 
 ### P32-F4 — Draft modification desynchronises the document and orphans the approval · **Low/Medium** · reported, not fixed
 
+**Status after Phase 33:** RESOLVED — every financial modification invalidates the approval basis explicitly and syncs the document; requests are bound to the payload digest and source-review fingerprint. See §14.3.
+
 * **Where:** `dz_erp/procurement_stock.py::modify_draft_invoice_line`.
 * **Reproduction:** submit a reviewed invoice (`PendingApproval`), then modify a
   line price. Invoice → `NeedsReview`; linked document stays `PendingApproval`;
@@ -309,6 +332,8 @@ to obtain these results.
   state and no `PENDING` approval row remains.
 
 ### P32-F5 — A second reversal is refused only by a raw database constraint · **Low** · reported, not fixed
+
+**Status after Phase 33:** RESOLVED — the conflict is detected before the insert and refused as `INVOICE_ALREADY_REVERSED` (HTTP 409) with an attributed audit event; the residual unique-constraint race is mapped to the same error. See §14.4.
 
 * **Where:** `dz_erp/procurement_stock.py::create_reversal_request` (no
   "already reversed" check), `dz_erp/api.py` reverse endpoint (maps only
@@ -472,3 +497,201 @@ it changes no file under `dz_erp/` or `tests/`.
 Nothing was merged, closed, rebased or force-pushed; `main` is untouched and no
 file was deleted. PRs #3–#6 remain exactly as they were found.
 
+
+---
+
+## 14. Phase 33 remediation of P32-F2 … P32-F5
+
+Appended after the Phase 32 publication. §1–§13 above are left as published;
+this section is the record of the remediation that followed it.
+
+**Baseline.** The Phase 32 head `2a2b9b14de0cf792356488d645f20e5c4d4ad565`
+(Phase 32 code, tests and this report) was restored and verified byte-identical
+to `origin/arena/7f12d627-erp` before any change. All four findings were
+reproduced on that tree first, with the exact evidence recorded in §8 — the
+reproductions are the baseline, not the summaries.
+
+**Scope discipline.** Minimal and backward compatible:
+
+* no posted journal entry, journal line or approval decision is rewritten;
+* no validation, tax or timbre rule is changed, and no Algerian SCF/VAT/G50
+  behaviour is touched — the same helper functions are called as before;
+* legacy/manual (document-less) invoices keep working, and pre-existing approval
+  rows keep authorising what they legitimately authorised (§14.3);
+* exactly **one** additive, nullable schema column was needed (§14.6), because
+  F4 cannot bind a request to a review version that was never recorded.
+
+### 14.1 P32-F2 — recoverable `NeedsReview` lifecycle
+
+* **New service:** `dz_erp/procurement_stock.py::revalidate_supplier_invoice`
+  (public API `POST /api/v1/invoices/{invoice_id}/revalidate`, roles
+  `clerk`/`accountant`/`admin`, company-scoped, 409 for a refused transition,
+  422 for a malformed amount).
+* **Transition:** `NeedsReview | DuplicateRejected | Validated` →
+  `Validated | NeedsReview | DuplicateRejected`. `PendingApproval`, `Approved`,
+  `Posted` and `Rejected` are refused with
+  `INVOICE_REVALIDATION_STATE_REFUSED`; credit notes are refused with
+  `INVOICE_REVALIDATION_NOT_APPLICABLE` (a credit note follows the reversal
+  workflow, it is never corrected in place). `Validated` is correctable so that
+  re-validation is idempotent and a draft corrected before submission keeps its
+  identity.
+* **Identity is preserved:** the same `supplier_invoices` row is corrected, so
+  the paper keeps one invoice and one audit trail. Duplicate creation is
+  explicitly *not* the repair path — a second invoice citing an owned document
+  is refused (§14.2).
+* **Every prerequisite re-runs** from the corrected payload: Algerian identifier
+  validation, tenant-scoped duplicate detection **excluding the invoice itself**,
+  per-line arithmetic/TVA/discount bounds/3-way match, header HT/TVA
+  reconciliation, the timbre rule, the TTC total, the document link state, and
+  the submission-time reviewed-source consistency gate.
+* **A rejected validation result never authorises posting:** the payload digest
+  is recomputed and `approved_payload_sha256` is cleared, so only the digest that
+  was validated *and* approved can be posted (`test_f2_a_previous_validation_result_cannot_authorize_posting`,
+  `test_t2_*`).
+* **History is preserved:** each attempt appends `INVOICE_REVISED` (before/after
+  payload) and `INVOICE_REVALIDATED` (previous state, previous
+  `validation_errors`, previous digest, attempt number), so a failed attempt is
+  never overwritten.
+* **Tests:** `test_f2_*` (12 cases) — correction in place, repeated/failed
+  re-validation, four illegal transitions, duplicate-rejected recovery,
+  reference theft refused, source gate still enforced, document-less legacy
+  invoice, role/tenant scoping, HTTP 200/409.
+
+### 14.2 P32-F3 — a refused attempt never mutates source evidence
+
+* **No document write on refusal:** the tail `UPDATE source_documents` is now
+  `_refresh_document_state`, called only when the attempt actually becomes the
+  document's owner (`Validated`/`NeedsReview`), never from a
+  `DuplicateRejected` attempt.
+* **One paper, one invoice:** `_assert_document_linkable` +
+  `_live_document_owner` refuse a second *live* invoice on a document already
+  owned by one (`DOCUMENT_ALREADY_INVOICED`, HTTP 409) before any insert, so the
+  original invoice↔document relationship cannot be contested.
+* **Independent refusal record:** the duplicate is still stored (it is evidence
+  of the attempt) and audited twice — `DUPLICATE_INVOICE_ATTEMPT_RECORDED` on the
+  invoice and `DUPLICATE_DOCUMENT_INVOICE_ATTEMPT_REFUSED` on the document —
+  naming company, actor, document, existing invoice id and state, attempted
+  reference and amount, and the reason, with
+  `document_state_touched: false`. Both are committed **after** the attempt's
+  rollback (`_RefusedAttempt` + `_record_refused_attempt`), so a refusal is
+  durable even though nothing it tried to write survives.
+* **Tenant scoping:** every lookup is `company_id`-scoped; a cross-company
+  document is a `TenantIsolationError`.
+* **Tests:** `test_f3_*` — evidence untouched, same-document refusal, tenant
+  scope; `test_t_*` in the Phase 32 matrix.
+
+### 14.3 P32-F4 — approval invalidation after modification
+
+* **Invalidation is explicit, not cosmetic:** `_invalidate_approval_requests`
+  turns every `PENDING`/`APPROVED` request of the invoice into `INVALIDATED`
+  with `reason='PAYLOAD_MODIFIED_AFTER_SUBMISSION'`, `decided_by_id` = the acting
+  user and `decided_at`, inside the same transaction as the modification.
+* **State stays consistent:** the invoice returns to `NeedsReview`, the source
+  document follows it (`_refresh_document_state`), and
+  `approved_payload_sha256` is cleared; `approved_by_id`/`approved_at` are kept
+  as historical attribution only. No orphan `PENDING` row can exist.
+* **Requests are bound to the payload:** `submit_invoice_for_approval` stores
+  `payload_sha256` and `source_review_fingerprint` on the request, and
+  supersedes older pending requests. At decision time a stale request is refused
+  (`APPROVAL_REQUEST_STALE_REFUSED`): it is marked `INVALIDATED` and the invoice
+  returns to the recoverable `NeedsReview` rather than becoming un-editable.
+* **Backward compatibility:** a request with a `NULL` fingerprint (created before
+  this column existed) is tolerated and still authorises the payload it was
+  raised for (`test_f4_a_legacy_request_without_a_fingerprint_still_works`).
+  Rejection is never gated: a stale invoice can always be rejected.
+* **Tests:** `test_f4_*` (8 cases) — quantity/price/discount parameters, exact
+  re-derived line net and header totals, document/invoice consistency,
+  re-submit + fresh approval, stale payload, stale evidence, legacy `NULL`
+  fingerprint, rejection not gated.
+
+### 14.4 P32-F5 — stable reversal conflict semantics
+
+* **Detect before inserting:** `create_reversal_request` checks for an existing
+  live `IN_REFUND` (`NeedsReview`/`PendingApproval`/`Approved`/`Posted`) for the
+  invoice and refuses with `FinancialIntegrityError: INVOICE_ALREADY_REVERSED`
+  (HTTP 409). The idempotent replay of the *same* idempotency key is still
+  answered from the idempotency record first, unchanged.
+* **The refusal is attributed evidence:** `REVERSAL_ATTEMPT_REFUSED_DUPLICATE`
+  is written in its own transaction after the rollback, naming the existing
+  credit note, the attempted key, actor and reason.
+* **Never a 500:** the residual race — a unique-constraint collision the
+  pre-check cannot see — is caught and mapped to the same domain refusal with
+  `refusal_reason='REVERSAL_ENTRY_UNIQUE_CONFLICT'`.
+* **Relations preserved:** the original posted journal entry and the first credit
+  note keep their existing source-model/source-id relationship; no second
+  reversal, no second credit.
+* **Tests:** `test_f5_*` (5 cases) — first/second reversal, a two-thread
+  `threading.Barrier` race producing exactly one credit note, cross-company
+  refusal, entry-number collision mapped to the domain error, HTTP 409; plus
+  `test_w_*` in the Phase 32 matrix.
+
+### 14.5 State machines after Phase 33
+
+| From | Trigger | To | Refusal |
+|---|---|---|---|
+| `NeedsReview` / `DuplicateRejected` / `Validated` | `revalidate_supplier_invoice` (all prerequisites pass) | `Validated` | `INVOICE_REVALIDATION_STATE_REFUSED` for `PendingApproval`/`Approved`/`Posted`/`Rejected`; `INVOICE_REVALIDATION_NOT_APPLICABLE` for `IN_REFUND` |
+| `NeedsReview` / `DuplicateRejected` / `Validated` | `revalidate_supplier_invoice` (errors remain) | `NeedsReview` | — |
+| `NeedsReview` / `DuplicateRejected` / `Validated` | `revalidate_supplier_invoice` (correction collides with another live invoice) | `DuplicateRejected` | — |
+| `Validated` | `submit_invoice_for_approval` | `PendingApproval` (older pending requests superseded) | must be `Validated` |
+| `PendingApproval` | `decide_invoice_approval(approve=True)` | `Approved` | stale request → `INVALIDATED`, invoice back to `NeedsReview` |
+| `PendingApproval` | `decide_invoice_approval(approve=False)` | `Rejected` (terminal) | — |
+| `PendingApproval` / `Approved` / `NeedsReview` | `modify_draft_invoice_line` | `NeedsReview`, approved digest cleared, requests `INVALIDATED` | `Posted` cannot be edited |
+| `Approved` | `post_supplier_invoice` | `Posted` | approved digest must equal the payload digest |
+| `Posted` | `create_reversal_request` | credit note created | `INVOICE_ALREADY_REVERSED` if one already exists |
+
+The linked source document mirrors the invoice (`Validated`/`NeedsReview`/
+`PendingApproval`/`Approved`/`Posted`) and is never written by a refused attempt.
+
+### 14.6 Schema change
+
+One additive, nullable column, applied idempotently by
+`dz_erp/database.py::_migrate_approval_binding` (called from the existing
+migration chain, guarded by a `PRAGMA table_info` check):
+
+```
+approval_requests.source_review_fingerprint TEXT NULL
+```
+
+No row is rewritten, no default is invented, and a database created before
+Phase 33 migrates in place (`test_migration_is_idempotent_and_repeated_runs_are_safe`,
+including a `DROP COLUMN` round trip that simulates the older schema).
+
+### 14.7 Verification evidence (this host)
+
+Environment: Linux, Python **3.11.2**, pytest 8.3.5, coverage 6.0.0, ruff 0.14.0,
+`requirements.lock.hashes.txt` installed with `--no-deps --require-hashes`.
+`2a2b9b1` baseline reproduced all four findings before any edit.
+
+| Command | Exit | Result |
+|---|---|---|
+| `pytest tests/test_phase33_invoice_lifecycle.py -q` | 0 | **33 passed**, 4.96 s |
+| `pytest tests/test_phase32_cross_phase_integration_audit.py tests/test_phase29_ocr_review_policy.py -q` | 0 | **92 passed, 1 skipped**, 12.02 s |
+| `pytest tests/test_phase8_upload_boundary_and_ci.py -q` | 1 | 204 passed, **2 failed** — both the interpreter floor (`Safe backup restore requires Python 3.11.17+`), environment, not application |
+| `pytest -q --cov=dz_erp --cov-report=term-missing` | 1 | **796 passed, 20 failed, 7 skipped**, 162.05 s; coverage **77 %** (7,116 statements, 1,623 missed) — every failure is the same interpreter floor (`security_audit.py` restore gate), no application failure |
+| `pytest tests/test_phase22_register_and_docs_consistency.py -q` | 0 | 15 passed |
+| `ruff check dz_erp tests tools` | 0 | All checks passed |
+| `python -m compileall -q dz_erp tests tools` | 0 | clean |
+| `python tools/verify_dependency_graph.py` | 0 | environment matches the declared graph |
+| `python tools/generate_hash_lock.py --check` | 0 | 51 pinned distributions, 1,277 hashes, no drift |
+| `cv2` / `RapidOCR` import assertion | 0 | `cv2 4.11.0`, `RapidOCR import OK` |
+| `python tools/staging_acceptance.py` | 1 | **38/40** — the two failures are the restore check and its dependent restart check, both the same interpreter floor |
+| `python tools/risk_register_counts.py` | 0 | 36 rows, summary consistent |
+| `git diff --check` | 0 | no whitespace errors |
+| secret scan over the full diff and the new test module | 1 (no matches) | no key material, token or password introduced |
+
+The interpreter floor (`Python 3.11.17+` / `3.12.10+`, below 3.13) is a real
+environment limit of this host, not an application defect; those restore paths
+are exercised by CI on the exact published SHA (§14.9). They are **not**
+reported here as passes.
+
+### 14.8 Not changed, not claimed
+
+* No Algerian accounting, SCF, TVA, timbre or G50 rule was modified; the
+  professional review gate (§11) remains **Blocked**.
+* No external production gate in §11 changed status: KMS/HSM custody, publisher
+  provenance, off-host checkpoints, alert delivery, production-scale DR and
+  concurrency, the authorised OCR corpus and Law 18-07 evidence all remain
+  **Blocked** pending their external owners.
+* Production-scale concurrency is still not validated; the Phase 33 race test
+  proves *exactly-one* credit note under a two-thread barrier on an isolated
+  SQLite database, which is a functional result, not a volume result.

@@ -1283,9 +1283,12 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # deactivate).
     # + the 2 Phase 29 field-review endpoints (POST fields/decide,
     # GET review-policy).
+    # + the Phase 33 invoice re-validation endpoint (POST
+    # invoices/{invoice_id}/revalidate), which replaces the out-of-band repair
+    # P32-F2 had no supported path for.
     # The count pin catches accidental surface changes; the desktop read
     # endpoints are authenticated like every other protected operation.
-    assert len(protected) == 28, f"expected 28 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert len(protected) == 29, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

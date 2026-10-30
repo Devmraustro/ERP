@@ -52,6 +52,7 @@ from .intake_ocr import (
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
 from .procurement_stock import (
     create_and_validate_supplier_invoice,
+    revalidate_supplier_invoice,
     create_reversal_request,
     decide_invoice_approval,
     decide_reversal_approval,
@@ -114,6 +115,26 @@ class CreateInvoiceRequest(BaseModel):
     grn_id: Optional[int] = None
     document_id: Optional[str] = None
     lines: List[InvoiceLineInput]
+
+
+class InvoiceRevisionInput(BaseModel):
+    """A correction to an unvalidated draft (Phase 33 / P32-F2).
+
+    Every field is optional: only what is supplied is replaced, and the whole
+    payload is then re-validated from scratch (identifier checks, duplicate
+    detection ignoring this invoice, line arithmetic, TVA rates, discount
+    bounds, 3-way match, header reconciliation, timbre, TTC and the linked
+    document's review state).
+    """
+
+    supplier_invoice_no: Optional[str] = None
+    invoice_date: Optional[str] = None
+    payment_method: Optional[str] = None
+    amount_ht_dzd: Optional[str] = None
+    amount_tva_dzd: Optional[str] = None
+    amount_timbre_dzd: Optional[str] = None
+    amount_ttc_dzd: Optional[str] = None
+    lines: Optional[List[InvoiceLineInput]] = None
 
 
 class ApprovalDecisionInput(BaseModel):
@@ -585,6 +606,42 @@ def create_erp_fastapi_app(
         except (AuthorizationError, TenantIsolationError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (ValueError, FinancialIntegrityError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/v1/invoices/{invoice_id}/revalidate")
+    def api_revalidate_invoice(
+        invoice_id: int,
+        body: InvoiceRevisionInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Correct and re-validate a NeedsReview/DuplicateRejected draft (Phase 33).
+
+        The invoice keeps its identity; the corrected payload is validated from
+        scratch, its digest is recomputed (so no earlier validation result can
+        authorize posting) and every approval based on the previous payload is
+        invalidated. Approved/posted records are refused — the reversal credit
+        note is the accounting remedy for those.
+        """
+        try:
+            return revalidate_supplier_invoice(
+                db=db,
+                company_id=auth.company_id,
+                user_id=auth.user_id,
+                invoice_id=invoice_id,
+                supplier_invoice_no=body.supplier_invoice_no,
+                invoice_date=body.invoice_date,
+                payment_method=body.payment_method,
+                amount_ht_dzd=body.amount_ht_dzd,
+                amount_tva_dzd=body.amount_tva_dzd,
+                amount_timbre_dzd=body.amount_timbre_dzd,
+                amount_ttc_dzd=body.amount_ttc_dzd,
+                lines=None if body.lines is None else [line.model_dump() for line in body.lines],
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FinancialIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/v1/invoices/{invoice_id}")

@@ -438,6 +438,12 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     target_model    TEXT NOT NULL,
     target_id       INTEGER NOT NULL,
     payload_sha256  TEXT NOT NULL,
+    -- Phase 33: the source-review evidence the request was raised against
+    -- (a digest of the document's review decisions), so an approval can prove
+    -- it decided the *same* invoice payload reviewed against the *same*
+    -- evidence. NULL on rows created before Phase 33 and on invoices with no
+    -- linked document — read as "not bound", never as "matches".
+    source_review_fingerprint TEXT,
     requested_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     requested_at    TEXT NOT NULL,
     decision        TEXT NOT NULL CHECK (decision IN ('PENDING', 'APPROVED', 'REJECTED', 'INVALIDATED')),
@@ -892,6 +898,7 @@ class ERPDatabase:
 
         self._migrate_ocr_confidence(conn)
         self._migrate_review_policy(conn)
+        self._migrate_approval_binding(conn)
         self._migrate_document_routing(conn)
 
     def _migrate_review_policy(self, conn: sqlite3.Connection) -> None:
@@ -930,6 +937,22 @@ class ERPDatabase:
             END
             """
         )
+
+    def _migrate_approval_binding(self, conn: sqlite3.Connection) -> None:
+        """Phase 33: bind an approval request to the source-review evidence.
+
+        Additive and idempotent: the column is nullable with no default, so
+        requests recorded before this phase (and those for invoices with no
+        linked document) keep ``NULL``, which the approval gate reads as
+        "not bound" and skips — a legacy pending request keeps working exactly
+        as it did, while every request raised from now on is bound and
+        re-checked. No stored row is rewritten.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(approval_requests)").fetchall()}
+        if not cols:
+            return
+        if "source_review_fingerprint" not in cols:
+            conn.execute("ALTER TABLE approval_requests ADD COLUMN source_review_fingerprint TEXT")
 
     def _migrate_document_routing(self, conn: sqlite3.Connection) -> None:
         """Add the review-routing columns to `source_documents`, leaving old rows NULL.

@@ -49,12 +49,20 @@ def test_rejections_are_written_to_a_durable_file_with_no_tenant_attribution(
     log_file = tmp_path / "security.jsonl"
     records = [json.loads(line) for line in log_file.read_text().splitlines() if line.strip()]
 
-    assert len(records) == len(rejections)
-    assert all(r["event"] == "AUTH_REQUEST_REJECTED" for r in records)
-    # One correlation id per rejection: the record is individually traceable.
-    assert len({r["correlation_id"] for r in records}) == len(records)
+    # Phase 35 also records every request durably (`HTTP_REQUEST`), so the
+    # security-relevant subset is asserted by event rather than by count. The
+    # property being proved is unchanged: each rejection is durably recorded,
+    # one record per rejection, with its own correlation id.
+    rejected = [r for r in records if r["event"] == "AUTH_REQUEST_REJECTED"]
+    assert len(rejected) == len(rejections)
+    assert len({r["correlation_id"] for r in rejected}) == len(rejections)
+    # And the request records that accompany them carry no body, no headers and
+    # no credential either (Phase 35).
+    requests = [r for r in records if r["event"] == "HTTP_REQUEST"]
+    assert len(requests) == len(rejections)
+    assert all(r["context"]["status_code"] == 401 for r in requests)
     # No tenant identifier anywhere - not even a null one.
-    for record in records:
+    for record in rejected:
         assert "company_id" not in json.dumps(record)
         assert record["context"]["path"] == "/api/v1/auth/session"
         assert "peer_ip" in record["context"]

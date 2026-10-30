@@ -23,8 +23,12 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | 10 | Regression | Full suite and coverage after the change | **DONE** | — | `pytest -q --cov=dz_erp` | 815 passed, 20 failed (**same 20**, `diff`-identical set), 7 skipped, 77 % | this commit |
 | 11 | Docs | Baseline and completion plan | **DONE** | `docs/PROJECT_BASELINE_AND_COMPLETION_PLAN.md` | — | — | this commit |
 | 12 | Docs | This tracker | **DONE** | `docs/PROJECT_COMPLETION_TRACKER.md` | — | — | this commit |
-| 13 | P2 Accounting | Verify arithmetic/rounding/period invariants are covered by executable tests | NOT_STARTED | — | — | — | — |
-| 14 | P5 API | Rate limiting and request logging | NOT_STARTED | — | — | — | — |
+| 13 | P2 Accounting | Arithmetic, rounding, discount order, TTC identity, order independence, sub-centime residue proved by tests | **DONE** | `tests/test_phase36_accounting_and_tax_configuration.py` | 29 tests | 29 passed | this commit |
+| 13a | P2 Tax config | Timbre and TVA resolved by effective date from the versioned tables instead of compiled constants; gaps and malformed config refused | **DONE** | `dz_erp/localization.py`, `dz_erp/procurement_stock.py` | same suite | pass; documented in `docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` | this commit |
+| 13b | P2 Tax config | Persist the resolved rule version on the invoice and echo it in the posting audit | NOT_STARTED | — | — | Mechanically resolved today, only not stored | — |
+| 13c | P2 Accounting | Qualified Algerian expert-comptable review of rates, brackets and thresholds | **BLOCKED_EXTERNAL** | — | — | Requires a signed review with the legal reference per rate | — |
+| 14 | P5 API | Failed-login throttling per (client, account) and per-request correlation logging | **DONE** | `dz_erp/rate_limit.py`, `dz_erp/api.py` | `tests/test_phase35_api_rate_limiting_and_request_logging.py` (16) | 16 passed; `docs/STAGING_SECURITY_CONFIGURATION.md` §4.2–4.3 | committed |
+| 14a | P5 API | Shared-store rate limiting for multi-replica deployment (or proxy-side limit ratified by the operator) | NOT_STARTED | — | — | Current control is per worker and documented as such | — |
 | 15 | P6 DB | Migration matrix (fresh / upgrade / interrupted / restore) documented per migration | NOT_STARTED | — | — | — | — |
 | 16 | P10 Infra | Container build, compose, health checks, environment template | NOT_STARTED | — | — | — | — |
 | 17 | P12 Docs | Security, data-protection, threat-model, incident-response, deployment, DR, user guides | NOT_STARTED | — | — | — | — |

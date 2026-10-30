@@ -1043,3 +1043,60 @@ authentication suites (`test_phase25_read_api`, `test_phase27_review_api`,
 
 The honest limit of this control is documented rather than hidden: counters live in process
 memory, so the bound is per worker and a multi-replica deployment must also limit at the proxy.
+
+---
+
+## 2K. Phase 36 — accounting arithmetic and effective-dated tax configuration (`tests/test_phase36_accounting_and_tax_configuration.py`) — `Passed`
+
+Detailed rationale and the honest limits are in
+`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md`; this is the evidence table.
+
+| Group | Test | What it proves |
+| --- | --- | --- |
+| Arithmetic | `test_money_is_rounded_half_up_and_floats_are_refused` | Exact `Decimal` money, commercial half-up rounding, binary floats rejected |
+| | `test_header_totals_are_the_sum_of_rounded_lines` | Rounding happens per line, then lines are summed — never a rounded float sum |
+| | `test_discount_is_applied_before_tax_on_the_line_net` | TVA on the discounted net (1900 → 361 → 2261), not on the gross |
+| | `test_tax_breakdown_reconciles_with_the_header` | Σ base = HT, Σ tax = TVA, and the two rates stay separate for the G50 boxes |
+| | `test_ttc_identity_holds_with_and_without_stamp_duty` | TTC = HT + TVA + timbre for CASH/TRANSFER/CHEQUE; non-cash always 0 timbre |
+| | `test_line_order_does_not_change_any_total` | Order independence of every total and of the breakdown |
+| | `test_awkward_quantities_leave_no_sub_centime_residue` | 3 × 0.10 DZD = 0.30, TVA 0.06, no float artefact |
+| Timbre | `test_timbre_threshold_boundary_is_inclusive` | 300.00 → 0.00; 300.01 → the 5.00 minimum |
+| | `test_timbre_rates_minimum_and_cap` | Minimum floor, 1 %/1.5 %/2 % bands, configured maximum |
+| | `test_non_cash_payment_never_carries_stamp_duty` | Any case of BANK_TRANSFER/CHEQUE → 0.00 |
+| Timbre config | `test_no_configured_rule_uses_labelled_builtin_constants` | Unconfigured company uses constants **labelled** `builtin-default-v1` |
+| | `test_resolution_is_by_effective_date_not_by_newest_row` | A 2025 rule still governs a 2025 invoice after a 2026 rule exists; boundaries belong to the rule that includes them |
+| | `test_a_rule_that_is_configured_but_not_yet_in_force_is_never_applied` | Future rule → `TIMBRE_RULE_NOT_EFFECTIVE_ON_DATE`, never silently applied |
+| | `test_a_gap_between_versions_is_refused_rather_than_guessed` | A coverage gap raises instead of substituting a different rate |
+| | `test_malformed_bracket_tables_fail_closed` | Bad JSON and a closed final band both raise |
+| | `test_rules_are_tenant_scoped` | Company 2 never borrows company 1's rule |
+| | `test_the_resolved_rule_changes_the_amount_and_is_named` | Configuration reaches the arithmetic: same base, different duty, version named |
+| | `test_a_bad_invoice_date_is_refused` | Empty/impossible/truncated dates raise |
+| VAT config | `test_vat_rates_fall_back_to_labelled_builtins_only_when_unconfigured` | 0/9/19 only when nothing is configured, and labelled as such |
+| | `test_vat_rates_are_effective_dated_and_versioned` | A 2025-only rate is not acceptable on a 2026 invoice; label names the generation |
+| | `test_an_inactive_rate_is_not_accepted` | `active = 0` rows are ignored |
+| | `test_configured_rates_that_do_not_cover_the_date_are_refused` | `VAT_RATE_NOT_EFFECTIVE_ON_DATE` |
+| | `test_vat_rates_are_tenant_scoped` | Rate tables do not leak across tenants |
+| Integration | `test_invoice_validation_uses_the_configured_rate_set` | A 19 %-only company validates 19 % and **refuses 9 %** even though the built-in constants contain it |
+| | `test_invoice_creation_refuses_an_ambiguous_rate_configuration` | No effective rate row → the invoice is refused, not guessed |
+| G50 | `test_g50_boxes_are_arithmetically_closed` | `E3B110 = précompte + E3B91 + E3B92`, exactly one of payable/carry-forward, `payable − carry = collected − deductions`, every box traceable including E2 |
+| | `test_g50_reports_a_credit_before_it_reports_a_payment` | Credit carried forward, payable zero, statutory status states the sign-off requirement |
+| | `test_g50_refuses_a_cross_tenant_request` | Tenant isolation on the workbook |
+| | `test_g50_for_an_empty_period_is_zero_not_an_error` | Empty period is zeroes, not a crash |
+
+Measured: **29 passed**, 1.84 s. Full suite after this phase: **859 passed, 21 failed,
+7 skipped**, 232 s, **78 %** coverage. The 21 failures are the 20 pre-existing
+`restore_and_verify_backup` interpreter-floor failures plus one test whose record-count
+assertion had to account for the new durable `HTTP_REQUEST` records — it was rewritten to
+assert the rejections **by event** and to additionally assert the request records are
+credential-free, which is stricter than before, not weaker.
+
+### Behaviour changes an operator must know about
+
+1. An invoice dated **before a configured rule's `valid_from`** (e.g. before
+   `2025-01-01`, the seeded timbre version) now **raises** instead of computing with
+   compiled-in constants. That is the intended fail-closed behaviour; add a historical
+   rule version to process backdated invoices.
+2. An invoice whose line rate is **not in the company's configured rate table** now fails
+   validation (invoice stays in `NeedsReview`) even when the rate is 0/9/19 %.
+3. `E2_droit_de_timbre` now appears in the G50 traceability array, so
+   `traceability_count` for a period containing stamp duty is one higher per timbre entry.

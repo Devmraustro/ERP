@@ -6,7 +6,9 @@ import json
 import os
 import re
 import sys
+import sqlite3
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -506,6 +508,254 @@ def apply_algerian_localization_fixes(
     return changes
 
 
+class TaxRuleConfigurationError(Exception):
+    """The tax configuration cannot answer the question being asked.
+
+    Raises instead of guessing: a missing or ambiguous rule would silently
+    produce a different amount of tax than the law (and the operator) expects.
+    """
+
+
+#: Version label recorded when no configured rule exists and the compiled-in
+#: constants are used. It is deliberately *not* a plausible legal version code,
+#: so a stored document can always be told apart from a configured one.
+BUILTIN_TIMBRE_RULE_VERSION = "builtin-default-v1"
+
+
+@dataclass(frozen=True)
+class TimbreRule:
+    """One effective-dated Timbre rule, as resolved for a specific date."""
+
+    version_code: str
+    valid_from: str
+    valid_to: Optional[str]
+    min_amount_dzd: str
+    max_amount_dzd: Optional[str]
+    threshold_dzd: str
+    brackets: List[Dict[str, Optional[str]]] = field(default_factory=list)
+    source: str = "configured"  # "configured" | "builtin_default"
+
+    def as_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments for :func:`calculate_droit_de_timbre`."""
+        return {
+            "brackets": self.brackets,
+            "min_duty": self.min_amount_dzd,
+            "max_duty": self.max_amount_dzd,
+            "threshold": self.threshold_dzd,
+        }
+
+
+def _builtin_timbre_rule() -> TimbreRule:
+    return TimbreRule(
+        version_code=BUILTIN_TIMBRE_RULE_VERSION,
+        valid_from="1970-01-01",
+        valid_to=None,
+        min_amount_dzd="5.00",
+        max_amount_dzd=None,
+        threshold_dzd="300.00",
+        brackets=[dict(b) for b in DEFAULT_TIMBRE_BRACKETS],
+        source="builtin_default",
+    )
+
+
+def _normalise_iso_date(value: str, *, what: str) -> str:
+    """Accept ``YYYY-MM-DD`` or a full ISO timestamp; compare on the date part."""
+    text = (value or "").strip()
+    if len(text) < 10:
+        raise TaxRuleConfigurationError(f"{what} must be an ISO date, got {value!r}")
+    day = text[:10]
+    try:
+        from datetime import date as _date
+
+        _date.fromisoformat(day)
+    except ValueError as exc:
+        raise TaxRuleConfigurationError(f"{what} must be an ISO date, got {value!r}") from exc
+    return day
+
+
+def _parse_brackets(raw: Any, *, version_code: str) -> List[Dict[str, Optional[str]]]:
+    """Validate a stored bracket table. Malformed configuration fails closed."""
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError) as exc:
+        raise TaxRuleConfigurationError(
+            f"TIMBRE_RULE_BRACKETS_INVALID:{version_code}: not JSON"
+        ) from exc
+    if not isinstance(parsed, list) or not parsed:
+        raise TaxRuleConfigurationError(
+            f"TIMBRE_RULE_BRACKETS_INVALID:{version_code}: expected a non-empty list"
+        )
+    brackets: List[Dict[str, Optional[str]]] = []
+    for entry in parsed:
+        if not isinstance(entry, dict) or "rate" not in entry:
+            raise TaxRuleConfigurationError(
+                f"TIMBRE_RULE_BRACKETS_INVALID:{version_code}: entry without a rate"
+            )
+        up_to = entry.get("up_to")
+        rate = to_decimal(entry["rate"])
+        if rate < 0:
+            raise TaxRuleConfigurationError(
+                f"TIMBRE_RULE_BRACKETS_INVALID:{version_code}: negative rate"
+            )
+        if up_to is not None:
+            to_decimal(up_to)  # must be a valid amount
+        brackets.append({"up_to": None if up_to is None else str(up_to), "rate": str(rate)})
+    if brackets[-1]["up_to"] is not None:
+        # The last bracket must be open-ended, or a large invoice would silently
+        # fall back to the 1% default instead of reaching the top rate.
+        raise TaxRuleConfigurationError(
+            f"TIMBRE_RULE_BRACKETS_INVALID:{version_code}: last bracket must be open-ended"
+        )
+    return brackets
+
+
+def resolve_timbre_rule(
+    conn: sqlite3.Connection,
+    company_id: int,
+    on_date: str,
+) -> TimbreRule:
+    """Return the Timbre rule in force for ``company_id`` on ``on_date``.
+
+    Selection is by effective date, not by "the newest row": a rule that is
+    configured but not yet in force must never be applied to an earlier
+    document, and a superseded rule must still govern the documents it covered.
+
+    * No configured rows at all -> the compiled-in constants, labelled
+      ``builtin-default-v1`` so every stored document says which was used.
+    * Rows exist but none covers the date -> :class:`TaxRuleConfigurationError`.
+      This is the ambiguous case an operator must fix; guessing here would post
+      a different amount of stamp duty than the law requires.
+    """
+    day = _normalise_iso_date(on_date, what="invoice date")
+    rows = conn.execute(
+        """
+        SELECT version_code, valid_from, valid_to, min_amount_dzd, max_amount_dzd,
+               threshold_dzd, brackets_json
+        FROM timbre_rules
+        WHERE company_id = ?
+        ORDER BY valid_from DESC, id DESC
+        """,
+        (company_id,),
+    ).fetchall()
+    if not rows:
+        return _builtin_timbre_rule()
+
+    applicable = []
+    for row in rows:
+        valid_from = _normalise_iso_date(row["valid_from"], what="timbre rule valid_from")
+        valid_to_raw = row["valid_to"]
+        if valid_from > day:
+            continue
+        if valid_to_raw:
+            if _normalise_iso_date(valid_to_raw, what="timbre rule valid_to") < day:
+                continue
+        applicable.append((valid_from, row))
+    if not applicable:
+        versions = ", ".join(sorted(str(r["version_code"]) for r in rows))
+        raise TaxRuleConfigurationError(
+            f"TIMBRE_RULE_NOT_EFFECTIVE_ON_DATE:company={company_id},date={day},configured={versions}"
+        )
+
+    applicable.sort(key=lambda pair: pair[0], reverse=True)
+    _, chosen = applicable[0]
+    return TimbreRule(
+        version_code=str(chosen["version_code"]),
+        valid_from=str(chosen["valid_from"]),
+        valid_to=None if chosen["valid_to"] is None else str(chosen["valid_to"]),
+        min_amount_dzd=format_dzd(chosen["min_amount_dzd"]),
+        max_amount_dzd=None
+        if chosen["max_amount_dzd"] in (None, "")
+        else format_dzd(chosen["max_amount_dzd"]),
+        threshold_dzd=format_dzd(chosen["threshold_dzd"]),
+        brackets=_parse_brackets(chosen["brackets_json"], version_code=str(chosen["version_code"])),
+        source="configured",
+    )
+
+
+#: The TVA rates this build was written against. Used only when a company has
+#: no configured rate rows at all; the label is deliberately not a legal version.
+BUILTIN_VAT_RATE_VERSION = "builtin-default-v1"
+BUILTIN_VAT_RATES: Tuple[Decimal, ...] = (Decimal("0.0"), Decimal("9.0"), Decimal("19.0"))
+
+
+@dataclass(frozen=True)
+class VatRateSet:
+    """The set of TVA rates available to a company on a given date."""
+
+    version_label: str
+    rates: Tuple[Decimal, ...]
+    source: str = "configured"  # "configured" | "builtin_default"
+
+    def allows(self, rate: Decimal) -> bool:
+        return to_decimal(rate) in self.rates
+
+    def describe(self) -> str:
+        return ",".join(f"{r:.1f}" for r in self.rates)
+
+
+def resolve_vat_rates(
+    conn: sqlite3.Connection,
+    company_id: int,
+    on_date: str,
+) -> VatRateSet:
+    """Return the TVA rates configured as in force for ``company_id`` on ``on_date``.
+
+    Mirrors :func:`resolve_timbre_rule`: effective dates decide, not "whatever
+    rows exist". A rate whose validity window does not cover the invoice date
+    must not be accepted on that invoice, and a company with rate rows none of
+    which is in force raises rather than silently falling back to built-in
+    constants (that would validate an invoice at a rate nobody configured).
+
+    Exemptions are configuration too: a row with ``exemption_reason != 'NONE'``
+    contributes its (normally 0) rate and is otherwise not special-cased here.
+    """
+    day = _normalise_iso_date(on_date, what="invoice date")
+    rows = conn.execute(
+        """
+        SELECT xml_id, rate_percent, valid_from, valid_to, active, exemption_reason
+        FROM taxes
+        WHERE company_id = ?
+        ORDER BY valid_from DESC, id DESC
+        """,
+        (company_id,),
+    ).fetchall()
+    if not rows:
+        return VatRateSet(BUILTIN_VAT_RATE_VERSION, BUILTIN_VAT_RATES, source="builtin_default")
+
+    in_force: List[Any] = []
+    for row in rows:
+        if not int(row["active"] or 0):
+            continue
+        valid_from = _normalise_iso_date(row["valid_from"], what="tax valid_from")
+        if valid_from > day:
+            continue
+        if row["valid_to"]:
+            if _normalise_iso_date(row["valid_to"], what="tax valid_to") < day:
+                continue
+        in_force.append(row)
+    if not in_force:
+        labels = ", ".join(sorted(str(r["xml_id"]) for r in rows))
+        raise TaxRuleConfigurationError(
+            f"VAT_RATE_NOT_EFFECTIVE_ON_DATE:company={company_id},date={day},configured={labels}"
+        )
+    rates = tuple(sorted({to_decimal(row["rate_percent"]) for row in in_force}))
+    # The label names the configuration generation: the date the newest in-force
+    # rows became effective. It deliberately does not name a single row, because
+    # several rows typically share one effective date and picking one of them
+    # would make the label depend on insert order.
+    latest_from = max(str(row["valid_from"])[:10] for row in in_force)
+    label = f"configured@{latest_from}"
+    return VatRateSet(label, rates, source="configured")
+
+
+def timbre_rule_from_company_date(
+    db: "ERPDatabase", company_id: int, on_date: str
+) -> TimbreRule:
+    """Resolve the rule with the database's own connection (read-only query)."""
+    with db.transaction() as conn:
+        return resolve_timbre_rule(conn, company_id, on_date)
+
+
 def calculate_droit_de_timbre(
     amount_ht_plus_tva: Any,
     payment_method: str,
@@ -652,6 +902,9 @@ def generate_g50_preparation_workbook(
         elif acct in ("44575", "642") and "TIMBRE" in tag:
             amt = round_dzd((credit - debit) if acct == "44575" else (debit - credit))
             timbre_total = round_dzd(timbre_total + amt)
+            # Box E2 is traceable like every other box: without this line the
+            # workbook showed a stamp-duty total with no entry behind it.
+            trace_lines.append({"entry": r["entry_number"], "box": "E2_DROIT_DE_TIMBRE", "amount": format_dzd(amt)})
 
     precompte = round_dzd(prior_vat_credit_dzd)
     total_deductions_b = round_dzd(precompte + recoverable_vat_goods + recoverable_vat_assets)

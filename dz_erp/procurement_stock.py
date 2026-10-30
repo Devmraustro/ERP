@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
 from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
 from .intake_ocr import DOCUMENT_LINKABLE_STATES, levenshtein_distance, normalize_invoice_ref
-from .localization import calculate_droit_de_timbre, validate_algerian_identifiers
+from .localization import (
+    calculate_droit_de_timbre,
+    resolve_timbre_rule,
+    resolve_vat_rates,
+    validate_algerian_identifiers,
+)
 from .review_policy import evaluate_document_review_policy
 
 
@@ -474,19 +479,30 @@ def _validate_invoice_lines(
     company_id: int,
     lines: List[Dict[str, Any]],
     price_tolerance_dzd: str,
+    vat_rates: Any = None,
 ) -> Tuple[List[str], List[Dict[str, Any]], Decimal, Decimal]:
-    """Per-line arithmetic, Algerian TVA rates, discount bounds and 3-way match."""
+    """Per-line arithmetic, Algerian TVA rates, discount bounds and 3-way match.
+
+    ``vat_rates`` is the effective-dated rate set resolved for the invoice date
+    (see :func:`dz_erp.localization.resolve_vat_rates`). Omitting it keeps the
+    historical built-in whitelist; callers holding the invoice date must pass
+    the resolved set so a configured, reviewed rate table governs validation.
+    """
     errors: List[str] = []
     prepared: List[Dict[str, Any]] = []
     sum_line_ht = Decimal("0.00")
     sum_line_tva = Decimal("0.00")
+    allowed_rates = (
+        tuple(vat_rates.rates) if vat_rates is not None
+        else (Decimal("0.0"), Decimal("9.0"), Decimal("19.0"))
+    )
 
     for idx, line in enumerate(lines):
         qty = round_qty(line["qty"])
         pu = round_qty(line["unit_price_dzd"])
         disc = to_decimal(line.get("discount_pct", "0.00"))
         rate = to_decimal(line.get("tax_rate", "19.0"))
-        if rate not in (Decimal("0.0"), Decimal("9.0"), Decimal("19.0")):
+        if rate not in allowed_rates:
             errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
         # Documented business rule (Phase 31): a discount is a percentage in
         # [0, 100] inclusive. A negative or >100 discount is refused as a
@@ -557,14 +573,25 @@ def _validate_invoice_totals(
     payment_method: str,
     sum_line_ht: Decimal,
     sum_line_tva: Decimal,
+    timbre_rule: Any = None,
 ) -> List[str]:
-    """Header HT/TVA/TTC reconciliation and the Algerian timbre rule."""
+    """Header HT/TVA/TTC reconciliation and the Algerian timbre rule.
+
+    ``timbre_rule`` is the effective-dated rule resolved for this invoice's
+    date (see :func:`dz_erp.localization.resolve_timbre_rule`). When it is
+    omitted the compiled-in constants are used, which is the historical
+    behaviour; callers that have the invoice date must pass it so a configured
+    rule version governs the calculation instead of a constant.
+    """
     errors: List[str] = []
     if sum_line_ht != ht_dec:
         errors.append(f"HEADER_HT_MISMATCH:sum_lines={sum_line_ht:.2f}!=header_ht={ht_dec:.2f}")
     if sum_line_tva != tva_dec:
         errors.append(f"HEADER_TVA_MISMATCH:sum_tva={sum_line_tva:.2f}!=header_tva={tva_dec:.2f}")
-    expected_timbre = calculate_droit_de_timbre(ht_dec + tva_dec, payment_method=payment_method)
+    rule_kwargs = timbre_rule.as_kwargs() if timbre_rule is not None else {}
+    expected_timbre = calculate_droit_de_timbre(
+        ht_dec + tva_dec, payment_method=payment_method, **rule_kwargs
+    )
     if timbre_dec != expected_timbre:
         errors.append(
             f"TIMBRE_MISMATCH:declared={timbre_dec:.2f}!=expected={expected_timbre:.2f}_for_{payment_method}"
@@ -1181,9 +1208,17 @@ def _create_and_validate_supplier_invoice(
 
         # 3. Validate line arithmetic, tax rates, Timbre, and 3-way match against PO/Receipt
         line_errors, prepared_lines, sum_line_ht, sum_line_tva = _validate_invoice_lines(
-            conn, company_id=company_id, lines=lines, price_tolerance_dzd=price_tolerance_dzd
+            conn,
+            company_id=company_id,
+            lines=lines,
+            price_tolerance_dzd=price_tolerance_dzd,
+            vat_rates=resolve_vat_rates(conn, company_id, invoice_date),
         )
         validation_errors.extend(line_errors)
+        # Effective-dated configuration: the rule in force on the invoice date
+        # governs the stamp duty, not whatever constants the code was built with.
+        # A configured-but-not-applicable rule raises rather than guessing.
+        timbre_rule = resolve_timbre_rule(conn, company_id, invoice_date)
         validation_errors.extend(
             _validate_invoice_totals(
                 ht_dec=ht_dec,
@@ -1193,6 +1228,7 @@ def _create_and_validate_supplier_invoice(
                 payment_method=payment_method,
                 sum_line_ht=sum_line_ht,
                 sum_line_tva=sum_line_tva,
+                timbre_rule=timbre_rule,
             )
         )
 
@@ -1433,9 +1469,14 @@ def revalidate_supplier_invoice(
         validation_errors.extend(duplicate_errors)
 
         line_errors, prepared_lines, sum_line_ht, sum_line_tva = _validate_invoice_lines(
-            conn, company_id=company_id, lines=lines, price_tolerance_dzd=price_tolerance_dzd
+            conn,
+            company_id=company_id,
+            lines=lines,
+            price_tolerance_dzd=price_tolerance_dzd,
+            vat_rates=resolve_vat_rates(conn, company_id, inv["invoice_date"]),
         )
         validation_errors.extend(line_errors)
+        timbre_rule = resolve_timbre_rule(conn, company_id, inv["invoice_date"])
         validation_errors.extend(
             _validate_invoice_totals(
                 ht_dec=ht_dec,
@@ -1445,6 +1486,7 @@ def revalidate_supplier_invoice(
                 payment_method=new_method,
                 sum_line_ht=sum_line_ht,
                 sum_line_tva=sum_line_tva,
+                timbre_rule=timbre_rule,
             )
         )
 
@@ -1956,7 +1998,11 @@ def modify_draft_invoice_line(
         ]
         tot_ht = sum((to_decimal(r["line_ht_dzd"]) for r in all_lines), Decimal("0.00"))
         tot_tva = sum((to_decimal(r["line_tva_dzd"]) for r in all_lines), Decimal("0.00"))
-        timbre = calculate_droit_de_timbre(tot_ht + tot_tva, payment_method=inv["payment_method"])
+        timbre = calculate_droit_de_timbre(
+            tot_ht + tot_tva,
+            payment_method=inv["payment_method"],
+            **resolve_timbre_rule(conn, company_id, inv["invoice_date"]).as_kwargs(),
+        )
         tot_ttc = round_dzd(tot_ht + tot_tva + timbre)
 
         new_hash = compute_invoice_payload_hash(

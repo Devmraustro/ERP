@@ -197,7 +197,7 @@ skipped (environment), 0 failed, 7.08 s**.
 | N | reversal after reviewed posting | balanced ledger, payable netted to zero, no second credit note | pass |
 | O | refused submission | no state change, no approval row, refusal audited, chain valid | pass |
 | P | out-of-band line edit between submit and approve | `LINE_1_PRICE_SOURCE_MISMATCH` at approval, audited | pass |
-| Q | backup/restore after posting | **skipped** — see §11 | skip (environment) |
+| Q | backup + isolated restore after posting | posted invoice, journal entry and review decisions survive; restored ledger balances at 1190.00 and the restored audit chain verifies | **skipped on this host** (§10) — executed in CI |
 | R | pre-Phase-29 database migration | column/table/trigger restored, no row loss, repeat run is a no-op, trigger still enforced | pass |
 | S/S2 | non-numeric amounts and decision values | 422, nothing persisted (P32-F1 regression, 5 + 4 params) | pass |
 | T | `NeedsReview` recovery path | **characterisation of P32-F2/F3** — no recovery, duplicate refusal, document state drift | pass (documents the finding) |
@@ -390,6 +390,16 @@ support. Affected: `test_phase11_audit_key_rotation.py` (3),
 (`restore: isolated restore verifies hashes, trial balance and audit chain`,
 `restart: a new OS process reads the restored data`, the latter failing because
 the restore it reads never happened).
+
+The first Phase 32 commit was also run through CI on its exact SHA
+(`2083b37e`, run 41075387888): the Windows job and the 3.12 job were green, and
+the 3.11 job failed **only** inside this audit's own new test file — `test_q`
+asserted a trial-balance key (`total_debit`) that the read model does not
+return, a mistake the local skip had hidden. The test was corrected to exercise
+the real backup → restore → reopen path (`erp_snapshot.sqlite3`,
+`restored["restored_db"]`) and re-published; the CI run for the corrected commit
+is recorded in §2/§13. This is the reason the environment-gated test is written
+against documented return values rather than asserts that only pass locally.
 
 Consequently coverage on this host is 77 % rather than the 85 % reported for the
 PR chain in CI: the restore-heavy modules are not exercised. This is an

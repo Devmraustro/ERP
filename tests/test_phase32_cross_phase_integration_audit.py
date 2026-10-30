@@ -1129,12 +1129,54 @@ _RESTORE_GATE_OK = sys.version_info >= (3, 11, 17) and sys.version_info < (3, 13
         "The path is exercised by CI on 3.11/3.12 and recorded as environment-blocked."
     ),
 )
-def test_q_backup_restore_after_posting_keeps_the_ledger_verifiable(env, tmp_path):
+def test_q_backup_and_restore_after_posting_verify_the_ledger(env, tmp_path):
+    """A posted, fully reviewed invoice survives backup -> isolated restore intact."""
+    from dz_erp.security_audit import create_encrypted_backup, restore_and_verify_backup
+
     db, vault, _client = env
     _document_id, invoice_id = _reviewed_invoice(db, vault)
     _approve_and_post(db, invoice_id)
-    before = db.trial_balance(1)
-    assert before["total_debit"] == before["total_credit"]
+
+    report = db.trial_balance(1)
+    assert report["balanced"] is True
+    assert report["total_debit_dzd"] == report["total_credit_dzd"] == "1190.00"
+
+    backup_meta = create_encrypted_backup(
+        db=db,
+        vault=vault,
+        output_backup_path=tmp_path / "backup" / "erp.backup.enc",
+        backup_encryption_key=vault.encryption_key,
+    )
+    restored = restore_and_verify_backup(
+        backup_path=Path(backup_meta["backup_path"]),
+        backup_encryption_key=vault.encryption_key,
+        restore_target_dir=tmp_path / "isolated_restore",
+    )
+    assert restored["db_sha256_verified"] is True
+    assert restored["audit_chains_valid"] is True
+    assert restored["trial_balance_debit_dzd"] == "1190.00"
+    assert restored["trial_balance_credit_dzd"] == "1190.00"
+
+    # The restored database is a working deployment: the posted invoice, its
+    # journal entry, its review decisions and its audit chain all survive.
+    restored_db = restored["restored_db"]
+    restored_report = restored_db.trial_balance(1)
+    assert restored_report["balanced"] is True
+    assert restored_report["total_debit_dzd"] == "1190.00"
+    assert restored_db.verify_audit_chain(1)["valid"] is True
+    with restored_db.transaction() as conn:
+        inv = conn.execute(
+            "SELECT workflow_state FROM supplier_invoices WHERE id = ?", (invoice_id,)
+        ).fetchone()
+        entries = conn.execute(
+            "SELECT COUNT(*) AS n FROM journal_entries WHERE company_id = 1 AND state = 'POSTED'"
+        ).fetchone()["n"]
+        decisions = conn.execute(
+            "SELECT COUNT(*) AS n FROM ocr_field_reviews WHERE company_id = 1"
+        ).fetchone()["n"]
+    assert inv["workflow_state"] == "Posted"
+    assert entries == 1
+    assert decisions >= 6
 
 
 # ---------------------------------------------------------------------------

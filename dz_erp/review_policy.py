@@ -131,9 +131,10 @@ REVIEW_POLICY: Tuple[FieldRule, ...] = (
     FieldRule("amount_ttc_dzd", VALUE_CLASS_AMOUNT, True, 0.90),
 )
 
-# Line items: two elements of every extracted line row are reviewable — the
-# quantity and the unit price. A document with no extracted lines imposes no
-# line decisions — the invoice's own lines are typed and validated separately.
+# Line items: three elements of every extracted line row are reviewable — the
+# quantity, the unit price and the discount. A document with no extracted
+# lines imposes no line decisions — the invoice's own lines are typed and
+# validated separately.
 LINE_QTY_RULE = FieldRule(LINE_ITEM_FIELD, VALUE_CLASS_QUANTITY, True, 0.85)
 
 # The per-line unit price is its own decided value: without an explicit price
@@ -143,6 +144,17 @@ LINE_QTY_RULE = FieldRule(LINE_ITEM_FIELD, VALUE_CLASS_QUANTITY, True, 0.85)
 # quantized exactly like a quantity everywhere it is persisted).
 LINE_PRICE_FIELD = "line_unit_price"
 LINE_PRICE_RULE = FieldRule(LINE_PRICE_FIELD, VALUE_CLASS_AMOUNT, True, 0.85)
+
+# The per-line discount is the third decided line element. The invoice stores
+# ``discount_pct`` as a first-class column and pins every line's net amount to
+# ``qty × PU × (1 − discount/100)`` — without a decision on it, a mistyped
+# discount would be the one line input nobody vouched for. The extraction
+# pattern emits no discount, so a decision binds either to a value written by
+# an earlier attributed transcription (CORRECTED) or the line is transcribed;
+# the canonical form is the 2-decimal string ``format_dzd`` produces, which is
+# exactly the form the invoice column stores.
+LINE_DISCOUNT_FIELD = "line_discount"
+LINE_DISCOUNT_RULE = FieldRule(LINE_DISCOUNT_FIELD, VALUE_CLASS_AMOUNT, True, 0.85)
 
 _RULES_BY_NAME = {rule.field_name: rule for rule in REVIEW_POLICY}
 
@@ -161,6 +173,8 @@ def rule_for(field_name: str) -> Optional[FieldRule]:
         return LINE_QTY_RULE
     if field_name == LINE_PRICE_FIELD:
         return LINE_PRICE_RULE
+    if field_name == LINE_DISCOUNT_FIELD:
+        return LINE_DISCOUNT_RULE
     return _RULES_BY_NAME.get(field_name)
 
 
@@ -193,6 +207,14 @@ def validate_corrected_value(rule: FieldRule, value: str) -> str:
             # decision binds to that canonical form so a corrected price never
             # disagrees with the payload it was written into.
             return f"{round_qty(dec):.6f}"
+        if rule.field_name == LINE_DISCOUNT_FIELD:
+            # Business rule: a discount is a percentage in [0, 100] inclusive;
+            # a negative value is refused above, anything above 100 is refused
+            # here. No value is ever clamped into range: a discount that
+            # cannot appear on the paper is not stored as something else.
+            if dec > Decimal("100.00"):
+                raise ValueError(f"FIELD_VALUE_DISCOUNT_OUT_OF_RANGE:{cleaned!r}")
+            return format_dzd(dec)
         return format_dzd(dec)
     if vclass == VALUE_CLASS_QUANTITY:
         try:
@@ -280,17 +302,28 @@ def _field_evaluation(
 ) -> Dict[str, Any]:
     """Evaluate one header field (or one reviewable line element when ``rule`` is a line rule)."""
     line_index = None if field_row is None else field_row.get("line_index")
-    if rule in (LINE_QTY_RULE, LINE_PRICE_RULE) and field_row is not None:
+    if rule in (LINE_QTY_RULE, LINE_PRICE_RULE, LINE_DISCOUNT_RULE) and field_row is not None:
         payload, _parse_error = _line_payload(field_row)
-        payload_key = "qty" if rule is LINE_QTY_RULE else "unit_price_dzd"
+        if rule is LINE_QTY_RULE:
+            payload_key = "qty"
+        elif rule is LINE_DISCOUNT_RULE:
+            payload_key = "discount_pct"
+        else:
+            payload_key = "unit_price_dzd"
         value = None if payload is None else payload.get(payload_key)
         if value in (None, ""):
             value = None
         else:
-            # Compare in the canonical 6-decimal form the decision service
-            # stores, so "5.00" and "5.000000" are the same value.
+            # Compare in the canonical form the decision service stores: the
+            # 6-decimal quantity/price form, or the 2-decimal discount string
+            # the invoice column holds. A discount that was never transcribed
+            # is missing — it is never defaulted to zero, which would let an
+            # unreviewed discount through.
             try:
-                value = f"{round_qty(to_decimal(str(value))):.6f}"
+                if rule is LINE_DISCOUNT_RULE:
+                    value = format_dzd(to_decimal(str(value)))
+                else:
+                    value = f"{round_qty(to_decimal(str(value))):.6f}"
             except (ValueError, TypeError):
                 value = None
         missing = value is None
@@ -423,6 +456,20 @@ def evaluate_document_review_policy(
             else:
                 unmet_required.append(f"{LINE_PRICE_FIELD}[{line_row.get('line_index')}]")
 
+    # Same rows, third reviewable element: the line discount. Its decisions
+    # are stored under ``line_discount`` keyed by the same line index, so a
+    # quantity or price decision can never stand in for a discount decision.
+    line_discount_evaluations: List[Dict[str, Any]] = []
+    for line_row in line_rows:
+        latest = _latest_decision(decisions_by_key, LINE_DISCOUNT_FIELD, line_row.get("line_index"))
+        ev = _field_evaluation(LINE_DISCOUNT_RULE, line_row, latest)
+        line_discount_evaluations.append(ev)
+        if not ev["satisfied"]:
+            if ev["decision"] == DECISION_FLAGGED or FLAG_STALE in ev["flags"]:
+                flagged.append(f"{LINE_DISCOUNT_FIELD}[{line_row.get('line_index')}]")
+            else:
+                unmet_required.append(f"{LINE_DISCOUNT_FIELD}[{line_row.get('line_index')}]")
+
     totals = _evaluate_totals(rows_by_name)
 
     satisfied = (
@@ -445,6 +492,7 @@ def evaluate_document_review_policy(
         "fields": field_evaluations,
         "lines": line_evaluations,
         "line_prices": line_price_evaluations,
+        "line_discounts": line_discount_evaluations,
         "totals": totals,
         "unmet_required": unmet_required,
         "flagged": flagged,

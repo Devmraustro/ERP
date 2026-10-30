@@ -26,10 +26,12 @@ def complete_document_field_review():
 
     Simulates a thorough reviewer: every extracted required header field is
     CONFIRMED at exactly its current stored value, every extracted line
-    quantity and line unit price is CONFIRMED, and every optional policy field
-    the extraction did not find is asserted NOT_PRESENT. The document is then
-    re-evaluated and the helper raises unless it is satisfied, so a caller can
-    never silently proceed with a half-reviewed document. Tests that need a
+    quantity and line unit price is CONFIRMED, every line discount is decided
+    (confirmed at its transcribed value, or transcribed as 0.00 when the
+    extraction carries none), and every optional policy field the extraction
+    did not find is asserted NOT_PRESENT. The document is then re-evaluated
+    and the helper raises unless it is satisfied, so a caller can never
+    silently proceed with a half-reviewed document. Tests that need a
     *different* decision flow (corrections, flags, staleness) do not use this
     helper.
 
@@ -100,6 +102,35 @@ def complete_document_field_review():
                 expected_value=pev["value"],
                 line_index=pev["line_index"],
             )
+        for dev in first["line_discounts"]:
+            # The extraction pattern emits no discount, so a line's discount is
+            # missing until a human transcribes it. The synthetic fixtures
+            # carry no discount column and their printed net amounts equal
+            # qty × PU, so the honest transcription for an absent discount is
+            # 0.00 (a discount the paper's own line totals prove absent). An
+            # already-transcribed discount is confirmed at its stored value.
+            if dev["value"] is not None:
+                decide_extracted_field_review(
+                    db,
+                    company_id=company_id,
+                    user_id=reviewer_user_id,
+                    document_id=document_id,
+                    field_name="line_discount",
+                    decision="CONFIRMED",
+                    expected_value=dev["value"],
+                    line_index=dev["line_index"],
+                )
+            else:
+                decide_extracted_field_review(
+                    db,
+                    company_id=company_id,
+                    user_id=reviewer_user_id,
+                    document_id=document_id,
+                    field_name="line_discount",
+                    decision="CORRECTED",
+                    value="0.00",
+                    line_index=dev["line_index"],
+                )
         final = evaluate()
         assert final["satisfied"], f"field review incomplete: {final['blocking']}"
         return final

@@ -371,6 +371,31 @@ def run(state: Path) -> int:
             )
             if resp.status_code != 200:
                 return _assert(False, resp.text)
+        for dev in body["line_discounts"]:
+            # The extraction emits no discount; the staging fixture's printed
+            # line nets equal qty × PU, so an absent discount is honestly
+            # transcribed as 0.00 through the documented API.
+            if dev["value"] is not None:
+                payload = {
+                    "field_name": "line_discount",
+                    "decision": "CONFIRMED",
+                    "expected_value": dev["value"],
+                    "line_index": dev["line_index"],
+                }
+            else:
+                payload = {
+                    "field_name": "line_discount",
+                    "decision": "CORRECTED",
+                    "value": "0.00",
+                    "line_index": dev["line_index"],
+                }
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json=payload,
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
         after = client.get(
             f"/api/v1/documents/{document['document_id']}/review-policy",
             headers={"Authorization": f"Bearer {clerk}"},

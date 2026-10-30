@@ -23,6 +23,12 @@ failed, 7 skipped, 78 % coverage**. All 20 failures are
 Python 3.11.17+`), and the failure set is `diff`-identical to the pre-change
 baseline; every one of those paths is green in CI on CPython 3.11.17/3.12.15. `ruff check dz_erp tests tools` is clean.
 
+**CI on the final head** (`edbd1d8e`, run
+[`41127176839`](https://github.com/Devmraustro/ERP/actions/runs/41127176839)):
+**3/3 jobs green** — full suite with coverage on CPython 3.11.17 and 3.12.15, plus
+the Windows rotation/backup/staging job. On those interpreters the 20
+interpreter-floor failures above do not occur.
+
 **Not done, and not claimed:** the container image has never been built here; no
 migration has run against production-sized data; there is no MFA; the rate limiter
 is per process; and the Algerian tax values, key custody, DR evidence and Law 18-07

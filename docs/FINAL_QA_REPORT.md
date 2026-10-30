@@ -57,10 +57,13 @@ other.
 |---|---|---|
 | 41093527978 | `852f389f` (previous published head) | 3/3 jobs success |
 | 41124627918 / 41124878394 | `09918a05` / `49b9201c` | **cancelled** — superseded by a later push on the same branch (concurrency), not a failure |
-| latest on final head | see `gh run list --branch arena/7f12d627-erp` | recorded at handover |
+| **41127176839** | `edbd1d8e` (final head) | **3/3 jobs success** — full suite with coverage on CPython 3.11.17 and 3.12.15, plus the Windows rotation/backup/staging job. Every step in each job concluded `success` (`gh api …/jobs`), including "Run the complete test suite with coverage" and "Run isolated synthetic staging acceptance" |
 
 The cancellation pattern is stated because a cancelled run can be mistaken for a
-green one. The authoritative run is the one on the final head.
+green one. The authoritative run is the one on the final head, and it is green:
+**41127176839** on `edbd1d8e`. That is the direct answer to the 20 local failures —
+the same commit, the same suite, on an interpreter where the safe-restore path is
+permitted, and every step succeeds.
 
 ## 4. Coverage
 

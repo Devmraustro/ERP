@@ -700,9 +700,11 @@ reported here as passes.
 
 | Item | Value |
 |---|---|
-| Phase 33 code, tests and docs | `f8facf036f76d75b7ed6e23bd5d4e9adbc12062e` (`arena/7f12d627-erp`) |
+| Phase 33 code, tests and report | `f8facf036f76d75b7ed6e23bd5d4e9adbc12062e` (`arena/7f12d627-erp`) |
+| Phase 33 documentation follow-up | `4d4f94dbe51511e21ff3656f52b46cce3a4c6174` (docs-only: this section, the QA matrix and the register rows) |
 | Parent | `2a2b9b14de0cf792356488d645f20e5c4d4ad565` (Phase 32 head, unchanged) |
 | Pull request | **#7** — kept **open** and **Draft**; its base is the Phase 32 stack (`fix/phase29-invoice-discount-and-line-net-consistency`, PR #6 head) |
+| CI on `4d4f94db` | run **41091481984** — 3/3 jobs success, zero non-success steps |
 | CI on `f8facf0` | run **41089747877** — **3/3 jobs success**: Python 3.11 full suite + hash-locked install + dependency graph + ruff + compileall + staging acceptance + risk-register validation (14 steps), Python 3.12 full suite (12 steps, 2 by design skipped), Windows rotation/backup/recovery + staging (11 steps). **Zero non-success steps.** |
 | Local verification | §14.7 (Python 3.11.2; the restore paths are environment-blocked locally and pass in CI) |
 

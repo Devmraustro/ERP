@@ -450,3 +450,18 @@ Basis:
 A green CI pipeline does not establish production readiness: the arithmetic of
 the ledger, the fail-closed review gate and the tenant boundaries are verified;
 the custody, provenance, scale and legal gates are not, and remain open.
+
+## 13. Published commit and pull request
+
+| Item | Value |
+|---|---|
+| Phase 32 commit | `5b3020a501a6e01970b883ee5372205402d75898` (`arena/7f12d627-erp`) |
+| Parent | `e4e47b3bf4376e804f17b23e63c86f7fe384056c` (Phase 31 head, unchanged) |
+| Pull request | **#7** `audit(phase32): independent integration audit of the Phases 29-31 chain` — **Draft** |
+| Base | `fix/phase29-invoice-discount-and-line-net-consistency` (PR #6 head), so the chain #3 → #4 → #5 → #6 → #7 stays additive and no existing PR is rewritten |
+| State | `MERGEABLE` / `CLEAN`, Draft (must stay Draft pending human review) |
+| CI on the published SHA | run **41076741380** — 3/3 jobs pass: 3.11 full suite + staging acceptance + risk-register validation (17 steps), 3.12 full suite (15 steps, 2 by design skipped), Windows rotation/backup + staging (14 steps) |
+
+Nothing was merged, closed, rebased or force-pushed; `main` is untouched and no
+file was deleted. PRs #3–#6 remain exactly as they were found.
+

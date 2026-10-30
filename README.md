@@ -21,12 +21,13 @@ on top of `852f389f`):
 failed, 7 skipped, 78 % coverage**. All 20 failures are
 `restore_and_verify_backup`'s interpreter floor (`Safe backup restore requires
 Python 3.11.17+`), and the failure set is `diff`-identical to the pre-change
-baseline; every one of those paths is green in CI on CPython 3.11.17/3.12.15. `ruff check dz_erp tests tools` is clean.
+baseline; every one of those paths is green in CI on the runner's CPython `3.11` and
+`3.12`. `ruff check dz_erp tests tools` is clean.
 
-**CI on the final head** (`edbd1d8e`, run
-[`41127176839`](https://github.com/Devmraustro/ERP/actions/runs/41127176839)):
-**3/3 jobs green** — full suite with coverage on CPython 3.11.17 and 3.12.15, plus
-the Windows rotation/backup/staging job. On those interpreters the 20
+**CI on the final head** (`8b1b56c9`, run
+[`41129089741`](https://github.com/Devmraustro/ERP/actions/runs/41129089741)):
+**3/3 jobs green** — full suite with coverage on the runner's CPython `3.11` and
+`3.12`, plus the Windows rotation/backup/staging job (pinned `3.12.10`). On those interpreters the 20
 interpreter-floor failures above do not occur.
 
 **Not done, and not claimed:** the container image has never been built here; no
@@ -49,7 +50,9 @@ New documents: [`docs/PROJECT_BASELINE_AND_COMPLETION_PLAN.md`](docs/PROJECT_BAS
 [`docs/EXECUTIVE_REPORT.md`](docs/EXECUTIVE_REPORT.md),
 [`docs/TECHNICAL_REPORT.md`](docs/TECHNICAL_REPORT.md),
 [`docs/USER_GUIDE_FR.md`](docs/USER_GUIDE_FR.md),
-[`docs/USER_GUIDE_AR.md`](docs/USER_GUIDE_AR.md).
+[`docs/USER_GUIDE_AR.md`](docs/USER_GUIDE_AR.md),
+[`docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md`](docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md),
+[`docs/REMAINING_BLOCKERS.md`](docs/REMAINING_BLOCKERS.md).
 
 ## Desktop application - installed, local-first (Phases 25-27)
 
@@ -236,3 +239,6 @@ python -m ruff check dz_erp tests tools        # static check
 21. [`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md`](docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md) — arithmetic invariants, effective-dated tax resolution, and the explicit boundary between engineering proof and legal qualification.
 22. [`docs/FINAL_QA_REPORT.md`](docs/FINAL_QA_REPORT.md) — every command run, its result, and what was not run.
 23. [`docs/USER_GUIDE_FR.md`](docs/USER_GUIDE_FR.md) / [`docs/USER_GUIDE_AR.md`](docs/USER_GUIDE_AR.md) — the invoice workflow for accountants and clerks, in French and Arabic.
+
+24. [`docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md`](docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md) — the independent pass over the exact head: commits and PR containment, CI at step level, the suite and its baseline, the Priority 0 inspection with its own probe, the limiter's deployment scope, log contents, tax resolution, the container gap, the findings register (F-01…F-05) and the four-status classification.
+25. [`docs/REMAINING_BLOCKERS.md`](docs/REMAINING_BLOCKERS.md) — what still stands between this repository and a defensible deployment, with a named owner and the exact evidence that closes each item.

@@ -50,6 +50,25 @@ Related evidence: `docs/RISK_REGISTER.md` (risk IDs below),
 
 ## 2. What "Verified" is allowed to mean here
 
+### 2.1 Open engineering findings recorded after the 2026-10-30 verification
+
+Two defects were found by the independent pass (full detail in
+`docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md` §10.1). Neither contradicts the
+row above it — the mechanisms are verified as described — but neither may be
+described as production-ready either:
+
+* **F-01** (`R-AUTH`) — the limiter never evicts keys. Measured: 5 000 distinct
+  usernames ⇒ 5 000 retained entries, still 5 000 after the window expired; 50
+  unauthenticated requests created 50 entries. The bound itself is correct; its
+  memory behaviour is not bounded. Fix and regression test are outstanding.
+* **F-04** (`R-TAXCFG`) — the resolved stamp-duty rule is computed correctly but
+  its identity is not stored on the invoice, so a posted invoice cannot prove
+  which configured rule produced the amount. Storing the rule id and making the
+  rule tables append-only are outstanding.
+
+Both are engineering work that can be closed inside this repository; they are
+tracked in `docs/REMAINING_BLOCKERS.md` §A, not in the external rows.
+
 Only R-OPS is locally verified, and only in its honest scope: it verifies
 *configuration presence* and that the *verification commands exist and are
 runnable*, plus checkpoint shape/freshness when a checkpoint is supplied. It

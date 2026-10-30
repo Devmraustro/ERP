@@ -25,10 +25,11 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | 12 | Docs | This tracker | **DONE** | `docs/PROJECT_COMPLETION_TRACKER.md` | — | — | this commit |
 | 13 | P2 Accounting | Arithmetic, rounding, discount order, TTC identity, order independence, sub-centime residue proved by tests | **DONE** | `tests/test_phase36_accounting_and_tax_configuration.py` | 29 tests | 29 passed | this commit |
 | 13a | P2 Tax config | Timbre and TVA resolved by effective date from the versioned tables instead of compiled constants; gaps and malformed config refused | **DONE** | `dz_erp/localization.py`, `dz_erp/procurement_stock.py` | same suite | pass; documented in `docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` | this commit |
-| 13b | P2 Tax config | Persist the resolved rule version on the invoice and echo it in the posting audit | NOT_STARTED | — | — | Mechanically resolved today, only not stored | — |
+| 13b | P2 Tax config | Persist the resolved rule version on the invoice and echo it in the posting audit | NOT_STARTED (**F-04**, re-confirmed 2026-10-30) | — | `grep` over `database.py`: no `timbre_rule_id`/`rule_version`/`vat_rate_id` column; `timbre_rules` has no append-only guard | The rule is resolved correctly but its identity is not stored, so a posted invoice cannot prove which rule produced its duty | — |
 | 13c | P2 Accounting | Qualified Algerian expert-comptable review of rates, brackets and thresholds | **BLOCKED_EXTERNAL** | — | — | Requires a signed review with the legal reference per rate | — |
 | 14 | P5 API | Failed-login throttling per (client, account) and per-request correlation logging | **DONE** | `dz_erp/rate_limit.py`, `dz_erp/api.py` | `tests/test_phase35_api_rate_limiting_and_request_logging.py` (16) | 16 passed; `docs/STAGING_SECURITY_CONFIGURATION.md` §4.2–4.3 | committed |
 | 14a | P5 API | Shared-store rate limiting for multi-replica deployment (or proxy-side limit ratified by the operator) | NOT_STARTED | — | — | Current control is per worker and documented as such | — |
+| 14b | P5 API | Evict limiter keys so an unauthenticated client cannot grow memory without bound (**F-01**) | NOT_STARTED | `dz_erp/rate_limit.py` | independent probe: 5 000 usernames ⇒ 5 000 retained keys, none released after the window; 50 requests ⇒ 50 keys | Defect confirmed and measured; fix not started | — |
 | 15 | P6 DB | Migration matrix: convergence, idempotency, preservation, interruption safety, atomic rebuild | **DONE** | `tests/test_phase38_migration_matrix.py`, `docs/MIGRATION_AND_DATA_SAFETY.md` | 24 tests | 24 passed | committed |
 | 15a | P6 DB | Migration against production-sized data (timing, locking) | **BLOCKED_EXTERNAL** | — | — | Needs a copy of real state | — |
 | 16 | P10 Infra | Container build, compose reference, health model, environment template, build-context hygiene | **IMPLEMENTED_NOT_VERIFIED** | `ops/Dockerfile`, `ops/docker-compose.yml`, `ops/erp.env.example`, `.dockerignore` | `tests/test_phase37_deployment_assets.py` (6) | 6 passed for the *properties*; **the image has never been built** — no container runtime here | committed |
@@ -56,6 +57,26 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | P11 | Measured benchmarks / concurrency | **DONE** for the benchmark that exists; production-scale concurrency **BLOCKED_EXTERNAL** |
 | P12 | Documentation set | **DONE** |
 | P17 | Preserve the PR chain; prepare merge order only | **DONE** — nothing merged, nothing closed |
+
+## Independent verification pass — 2026-10-30
+
+Read-only against Git, PR and CI state. Nothing merged, closed, rebased, marked
+ready or deployed. Full detail in `docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md`;
+what still blocks release in `docs/REMAINING_BLOCKERS.md`.
+
+| # | Check | Status | Evidence |
+|---|---|---|---|
+| V1 | Six commits, parents, branch, remote head | **DONE** | HEAD = origin = `8b1b56c9`; `rev-list --left-right` = `0 0`; single-parent linear chain |
+| V2 | PR containment | **DONE** | commits→pulls API: all six in **PR #7 only** |
+| V3 | CI on the exact head | **DONE** | run `41129089741`, `head_sha=8b1b56c9`, 3/3 jobs success; step-level only — artefact download is blocked from this sandbox |
+| V4 | Full suite + baseline re-measured | **DONE** | head 890/20/7 (198.91 s) vs baseline `852f389f` 796/20/7 (162.93 s); FAILED lists `diff`-identical; +94 = phase34–38 |
+| V5 | P0 duplicate-row integrity, independently | **DONE** | `/tmp/verify_policy.py` 32/32 across cases A–K; gates at `procurement_stock.py:1660/1774/2222`; recovery at `:2114` |
+| V6 | Rate limiter deployment scope | **DONE** | process-local `_events`, self-described `per-process`, `replicas: 1` ⇒ **staging-only**; new defect **F-01** |
+| V7 | Request logs free of credentials | **DONE** | `/tmp/verify_logs.py` 7/7; fields = method/path(status query-stripped)/status/duration/client_ip (+ auth username, peer_ip, code, detail) |
+| V8 | Effective-dated TVA/Timbre | **DONE** | `/tmp/verify_tax.py` 33/33; thirteen tax assumptions listed for expert-comptable review |
+| V9 | Container build | **IMPLEMENTED_NOT_VERIFIED** | no container runtime or socket; prerequisites named in the report §9 |
+| V10 | Migration / backup / security docs / release gates | **DONE** | 24 migration tests; backup verified in CI only; 15-row matrix = 6 Verified + 9 Blocked; docs path scan: zero dangling references |
+| V11 | PR chain state, read-only | **DONE** | #3 non-draft → #7 draft; all CLEAN; every head 3/3 checks green; unchanged by this pass |
 
 ## Standing rules applied to every row
 

@@ -52,7 +52,12 @@ from .intake_ocr import (
     upload_and_process_supplier_document,
 )
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
-from .rate_limit import RequestThrottle
+from .rate_limit import (
+    RequestThrottle,
+    describe_throttle_policy,
+    format_rate_limit_scope,
+    store_from_env,
+)
 from .procurement_stock import (
     create_and_validate_supplier_invoice,
     revalidate_supplier_invoice,
@@ -240,12 +245,15 @@ def create_erp_fastapi_app(
     # address is used.  See dz_erp/net.py.
     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
     # Failed-authentication and (optionally) per-client request throttling.
-    # See dz_erp/rate_limit.py: in-process, per worker, fail-closed, audited.
-    # A fresh instance per application keeps counters from leaking between
-    # independently-created apps in one process (tests, or a desktop client that
-    # hosts the app alongside an embedded server); the environment still supplies
-    # the policy, and a deployment runs exactly one app per process.
-    app.state.throttle = throttle if throttle is not None else RequestThrottle()
+    # See dz_erp/rate_limit.py: fail-closed, audited, bounded, and either
+    # in-process (default) or shared through the application database when
+    # ERP_RATE_LIMIT_BACKEND=sqlite.  A fresh instance per application keeps
+    # counters from leaking between independently-created apps in one process
+    # (tests, or a desktop client that hosts the app alongside an embedded
+    # server); the environment still supplies the policy.
+    app.state.throttle = (
+        throttle if throttle is not None else RequestThrottle(store=store_from_env(db))
+    )
 
     # ------------------------------------------------------------------
     # Request logging and the optional per-client ceiling
@@ -428,6 +436,19 @@ def create_erp_fastapi_app(
         client_key = client_ip or (peer_ip or "unknown")
         blocked, retry_after = throttle.login_blocked(client_key, body.username)
         if blocked:
+            # A refusal caused by an unavailable counter is a different fact from
+            # a refusal caused by the limit, and an operator needs to tell them
+            # apart: the first is a dependency failure, the second is the policy.
+            if getattr(throttle, "last_backend_error", None):
+                logger.log(
+                    "ERROR",
+                    "RATE_LIMIT_BACKEND_UNAVAILABLE",
+                    corr_id,
+                    failure_mode=throttle.failure_mode,
+                    error_type=str(throttle.last_backend_error).split(":", 1)[0],
+                    username=body.username,
+                    client_ip=client_key,
+                )
             logger.log(
                 "WARNING",
                 "SECURITY_AUTH_RATE_LIMITED",
@@ -1093,6 +1114,23 @@ def create_erp_fastapi_app(
     # conflated on purpose ("not found in target company") so responses
     # never leak whether a foreign user id exists.
     # ------------------------------------------------------------------
+
+    @app.get("/api/v1/system/rate-limit-policy")
+    def api_rate_limit_policy(
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """The active throttling policy and what it actually bounds.
+
+        Administrators only. The description never contains a key, a username,
+        a credential or a per-account counter: it reports the limits, the store,
+        and the honest scope of the control, so a deployment review can verify
+        what the running process is doing rather than what a document says.
+        """
+        if auth.role != "admin":
+            raise HTTPException(status_code=403, detail="Administrator role required")
+        described = describe_throttle_policy(app.state.throttle)
+        described["deployment_scope"] = format_rate_limit_scope(app.state.throttle)
+        return {"company_id": auth.company_id, "rate_limit": described}
 
     @app.get("/api/v1/users")
     def api_list_users(

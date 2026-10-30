@@ -600,6 +600,10 @@ def test_a_backup_taken_before_the_upgrade_restores_after_it(tmp_path: Path) -> 
     )
     assert report["db_sha256_verified"] is True
     assert report["audit_chains_valid"] is True
-    restored_db = Path(report["restored_db"])
-    assert restored_db.is_file()
-    assert _checksums(restored_db) == checksums_before
+    # The report hands back the reopened database object, not a bare path: the
+    # restore is only considered verified once the chain has been re-checked
+    # through a real ERPDatabase.  Take the file path from it.
+    restored_db_path = Path(report["restored_db"].db_path)
+    assert restored_db_path.is_file()
+    assert restored_db_path.parent != path.parent, "restore must be isolated"
+    assert _checksums(restored_db_path) == checksums_before

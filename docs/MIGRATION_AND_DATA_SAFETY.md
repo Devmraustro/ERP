@@ -1,67 +1,152 @@
 # Migration and data safety
 
-The application upgrades its own SQLite database in place, on every start-up,
-inside the deployment that holds the only copy of the data. This document states
-the rules that code follows and what proves them.
+How this application upgrades a database in place, what is proved about that
+upgrade, what is not, and what an operator must do before letting it run.
 
-**Evidence:** `tests/test_phase38_migration_matrix.py` — 24 tests, passing on this
-host. The simulation method is explicit: a *current* database has modern columns
-removed (`ALTER TABLE … DROP COLUMN`, with the table's triggers dropped first,
-exactly as an older schema would lack them), then reopened. That reproduces what
-the migration code actually sees, without hand-written historical DDL that could
-drift from reality.
+Evidence: `tests/test_phase38_migration_matrix.py` (24 tests, per-column
+matrix) and `tests/test_phase41_migration_evidence.py` (17 tests, per-generation
+matrix with checksums, foreign keys, interruption, large tables and a
+backup/restore round trip). Nothing here claims production-scale safety: see §8.
 
-## 1. The rules
+---
 
-| Rule | Why | Test |
-|---|---|---|
-| A migration only **adds** | It may never destroy a stored fact; the database is the record | `test_no_column_is_dropped_by_a_migration` |
-| Migrations are **idempotent** | They run on every start-up, including after a crash mid-way | `test_running_the_migration_twice_changes_nothing`, `test_a_half_applied_upgrade_is_repaired_on_the_next_open` |
-| Each migration is **independently tested** | One migration must not be able to hide behind another | `test_any_single_missing_column_is_restored[…, 14 columns]` |
-| Old rows get **`NULL`, not a default** | `NULL` means "not recorded". A default would assert a decision nobody made — e.g. claiming a document was routed normally when the concept did not exist | `test_legacy_rows_get_null_not_a_fabricated_value` |
-| Data and the **audit chain survive** | The hash chain must verify before and after | `test_data_and_the_audit_chain_survive_the_upgrade` |
-| A table rebuild is **one transaction** | `sqlite3.executescript()` commits the pending transaction, which would leave a half-rebuilt table | `test_the_rebuild_migration_is_atomic` |
-| A migration **never opens its own connection** | It must work inside the caller's transaction, or a partial upgrade could be committed | `test_migrations_never_touch_production_data_paths` |
-| A fresh database needs **no migration** | New files must already be complete | `test_a_fresh_database_needs_no_migration_and_is_complete` |
+## 1. The rules the migrations follow
 
-## 2. The migrations
+1. **Additive only.** No migration drops a column, deletes a row, renames data or
+   rewrites a stored value. `grep` over `dz_erp/database.py` shows no
+   `DROP TABLE`, `DELETE FROM` or `UPDATE … SET` against a business table inside
+   the migration path.
+2. **Idempotent.** Every step is guarded by a `PRAGMA table_info` / `sqlite_master`
+   check, so a second start-up changes nothing. Verified by comparing the whole
+   `sqlite_master` dump before and after a second open (phase38 and phase41).
+3. **`NULL` means "not recorded".** A legacy row gets `NULL`, never a fabricated
+   default that would assert a decision nobody made — the clearest case being
+   Phase 40's rule provenance, where backfilling today's rule onto an old invoice
+   would be a false statement about the past.
+4. **No down-migration.** There is no `downgrade` path, by design: reversing an
+   upgrade would have to delete or reinterpret data that has since been written.
+   Recovery is by restoring the pre-upgrade backup (§7), not by rewinding the
+   schema.
+5. **One connection, one transaction boundary.** Migrations run on the connection
+   the caller opened. They never open their own connection or touch a second
+   file (asserted structurally in phase38).
 
-| # | Column(s) | Phase | Legacy meaning of `NULL` |
-|---|---|---|---|
-| 1 | `users.password_hash` | auth | user predates authentication; cannot log in until a hash is set |
-| 2 | `users.failed_login_count`, `users.locked_until`, `users.password_updated_at` | auth hardening | no failures recorded / not locked / age unknown |
-| 3 | `users.api_token_hash` | auth | retained legacy column; superseded by `auth_tokens` |
-| 4 | `audit_events.hmac_key_version` | key rotation | every pre-existing row was signed with the only key there was, so `DEFAULT 1` is factual, not a guess |
-| 5 | `ocr_extracted_fields.conflict_values_json` | 29 | the field was extracted before conflicts were recorded — never "there were no conflicts" |
-| 6 | `ocr_extracted_fields` rebuild (nullable, provenance-bearing confidence) | 29 | legacy scores marked `not_measured`; fabricated confidence cleared; raw text, bbox, model version and human overrides copied |
-| 7 | `approval_requests.source_review_fingerprint` | 33 | the request predates binding; the approval gate reads `NULL` as "not bound" and skips the re-check, so a legacy pending request keeps working |
-| 8 | `ocr_field_reviews.evidence_json` | 34 | the decision covered "the single row that existed then"; if several rows exist now, a `NULL` binding authorises **none** of them |
-| 9 | `source_documents.extraction_route`, `route_reason`, `declared_language`, `script_arabic_letters`, `script_latin_letters` | 29 | unknown route — not "standard_review" |
+## 2. What a "schema generation" means here
 
-## 3. Running a migration on a real deployment
+The repository has no version table; the migration is driven by what the schema
+*is*. Phase 38 tested one column at a time; Phase 41 tests whole generations:
 
-1. **Back up first, and verify the backup** — not just that a file appeared
-   (`docs/BACKUP_AND_RECOVERY_RUNBOOK.md`).
-2. Stop the service (one process owns the SQLite writer).
-3. Start it once with the new version. Migration runs on open; if it raises, the
-   service does not start and nothing is served.
-4. Confirm: `verify_audit_chain`, row counts for the tables above, and a read of
-   one legacy document.
-5. Keep the pre-migration backup until the new version has run a full business
-   day.
+| Generation | What it is missing |
+|---|---|
+| pre-auth | `users.password_hash`, `failed_login_count`, `locked_until`, `password_updated_at`, `api_token_hash`, `audit_events.hmac_key_version` |
+| pre-Phase-29 (review policy) | `ocr_extracted_fields.conflict_values_json`, `ocr_field_reviews.evidence_json`, `approval_requests.source_review_fingerprint` |
+| pre-Phase-34 (routing) | `source_documents.extraction_route`, `route_reason`, `declared_language`, `script_arabic_letters`, `script_latin_letters` |
+| pre-Phase-40 (provenance) | the six `supplier_invoices.timbre_*` columns and the `timbre_rule_versions` table |
+| oldest reconstructed | all of the above at once |
 
-**Rollback is restore.** There is no down-migration, by design: a down-migration
-would have to delete columns, which rule 1 forbids. Rolling back means restoring
-the verified pre-migration backup.
+Each generation is built by starting from the current schema and removing that
+generation's additions (simulating an older database with `ALTER TABLE … DROP
+COLUMN`, dropping first the triggers whose bodies mention the column — which is
+what an older trigger set looked like). The upgrade must then:
 
-## 4. What is not covered here
+* restore every column of every generation;
+* keep every business value identical (SHA-256 over a fixed column set per table,
+  before and after);
+* keep the audit chain valid;
+* leave `PRAGMA foreign_key_check` empty;
+* create the objects a migration owns — the audit, journal, OCR-preservation and
+  Phase 40 triggers, and the provenance index;
+* be a no-op on the second open.
 
-* No migration has been run against a **production-sized** dataset; all evidence
-  here is synthetic data in the hundreds of rows. Timing and lock behaviour at
-  scale are `BLOCKED_EXTERNAL` (needs a copy of real state).
-* SQLite's `ALTER TABLE … DROP COLUMN` (SQLite ≥ 3.35) is used **only by the
-  tests**, never by the application.
-* No schema-version table exists: migrations are structural probes
-  (`PRAGMA table_info`). This is safe precisely *because* they are idempotent and
-  additive; introducing a version now would add a failure mode without adding a
-  guarantee.
+All of that is asserted. The checksums cover money and workflow state
+(`supplier_invoices.amount_*`, `workflow_state`, `payload_sha256`), ledger totals
+and the evidence rows, so a migration that silently rewrote a value would fail
+the suite.
+
+## 3. Interruption: what actually happens (finding F-06)
+
+**The migration sequence is not one atomic unit.** Connections run with
+`isolation_level=None` and explicit `BEGIN IMMEDIATE` around *data* changes, so
+each `ALTER TABLE` is atomic on its own but the set of them is not. A crash
+between two steps leaves a partially upgraded file.
+
+That is measured, not assumed. `test_an_interrupted_migration_leaves_a_recoverable_database`
+injects a failure after a partial `ALTER` and asserts the three properties an
+operator depends on:
+
+1. no business value changed (checksums identical);
+2. the file is still a valid database with no foreign-key violations;
+3. the next start completes the upgrade (forward recovery), with the guards and
+   indexes present afterwards.
+
+`test_the_migration_steps_are_individually_atomic_not_globally_atomic` pins the
+assumption: if the connection mode ever changes, the test fails and this section
+must be revisited rather than quietly becoming wrong.
+
+The exception is the one table rebuild (`_migrate_ocr_confidence`), which wraps
+itself in an explicit transaction precisely because `executescript()` would
+commit a pending transaction and leave a half-rebuilt table (asserted in
+phase38).
+
+**Consequence for operators:** a verified backup before an upgrade is not a
+formality, it is the recovery plan. §7.
+
+## 4. Foreign keys, indexes and triggers
+
+* Foreign keys are enabled on every non-read-only connection
+  (`PRAGMA foreign_keys = ON`), so a migration runs with the constraints live.
+  A constraint violation therefore aborts the upgrade instead of writing an
+  orphan.
+* `PRAGMA foreign_key_check` must return nothing after a migration; asserted per
+  generation, and asserted to still reject an orphan insert afterwards (the
+  constraint is real, not merely declared).
+* No migration creates a duplicate object: index and trigger names are unique
+  after the upgrade (asserted).
+
+## 5. Large tables
+
+`test_a_large_table_migrates_in_bounded_time_and_loses_nothing` seeds 1 500
+invoices with lines, upgrades, and asserts the row count, the checksums and a
+wall-clock bound (30 s, deliberately generous). It is a *shape* guard — it would
+catch an accidental O(n²) step — not a benchmark. Real timing on the operator's
+storage belongs to the DR drill (`R-DR`).
+
+## 6. Read-only inspection never migrates
+
+An `ERPDatabase` opened for inspection refuses to create schema objects, switch
+the journal mode, or generate replacement key material. Restoring a backup and
+inspecting it therefore cannot "fix" the very difference you are investigating.
+(Implemented and tested before this document; re-verified in phase12's suites.)
+
+## 7. The operator procedure
+
+1. Stop the service (do not upgrade under a live writer).
+2. Take a verified backup: `create_encrypted_backup`, then `restore_and_verify_backup`
+   into an isolated directory and confirm `db_sha256_verified` and
+   `audit_chains_valid` are true.
+3. Start the service once. The migration runs. If it fails, do **not** retry
+   blindly: read the error, keep the file, and see §3 — a partial upgrade is
+   repairable, but the failure may indicate corruption that the backup also has.
+4. Verify: the service starts, `verify_audit_chain` is valid, `PRAGMA
+   foreign_key_check` is empty, and the trial balance still balances.
+5. Only then re-enable writes.
+
+`test_a_backup_taken_before_the_upgrade_restores_after_it` exercises steps 2–4
+end-to-end in the supported interpreter (it skips on CPython < 3.11.17, where the
+safe-extraction gate refuses by design; CI runs it on 3.11.17 and 3.12).
+
+## 8. What is *not* claimed
+
+* **Production-scale data.** 1 500 invoices is a shape test, not an operator's
+  ledger. Timing, WAL growth and disk headroom on real data are unmeasured.
+* **A real historical dump.** The generations are reconstructed by removing
+  columns from the current schema. That is faithful for structural properties and
+  cannot drift from hand-written historical DDL, but it is not the operator's
+  actual old file. Replaying one in staging is `R-DR`, still
+  `BLOCKED_EXTERNAL`.
+* **Migration under concurrent writers.** The procedure requires a stopped
+  service; multi-writer upgrades are not supported and not tested.
+* **Atomicity of the whole sequence.** See §3 — forward recovery only.
+
+Owners and pass criteria for the external rows are in
+`docs/RELEASE_READINESS_MATRIX.md` (`R-DR`, `R-CONC`).

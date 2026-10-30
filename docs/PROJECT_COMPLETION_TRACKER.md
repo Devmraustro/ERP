@@ -25,12 +25,12 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | 12 | Docs | This tracker | **DONE** | `docs/PROJECT_COMPLETION_TRACKER.md` | — | — | this commit |
 | 13 | P2 Accounting | Arithmetic, rounding, discount order, TTC identity, order independence, sub-centime residue proved by tests | **DONE** | `tests/test_phase36_accounting_and_tax_configuration.py` | 29 tests | 29 passed | this commit |
 | 13a | P2 Tax config | Timbre and TVA resolved by effective date from the versioned tables instead of compiled constants; gaps and malformed config refused | **DONE** | `dz_erp/localization.py`, `dz_erp/procurement_stock.py` | same suite | pass; documented in `docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` | this commit |
-| 13b | P2 Tax config | Persist the resolved rule version on the invoice and echo it in the posting audit | NOT_STARTED (**F-04**, re-confirmed 2026-10-30) | — | `grep` over `database.py`: no `timbre_rule_id`/`rule_version`/`vat_rate_id` column; `timbre_rules` has no append-only guard | The rule is resolved correctly but its identity is not stored, so a posted invoice cannot prove which rule produced its duty | — |
+| 13b | P2 Tax config | Persist the resolved rule version on the invoice and echo it in the posting audit | **DONE** (P40, closes **F-04**) | `dz_erp/localization.py`, `dz_erp/database.py`, `dz_erp/procurement_stock.py` | `tests/test_phase40_timbre_rule_provenance.py` (22) | 22 passed; content hash + append-only ledger + posting re-check | committed |
 | 13c | P2 Accounting | Qualified Algerian expert-comptable review of rates, brackets and thresholds | **BLOCKED_EXTERNAL** | — | — | Requires a signed review with the legal reference per rate | — |
 | 14 | P5 API | Failed-login throttling per (client, account) and per-request correlation logging | **DONE** | `dz_erp/rate_limit.py`, `dz_erp/api.py` | `tests/test_phase35_api_rate_limiting_and_request_logging.py` (16) | 16 passed; `docs/STAGING_SECURITY_CONFIGURATION.md` §4.2–4.3 | committed |
 | 14a | P5 API | Shared-store rate limiting for multi-replica deployment (or proxy-side limit ratified by the operator) | NOT_STARTED | — | — | Current control is per worker and documented as such | — |
-| 14b | P5 API | Evict limiter keys so an unauthenticated client cannot grow memory without bound (**F-01**) | NOT_STARTED | `dz_erp/rate_limit.py` | independent probe: 5 000 usernames ⇒ 5 000 retained keys, none released after the window; 50 requests ⇒ 50 keys | Defect confirmed and measured; fix not started | — |
-| 15 | P6 DB | Migration matrix: convergence, idempotency, preservation, interruption safety, atomic rebuild | **DONE** | `tests/test_phase38_migration_matrix.py`, `docs/MIGRATION_AND_DATA_SAFETY.md` | 24 tests | 24 passed | committed |
+| 14b | P5 API | Evict limiter keys so an unauthenticated client cannot grow memory without bound (**F-01**) | **DONE** (P39) | `dz_erp/rate_limit.py`, `dz_erp/api.py` | `tests/test_phase39_bounded_rate_limiting.py` (32) | 32 passed; cap + sweep + no-allocation probes + per-client aggregate | committed |
+| 15 | P6 DB | Migration matrix: convergence, idempotency, preservation, interruption safety, atomic rebuild | **DONE** | `tests/test_phase38_migration_matrix.py`, `tests/test_phase41_migration_evidence.py`, `docs/MIGRATION_AND_DATA_SAFETY.md` | 24 + 17 tests | 24 passed; 16 passed / 1 skipped locally (backup round trip runs in CI) | committed |
 | 15a | P6 DB | Migration against production-sized data (timing, locking) | **BLOCKED_EXTERNAL** | — | — | Needs a copy of real state | — |
 | 16 | P10 Infra | Container build, compose reference, health model, environment template, build-context hygiene | **IMPLEMENTED_NOT_VERIFIED** | `ops/Dockerfile`, `ops/docker-compose.yml`, `ops/erp.env.example`, `.dockerignore` | `tests/test_phase37_deployment_assets.py` (6) | 6 passed for the *properties*; **the image has never been built** — no container runtime here | committed |
 | 16a | P10 Infra | Build the image, run the stack, restore a backup into it, rotate a key in it | NOT_STARTED | — | — | Operator/platform-owner step, listed in `docs/PRODUCTION_DEPLOYMENT_GUIDE.md` §7 | — |
@@ -38,6 +38,17 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | 17a | P12 Docs | User guides reviewed by an Arabic-speaking accountant for terminology | NOT_STARTED | — | — | The guides are accurate about behaviour; terminology review is a human step | — |
 | 18 | External | Qualified Algerian SCF/tax review | **BLOCKED_EXTERNAL** | — | — | Requires an engaged expert-comptable | — |
 | 19 | External | KMS/HSM custody, provenance, off-host checkpoints, alerting, DR, OCR corpus, Law 18-07 | **BLOCKED_EXTERNAL** | — | — | See `docs/RELEASE_READINESS_MATRIX.md` | — |
+
+## Phases 39–41 — remediation of the audit findings
+
+| # | Phase | Task | Status | Files | Tests run | Result | Commit |
+|---|---|---|---|---|---|---|---|
+| 20 | P39 | F-01: expiry, hard cap, no-allocation probes, per-client aggregate, shared sqlite backend, failure policy, policy endpoint | **DONE** | `dz_erp/rate_limit.py`, `dz_erp/api.py`, `ops/erp.env.example`, `docs/RATE_LIMITING_AND_DEPLOYMENT_SCOPE.md` | `tests/test_phase39_bounded_rate_limiting.py` (32) + Phase 35 (16) | 48 passed; subprocess proves a shared counter; scope still reported as per-process by default | `6fb650d` |
+| 20a | P39 | Distributed limiter across separate databases / replicas | **NOT_STARTED** | — | — | No bundled backend; deliberately not claimed | — |
+| 21 | P40 | F-04: rule identity, content hash, snapshot, append-only ledger, mutation guards, posting re-check, legacy handling, reversal inheritance | **DONE** | `dz_erp/localization.py`, `dz_erp/database.py`, `dz_erp/procurement_stock.py`, `dz_erp/security_audit.py` | `tests/test_phase40_timbre_rule_provenance.py` (22) | 22 passed | `0df3c33` |
+| 22 | P41 | Migration evidence by schema generation: checksums, FKs, indexes, interruption, large tables, backup→restore | **DONE** (structural) / **BLOCKED_EXTERNAL** (production scale) | `tests/test_phase41_migration_evidence.py`, `docs/MIGRATION_AND_DATA_SAFETY.md` | 17 tests | 16 passed, 1 skipped locally by interpreter floor; runs in CI | committed |
+| 23 | P42 | Logging and retention review | **DONE** (review) / **BLOCKED_EXTERNAL** (retention period) | `docs/LOG_RETENTION_AND_ACCESS.md` | — | Content verified credential-free; retention is a DPO determination | — |
+| 24 | P39/P40 | Full-suite regression | **DONE** | — | `pytest -q --cov=dz_erp` | 942 passed, 20 failed (interpreter floor, same names as baseline), 7 skipped | — |
 
 ## Where the workstream stands
 
@@ -48,8 +59,8 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | P2 | Accounting arithmetic + effective-dated tax configuration | **DONE** (mechanism) / **BLOCKED_EXTERNAL** (legal values) — 29 tests |
 | P3 | Core modules | **DONE** (pre-existing, re-verified by the full suite) |
 | P4 | OCR/AI production quality | **DONE** (pre-existing benchmark and fail-closed policy); authorised corpus **BLOCKED_EXTERNAL** |
-| P5 | Security audit + threat model + data protection + incident response | **DONE** (documents) / **BLOCKED_EXTERNAL** (legal determinations) |
-| P6 | Migrations and data safety | **DONE** (24 tests) / **BLOCKED_EXTERNAL** (production scale) |
+| P5 | Security audit + threat model + data protection + incident response; bounded limiter (P39) | **DONE** (documents, control) / **BLOCKED_EXTERNAL** (legal determinations, distributed limiter) |
+| P6 | Migrations and data safety | **DONE** (24 + 17 tests) / **BLOCKED_EXTERNAL** (production scale) |
 | P7 | Frontend/UX (Arabic RTL, French LTR) | **DONE** (pre-existing suites) / terminology review **NOT_STARTED** |
 | P8 | API hardening / OpenAPI | **DONE** — throttling, correlation logging, contract pin |
 | P9 | Test pipeline + final QA report | **DONE** — `docs/FINAL_QA_REPORT.md` |

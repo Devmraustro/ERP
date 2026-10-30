@@ -12,7 +12,11 @@ from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, 
 from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
 from .intake_ocr import DOCUMENT_LINKABLE_STATES, levenshtein_distance, normalize_invoice_ref
 from .localization import (
+    assert_timbre_rule_unchanged,
     calculate_droit_de_timbre,
+    inherit_timbre_provenance,
+    persist_invoice_timbre_provenance,
+    record_timbre_rule_version,
     resolve_timbre_rule,
     resolve_vat_rates,
     validate_algerian_identifiers,
@@ -1277,6 +1281,21 @@ def _create_and_validate_supplier_invoice(
 
         _insert_invoice_lines(conn, company_id, inv_id, prepared_lines)
 
+        # Phase 40 (F-04): record which stamp-duty rule this invoice was
+        # validated against, and the inputs the amount was computed from, so the
+        # calculation can be replayed after the configuration has moved on.
+        persist_invoice_timbre_provenance(
+            conn,
+            company_id=company_id,
+            invoice_id=inv_id,
+            rule=timbre_rule,
+            base_amount=ht_dec + tva_dec,
+            payment_method=payment_method,
+            computed_amount=timbre_dec,
+            now_iso=now_iso,
+            stage="validation",
+        )
+
         # Phase 33 (P32-F3): a refused attempt never writes the document state.
         if document_id and wf_state != "DuplicateRejected":
             _refresh_document_state(conn, company_id, document_id, wf_state, invoice_id=inv_id)
@@ -1536,6 +1555,19 @@ def revalidate_supplier_invoice(
                 invoice_id,
                 company_id,
             ),
+        )
+
+        # The corrected invoice's own calculation is the one that matters now.
+        persist_invoice_timbre_provenance(
+            conn,
+            company_id=company_id,
+            invoice_id=invoice_id,
+            rule=timbre_rule,
+            base_amount=ht_dec + tva_dec,
+            payment_method=new_method,
+            computed_amount=timbre_dec,
+            now_iso=now_iso,
+            stage="revalidation",
         )
 
         invalidated = _invalidate_approval_requests(
@@ -2042,6 +2074,19 @@ def modify_draft_invoice_line(
                 company_id,
             ),
         )
+        # The stamp duty was recomputed above from the rule in force for this
+        # invoice date, so the recorded provenance moves with the amount.
+        persist_invoice_timbre_provenance(
+            conn,
+            company_id=company_id,
+            invoice_id=invoice_id,
+            rule=resolve_timbre_rule(conn, company_id, inv["invoice_date"]),
+            base_amount=tot_ht + tot_tva,
+            payment_method=inv["payment_method"],
+            computed_amount=timbre,
+            now_iso=now_iso,
+            stage="draft_modification",
+        )
         document_synced = _refresh_document_state(
             conn, company_id, inv["document_id"], "NeedsReview", invoice_id=invoice_id
         )
@@ -2210,6 +2255,37 @@ def _post_supplier_invoice_in_transaction(
         if not inv["approved_payload_sha256"] or inv["payload_sha256"] != inv["approved_payload_sha256"]:
             raise FinancialIntegrityError(
                 "APPROVAL_PAYLOAD_HASH_MISMATCH: Invoice was modified after approval; re-validation and approval required."
+            )
+
+        # Phase 40 (F-04): the stamp duty was validated against a specific rule
+        # version. If the operator installed a different one in the meantime, the
+        # amount in the approval is no longer the amount the current law would
+        # produce, and posting it silently would move money under a rule nobody
+        # approved. Refuse and make the operator re-validate.
+        posting_rule = resolve_timbre_rule(conn, company_id, inv["invoice_date"])
+        assert_timbre_rule_unchanged(inv, posting_rule)
+        if not inv["timbre_rule_version"]:
+            # Legacy invoice (validated before provenance existed). Record the
+            # rule that governs *this posting* — a fact about now, not a claim
+            # about the past, and the snapshot says stage="posting".
+            persist_invoice_timbre_provenance(
+                conn,
+                company_id=company_id,
+                invoice_id=invoice_id,
+                rule=posting_rule,
+                base_amount=to_decimal(inv["amount_ht_dzd"]) + to_decimal(inv["amount_tva_dzd"]),
+                payment_method=inv["payment_method"],
+                computed_amount=to_decimal(inv["amount_timbre_dzd"]),
+                now_iso=now_iso,
+                stage="posting",
+            )
+        else:
+            record_timbre_rule_version(
+                conn,
+                company_id=company_id,
+                rule=posting_rule,
+                now_iso=now_iso,
+                invoice_id=invoice_id,
             )
 
         # Phase 34 defence in depth: the review gate is re-run at posting, in the
@@ -2547,6 +2623,14 @@ def reverse_posted_invoice(
             ),
         )
         cn_id = int(ic.lastrowid)
+        # The credit note reverses a specific calculation: it cites the same rule
+        # identity as the invoice it reverses, never whatever is configured now.
+        inherit_timbre_provenance(
+            conn,
+            company_id=company_id,
+            source_invoice_id=original_invoice_id,
+            target_invoice_id=cn_id,
+        )
 
         # Decrement po_line.qty_invoiced so a replacement bill can be matched
         orig_lines = conn.execute(
@@ -2798,6 +2882,14 @@ def _create_reversal_request(
             ),
         )
         cn_id = int(ic.lastrowid)
+        # The credit note reverses a specific calculation: it cites the same rule
+        # identity as the invoice it reverses, never whatever is configured now.
+        inherit_timbre_provenance(
+            conn,
+            company_id=company_id,
+            source_invoice_id=original_invoice_id,
+            target_invoice_id=cn_id,
+        )
 
         # Copy invoice lines to the credit note
         orig_lines = conn.execute(

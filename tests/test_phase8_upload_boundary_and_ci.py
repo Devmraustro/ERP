@@ -1286,9 +1286,13 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # + the Phase 33 invoice re-validation endpoint (POST
     # invoices/{invoice_id}/revalidate), which replaces the out-of-band repair
     # P32-F2 had no supported path for.
+    # + the Phase 39 rate-limit policy endpoint (GET system/rate-limit-policy),
+    # which reports the live throttling policy to administrators only.
     # The count pin catches accidental surface changes; the desktop read
     # endpoints are authenticated like every other protected operation.
-    assert len(protected) == 29, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert len(protected) == 30, (
+        f"expected 30 protected operations, got {len(protected)}: {sorted(protected)}"
+    )
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

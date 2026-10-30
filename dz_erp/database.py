@@ -414,6 +414,15 @@ CREATE TABLE IF NOT EXISTS supplier_invoices (
     posted_at               TEXT,
     journal_entry_id        INTEGER,
     reversal_of_invoice_id  INTEGER REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+    -- Phase 40 (F-04): which stamp-duty rule produced amount_timbre_dzd.
+    -- NULL means "not recorded" — never a fabricated identity for an invoice
+    -- that was validated before this column existed.
+    timbre_rule_version     TEXT,
+    timbre_rule_source      TEXT CHECK (timbre_rule_source IN ('configured', 'builtin_default')),
+    timbre_rule_hash        TEXT,
+    timbre_rule_valid_from  TEXT,
+    timbre_rule_valid_to    TEXT,
+    timbre_snapshot_json    TEXT,
     created_at              TEXT NOT NULL
 );
 
@@ -436,6 +445,64 @@ CREATE TABLE IF NOT EXISTS supplier_invoice_lines (
     line_tva_dzd    TEXT NOT NULL,
     line_ttc_dzd    TEXT NOT NULL
 );
+
+-- Phase 40 (F-04): the content of every stamp-duty rule version actually used.
+-- Append-only by trigger: it is the evidence that lets a posted invoice be
+-- explained years later, even after the operator has configured new rules.
+CREATE TABLE IF NOT EXISTS timbre_rule_versions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    version_code        TEXT NOT NULL,
+    content_hash        TEXT NOT NULL,
+    source              TEXT NOT NULL CHECK (source IN ('configured', 'builtin_default')),
+    valid_from          TEXT NOT NULL,
+    valid_to            TEXT,
+    min_amount_dzd      TEXT NOT NULL,
+    max_amount_dzd      TEXT,
+    threshold_dzd       TEXT NOT NULL,
+    brackets_json       TEXT NOT NULL,
+    first_used_at       TEXT NOT NULL,
+    first_used_by_invoice_id INTEGER REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+    UNIQUE(company_id, version_code, content_hash)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_update
+BEFORE UPDATE ON timbre_rule_versions
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_delete
+BEFORE DELETE ON timbre_rule_versions
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+END;
+
+-- A rule version an invoice was posted against may not be rewritten or removed:
+-- that would silently change the explanation of an amount already in the ledger.
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_update_when_referenced
+BEFORE UPDATE ON timbre_rules
+WHEN EXISTS (
+    SELECT 1 FROM supplier_invoices
+    WHERE company_id = OLD.company_id
+      AND timbre_rule_version = OLD.version_code
+      AND workflow_state = 'Posted'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_delete_when_referenced
+BEFORE DELETE ON timbre_rules
+WHEN EXISTS (
+    SELECT 1 FROM supplier_invoices
+    WHERE company_id = OLD.company_id
+      AND timbre_rule_version = OLD.version_code
+      AND workflow_state = 'Posted'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+END;
 
 CREATE TABLE IF NOT EXISTS approval_requests (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -906,6 +973,7 @@ class ERPDatabase:
         self._migrate_approval_binding(conn)
         self._migrate_document_routing(conn)
         self._migrate_review_evidence(conn)
+        self._migrate_timbre_provenance(conn)
 
     def _migrate_review_policy(self, conn: sqlite3.Connection) -> None:
         """Phase 29 review-policy schema, idempotently, on pre-existing databases.
@@ -1001,6 +1069,102 @@ class ERPDatabase:
         for column, definition in additions.items():
             if column not in cols:
                 conn.execute(f"ALTER TABLE source_documents ADD COLUMN {column} {definition}")
+
+    def _migrate_timbre_provenance(self, conn: sqlite3.Connection) -> None:
+        """Phase 40 (F-04): record which stamp-duty rule produced each amount.
+
+        Additive and idempotent. Existing invoices keep ``NULL``: their rule
+        identity is genuinely unknown, and inventing one would be worse than
+        admitting it. The append-only ledger and the guards that stop a
+        referenced rule from being rewritten are created here too, so an older
+        database gains the same protection as a new one.
+        """
+        invoice_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(supplier_invoices)").fetchall()
+        }
+        for column, ddl in (
+            ("timbre_rule_version", "TEXT"),
+            ("timbre_rule_source", "TEXT"),
+            ("timbre_rule_hash", "TEXT"),
+            ("timbre_rule_valid_from", "TEXT"),
+            ("timbre_rule_valid_to", "TEXT"),
+            ("timbre_snapshot_json", "TEXT"),
+        ):
+            if invoice_cols and column not in invoice_cols:
+                conn.execute(f"ALTER TABLE supplier_invoices ADD COLUMN {column} {ddl}")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS timbre_rule_versions (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+                version_code        TEXT NOT NULL,
+                content_hash        TEXT NOT NULL,
+                source              TEXT NOT NULL CHECK (source IN ('configured', 'builtin_default')),
+                valid_from          TEXT NOT NULL,
+                valid_to            TEXT,
+                min_amount_dzd      TEXT NOT NULL,
+                max_amount_dzd      TEXT,
+                threshold_dzd       TEXT NOT NULL,
+                brackets_json       TEXT NOT NULL,
+                first_used_at       TEXT NOT NULL,
+                first_used_by_invoice_id INTEGER REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+                UNIQUE(company_id, version_code, content_hash)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_update
+            BEFORE UPDATE ON timbre_rule_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_delete
+            BEFORE DELETE ON timbre_rule_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_update_when_referenced
+            BEFORE UPDATE ON timbre_rules
+            WHEN EXISTS (
+                SELECT 1 FROM supplier_invoices
+                WHERE company_id = OLD.company_id
+                  AND timbre_rule_version = OLD.version_code
+                  AND workflow_state = 'Posted'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_delete_when_referenced
+            BEFORE DELETE ON timbre_rules
+            WHEN EXISTS (
+                SELECT 1 FROM supplier_invoices
+                WHERE company_id = OLD.company_id
+                  AND timbre_rule_version = OLD.version_code
+                  AND workflow_state = 'Posted'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+            END
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timbre_rule_versions_lookup "
+            "ON timbre_rule_versions(company_id, version_code)"
+        )
 
     def _migrate_ocr_confidence(self, conn: sqlite3.Connection) -> None:
         """Bring `ocr_extracted_fields` forward to nullable, provenance-bearing confidence.

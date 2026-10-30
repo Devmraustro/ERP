@@ -2,6 +2,7 @@
 """Phase 2 — Algerian SCF Localization, Conservative Migration, Tax/Timbre & G50 Engine."""
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -851,6 +852,290 @@ def compute_invoice_totals(
         },
         "lines": computed_lines,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 40 (F-04) — immutable provenance for the stamp-duty calculation
+# ---------------------------------------------------------------------------
+#
+# The amount was always correct for the rule in force; what was missing was the
+# evidence of *which* rule that was. A posted invoice kept ``amount_timbre_dzd``
+# and nothing else, so a configuration change could leave an old invoice
+# unexplainable — and nothing stopped a referenced rule version from being
+# rewritten in place.
+#
+# Three things make the calculation auditable now:
+#
+# 1. **A content fingerprint.** ``timbre_rule_content_hash`` hashes the rule's
+#    whole effective content (version, window, minimum, maximum, threshold,
+#    brackets, source). Two rules with the same code but different values are
+#    different rules, and the hash says so.
+# 2. **A per-invoice snapshot.** The invoice stores the version, the source, the
+#    hash, the effective window and a JSON snapshot of the calculation inputs, so
+#    the arithmetic can be replayed without consulting the configuration.
+# 3. **An append-only ledger** (``timbre_rule_versions``) recording the content of
+#    every version the moment it is first used, plus triggers that refuse to
+#    update or delete a ``timbre_rules`` row referenced by a posted invoice.
+#
+# An invoice validated before this existed keeps ``NULL``. That is reported as
+# ``unavailable`` with the reason ``LEGACY_INVOICE_WITHOUT_RULE_IDENTITY`` —
+# never backfilled with today's configuration, which would be a fabricated
+# historical claim.
+
+PROVENANCE_RECORDED = "recorded"
+PROVENANCE_UNAVAILABLE = "unavailable"
+PROVENANCE_STAGES = ("validation", "revalidation", "draft_modification", "posting", "reversal")
+
+
+def timbre_rule_content_hash(rule: TimbreRule) -> str:
+    """A stable fingerprint of everything that makes this rule *this* rule."""
+    payload = {
+        "version_code": rule.version_code,
+        "source": rule.source,
+        "valid_from": rule.valid_from,
+        "valid_to": rule.valid_to,
+        "min_amount_dzd": rule.min_amount_dzd,
+        "max_amount_dzd": rule.max_amount_dzd,
+        "threshold_dzd": rule.threshold_dzd,
+        "brackets": [
+            {"up_to": b.get("up_to"), "rate": b.get("rate")} for b in rule.brackets
+        ],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def timbre_provenance_snapshot(
+    rule: TimbreRule,
+    *,
+    base_amount: Any,
+    payment_method: str,
+    computed_amount: Any,
+    stage: str,
+) -> Dict[str, Any]:
+    """The calculation inputs, stored on the invoice beside the result.
+
+    Everything needed to replay the arithmetic is here: the rule content, the
+    base it was applied to, the payment method that decides *whether* duty
+    applies at all, and the result. ``stage`` records when the identity was
+    written, so "recorded at posting" is never mistaken for "recorded at
+    validation".
+    """
+    if stage not in PROVENANCE_STAGES:
+        raise ValueError(f"UNKNOWN_PROVENANCE_STAGE:{stage}")
+    return {
+        "schema": "timbre-provenance-v1",
+        "stage": stage,
+        "rule": {
+            "version_code": rule.version_code,
+            "source": rule.source,
+            "content_hash": timbre_rule_content_hash(rule),
+            "valid_from": rule.valid_from,
+            "valid_to": rule.valid_to,
+            "min_amount_dzd": rule.min_amount_dzd,
+            "max_amount_dzd": rule.max_amount_dzd,
+            "threshold_dzd": rule.threshold_dzd,
+            "brackets": rule.brackets,
+        },
+        "calculation": {
+            "base_amount_dzd": format_dzd(base_amount),
+            "payment_method": (payment_method or "").upper(),
+            "amount_timbre_dzd": format_dzd(computed_amount),
+        },
+    }
+
+
+def record_timbre_rule_version(
+    conn: sqlite3.Connection,
+    *,
+    company_id: int,
+    rule: TimbreRule,
+    now_iso: str,
+    invoice_id: Optional[int] = None,
+) -> None:
+    """First use of a rule version writes its content to the append-only ledger.
+
+    ``DO NOTHING`` on conflict: the ledger keeps the *first* recorded content for
+    a (company, version, hash) triple, because that is the copy the invoices were
+    posted against. A rule whose content later changed produces a different hash
+    and therefore a new row, which is exactly the audit trail we want.
+    """
+    conn.execute(
+        """
+        INSERT INTO timbre_rule_versions (
+            company_id, version_code, content_hash, source,
+            valid_from, valid_to, min_amount_dzd, max_amount_dzd,
+            threshold_dzd, brackets_json, first_used_at, first_used_by_invoice_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, version_code, content_hash) DO NOTHING
+        """,
+        (
+            company_id,
+            rule.version_code,
+            timbre_rule_content_hash(rule),
+            rule.source,
+            rule.valid_from,
+            rule.valid_to,
+            rule.min_amount_dzd,
+            rule.max_amount_dzd,
+            rule.threshold_dzd,
+            json.dumps(rule.brackets, sort_keys=True),
+            now_iso,
+            invoice_id,
+        ),
+    )
+
+
+def persist_invoice_timbre_provenance(
+    conn: sqlite3.Connection,
+    *,
+    company_id: int,
+    invoice_id: int,
+    rule: TimbreRule,
+    base_amount: Any,
+    payment_method: str,
+    computed_amount: Any,
+    now_iso: str,
+    stage: str = "validation",
+) -> Dict[str, Any]:
+    """Write the rule identity and the calculation snapshot onto the invoice."""
+    snapshot = timbre_provenance_snapshot(
+        rule,
+        base_amount=base_amount,
+        payment_method=payment_method,
+        computed_amount=computed_amount,
+        stage=stage,
+    )
+    record_timbre_rule_version(
+        conn, company_id=company_id, rule=rule, now_iso=now_iso, invoice_id=invoice_id
+    )
+    conn.execute(
+        """
+        UPDATE supplier_invoices
+        SET timbre_rule_version = ?, timbre_rule_source = ?, timbre_rule_hash = ?,
+            timbre_rule_valid_from = ?, timbre_rule_valid_to = ?, timbre_snapshot_json = ?
+        WHERE id = ? AND company_id = ?
+        """,
+        (
+            rule.version_code,
+            rule.source,
+            snapshot["rule"]["content_hash"],
+            rule.valid_from,
+            rule.valid_to,
+            json.dumps(snapshot, sort_keys=True),
+            invoice_id,
+            company_id,
+        ),
+    )
+    return snapshot
+
+
+def inherit_timbre_provenance(
+    conn: sqlite3.Connection,
+    *,
+    company_id: int,
+    source_invoice_id: int,
+    target_invoice_id: int,
+) -> bool:
+    """Copy the original invoice's provenance onto a reversal.
+
+    A credit note reverses a specific calculation, so it must cite the same rule
+    identity rather than whatever is configured when the credit note happens to
+    be raised. Returns ``False`` when the source invoice has no provenance (a
+    legacy invoice) — in that case the credit note stays ``NULL`` too, because
+    the honest statement is "not recorded", not today's rule.
+    """
+    source = conn.execute(
+        """
+        SELECT timbre_rule_version, timbre_rule_source, timbre_rule_hash,
+               timbre_rule_valid_from, timbre_rule_valid_to, timbre_snapshot_json
+        FROM supplier_invoices WHERE id = ? AND company_id = ?
+        """,
+        (source_invoice_id, company_id),
+    ).fetchone()
+    if source is None or source["timbre_rule_version"] is None:
+        return False
+    snapshot = json.loads(source["timbre_snapshot_json"]) if source["timbre_snapshot_json"] else {}
+    snapshot["inherited_from_invoice_id"] = int(source_invoice_id)
+    snapshot["stage"] = "reversal"
+    conn.execute(
+        """
+        UPDATE supplier_invoices
+        SET timbre_rule_version = ?, timbre_rule_source = ?, timbre_rule_hash = ?,
+            timbre_rule_valid_from = ?, timbre_rule_valid_to = ?, timbre_snapshot_json = ?
+        WHERE id = ? AND company_id = ?
+        """,
+        (
+            source["timbre_rule_version"],
+            source["timbre_rule_source"],
+            source["timbre_rule_hash"],
+            source["timbre_rule_valid_from"],
+            source["timbre_rule_valid_to"],
+            json.dumps(snapshot, sort_keys=True),
+            target_invoice_id,
+            company_id,
+        ),
+    )
+    return True
+
+
+def describe_invoice_timbre_provenance(invoice_row: Any) -> Dict[str, Any]:
+    """What an invoice can prove about its own stamp duty.
+
+    Returns ``recorded`` with the identity and the snapshot, or ``unavailable``
+    with a reason. It never infers an identity from the current configuration.
+    """
+    version = invoice_row["timbre_rule_version"] if invoice_row is not None else None
+    if not version:
+        return {
+            "provenance": PROVENANCE_UNAVAILABLE,
+            "reason": "LEGACY_INVOICE_WITHOUT_RULE_IDENTITY",
+            "amount_timbre_dzd": invoice_row["amount_timbre_dzd"] if invoice_row is not None else None,
+            "note": (
+                "This invoice was validated before rule provenance was recorded. Its "
+                "amount is stored and unchanged, but which rule produced it is unknown "
+                "and is deliberately not guessed."
+            ),
+        }
+    snapshot: Dict[str, Any] = {}
+    if invoice_row["timbre_snapshot_json"]:
+        try:
+            snapshot = json.loads(invoice_row["timbre_snapshot_json"])
+        except (TypeError, ValueError):
+            snapshot = {"error": "SNAPSHOT_UNPARSEABLE"}
+    return {
+        "provenance": PROVENANCE_RECORDED,
+        "rule_version": version,
+        "rule_source": invoice_row["timbre_rule_source"],
+        "rule_content_hash": invoice_row["timbre_rule_hash"],
+        "valid_from": invoice_row["timbre_rule_valid_from"],
+        "valid_to": invoice_row["timbre_rule_valid_to"],
+        "snapshot": snapshot,
+    }
+
+
+def assert_timbre_rule_unchanged(
+    invoice_row: Any,
+    current_rule: TimbreRule,
+) -> None:
+    """Refuse when the rule in force now differs from the one on the invoice.
+
+    A draft validated under one version and posted after the operator installed a
+    new one must not silently move money. Legacy invoices (no recorded identity)
+    are exempt: they have nothing to compare against, and refusing them would
+    block work that predates the control.
+    """
+    recorded = invoice_row["timbre_rule_hash"] if invoice_row is not None else None
+    if not recorded:
+        return
+    current = timbre_rule_content_hash(current_rule)
+    if recorded != current:
+        raise TaxRuleConfigurationError(
+            "TIMBRE_RULE_CHANGED_SINCE_VALIDATION:"
+            f"recorded={invoice_row['timbre_rule_version']}@{recorded[:12]},"
+            f"current={current_rule.version_code}@{current[:12]}; "
+            "re-validate the invoice against the current rule before posting"
+        )
 
 
 def generate_g50_preparation_workbook(

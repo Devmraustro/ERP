@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
 
+from .localization import describe_invoice_timbre_provenance
 from .database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
@@ -428,6 +429,10 @@ def read_supplier_invoice_secure(
                 ]
                 result = dict(inv)
                 result["lines"] = lines
+                # Phase 40 (F-04): an invoice can say which stamp-duty rule
+                # produced its tax, or say that it cannot. It is never inferred
+                # from the configuration in force today.
+                result["timbre_provenance"] = describe_invoice_timbre_provenance(inv)
 
     if denial is not None:
         raise denial

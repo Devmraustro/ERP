@@ -455,12 +455,19 @@ the custody, provenance, scale and legal gates are not, and remain open.
 
 | Item | Value |
 |---|---|
-| Phase 32 commit | `5b3020a501a6e01970b883ee5372205402d75898` (`arena/7f12d627-erp`) |
+| Phase 32 code + tests | `5b3020a501a6e01970b883ee5372205402d75898` (`arena/7f12d627-erp`) — `dz_erp/decimal_utils.py`, the audit matrix, the register rows, the Phase 22 probe |
+| Phase 32 report | `9092e42a831e1312b87ed3258ed772fee5528a7c` (docs-only: this file and section 13) |
 | Parent | `e4e47b3bf4376e804f17b23e63c86f7fe384056c` (Phase 31 head, unchanged) |
 | Pull request | **#7** `audit(phase32): independent integration audit of the Phases 29-31 chain` — **Draft** |
 | Base | `fix/phase29-invoice-discount-and-line-net-consistency` (PR #6 head), so the chain #3 → #4 → #5 → #6 → #7 stays additive and no existing PR is rewritten |
 | State | `MERGEABLE` / `CLEAN`, Draft (must stay Draft pending human review) |
-| CI on the published SHA | run **41076741380** — 3/3 jobs pass: 3.11 full suite + staging acceptance + risk-register validation (17 steps), 3.12 full suite (15 steps, 2 by design skipped), Windows rotation/backup + staging (14 steps) |
+| CI on `5b3020a5` | run **41076741380** — 3/3 jobs pass: 3.11 full suite + staging acceptance + risk-register validation (17 steps), 3.12 full suite (15 steps, 2 by design skipped), Windows rotation/backup + staging (14 steps) |
+| CI on `9092e42a` | run **41078086085** — 3/3 jobs pass (same step sets) |
+
+Each commit on this branch was verified by CI for its own exact SHA; the two
+runs above are the ones that carry the audit's code/tests and this report. A
+later documentation-only commit cannot invalidate the code verification, because
+it changes no file under `dz_erp/` or `tests/`.
 
 Nothing was merged, closed, rebased or force-pushed; `main` is untouched and no
 file was deleted. PRs #3–#6 remain exactly as they were found.

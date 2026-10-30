@@ -1727,8 +1727,8 @@ def decide_extracted_field_review(
       entry point: it creates the row with honest provenance
       (``human-manual-entry``, no measured confidence) rather than fabricating
       an engine reading. On a line row it rewrites the quantity — or, for
-      ``line_unit_price`` decisions, the unit price — and recomputes the line
-      amount.
+      ``line_unit_price`` decisions the unit price, or for ``line_discount``
+      decisions the discount — and recomputes the line amount.
     * ``FLAGGED`` — cannot be verified. Blocks the document until superseded.
     * ``NOT_PRESENT`` — the field legitimately does not exist on the document
       (optional fields only; a required critical field must be transcribed,
@@ -1744,6 +1744,7 @@ def decide_extracted_field_review(
         FIELD_DECISIONS,
         LINE_ITEM_FIELD,
         LINE_PRICE_FIELD,
+        LINE_DISCOUNT_FIELD,
         ReviewPolicyValueError,
     )
 
@@ -1752,9 +1753,9 @@ def decide_extracted_field_review(
         raise ReviewPolicyValueError(
             f"Unknown review decision {decision!r}; expected one of {FIELD_DECISIONS}."
         )
-    if field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD) and line_index is None:
+    if field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD, LINE_DISCOUNT_FIELD) and line_index is None:
         raise ReviewPolicyValueError("A line-item decision requires line_index.")
-    if field_name not in (LINE_ITEM_FIELD, LINE_PRICE_FIELD) and line_index is not None:
+    if field_name not in (LINE_ITEM_FIELD, LINE_PRICE_FIELD, LINE_DISCOUNT_FIELD) and line_index is not None:
         raise ReviewPolicyValueError("line_index is only valid for line-item decisions.")
     if decision in DECISIONS_REQUIRING_VALUE and value in (None, ""):
         raise ReviewPolicyValueError(f"{decision} requires a value.")
@@ -1855,6 +1856,7 @@ def _apply_field_decision(
         HUMAN_ENTRY_RAW,
         LINE_ITEM_FIELD,
         LINE_PRICE_FIELD,
+        LINE_DISCOUNT_FIELD,
         ReviewPolicyValueError,
         TEXT_FALLBACK_RULE,
         rule_for,
@@ -1862,7 +1864,7 @@ def _apply_field_decision(
     )
 
     user_id = int(user["id"])
-    is_line = field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD)
+    is_line = field_name in (LINE_ITEM_FIELD, LINE_PRICE_FIELD, LINE_DISCOUNT_FIELD)
     if is_line:
         # Both line decisions bind to the row extraction wrote: the line JSON
         # payload lives on the single ``line_item_json`` field row per index.
@@ -1908,6 +1910,22 @@ def _apply_field_decision(
                     )
                 except (ValueError, TypeError):
                     current_value = None
+            elif field_name == LINE_DISCOUNT_FIELD:
+                # The extraction pattern emits no discount, so an absent
+                # ``discount_pct`` means "never transcribed" — current value
+                # none, transcription required. A previously transcribed value
+                # is compared in the 2-decimal form the invoice column stores;
+                # a malformed one is treated exactly like an absent one
+                # (transcription is the repair, never a guessed zero).
+                raw_discount = payload.get("discount_pct")
+                try:
+                    current_value = (
+                        None
+                        if raw_discount in (None, "")
+                        else format_dzd(to_decimal(str(raw_discount)))
+                    )
+                except (ValueError, TypeError):
+                    current_value = None
             else:
                 # Quantities are compared in the canonical 6-decimal form.
                 try:
@@ -1931,6 +1949,8 @@ def _apply_field_decision(
         if is_line:
             if field_name == LINE_PRICE_FIELD:
                 seen = _canonical_line_price(expected_value)
+            elif field_name == LINE_DISCOUNT_FIELD:
+                seen = _canonical_line_discount(expected_value)
             else:
                 seen = _canonical_line_qty(expected_value)
             if seen != current_value:
@@ -1991,6 +2011,8 @@ def _apply_field_decision(
         elif is_line:
             if field_name == LINE_PRICE_FIELD:
                 _rewrite_line_unit_price(conn, row, reviewed_value)
+            elif field_name == LINE_DISCOUNT_FIELD:
+                _rewrite_line_discount(conn, row, reviewed_value)
             else:
                 _rewrite_line_quantity(conn, row, reviewed_value)
             conn.execute(
@@ -2130,6 +2152,21 @@ def _canonical_line_price(value: Any) -> Optional[str]:
         return None
 
 
+def _canonical_line_discount(value: Any) -> Optional[str]:
+    """Canonical 2-decimal form of a discount, mirroring the invoice column.
+
+    ``None`` for an absent or malformed input — the caller treats that as "no
+    current value", which routes the reviewer to transcription instead of
+    confirmation.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return format_dzd(to_decimal(str(value)))
+    except (ValueError, TypeError):
+        return None
+
+
 def _rewrite_line_quantity(conn: Any, row: Any, new_qty: str) -> None:
     """Rewrite one line row's quantity and recompute its HT amount in place.
 
@@ -2163,6 +2200,29 @@ def _rewrite_line_unit_price(conn: Any, row: Any, new_price: str) -> None:
     discount = to_decimal(payload.get("discount_pct", "0.00"))
     line_ht = round_dzd(qty * unit_price * ((Decimal("100.00") - discount) / Decimal("100.00")))
     payload["unit_price_dzd"] = f"{round_qty(unit_price):.6f}"
+    payload["line_ht_dzd"] = format_dzd(line_ht)
+    conn.execute(
+        "UPDATE ocr_extracted_fields SET normalized_value = ? WHERE id = ?",
+        (json.dumps(payload, ensure_ascii=False), row["id"]),
+    )
+
+
+def _rewrite_line_discount(conn: Any, row: Any, new_discount: str) -> None:
+    """Write one line row's discount (2-decimal) and recompute its HT amount.
+
+    The extraction pattern emits no discount, so this is the only writer of
+    ``discount_pct`` in the payload: an attributed transcription. The line
+    amount is recomputed from the payload's decided quantity and unit price
+    with the same ``qty × PU × (1 − discount/100)`` formula invoice validation
+    enforces, so a corrected discount re-derives the line net deterministically
+    instead of leaving a stale reading behind.
+    """
+    payload = json.loads(str(row["normalized_value"]))
+    discount = to_decimal(new_discount)
+    qty = to_decimal(payload.get("qty", "0"))
+    unit_price = to_decimal(payload.get("unit_price_dzd", "0"))
+    line_ht = round_dzd(qty * unit_price * ((Decimal("100.00") - discount) / Decimal("100.00")))
+    payload["discount_pct"] = format_dzd(discount)
     payload["line_ht_dzd"] = format_dzd(line_ht)
     conn.execute(
         "UPDATE ocr_extracted_fields SET normalized_value = ? WHERE id = ?",

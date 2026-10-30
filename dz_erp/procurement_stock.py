@@ -40,6 +40,7 @@ def compute_invoice_payload_hash(
                 "po_line_id": line.get("po_line_id"),
                 "qty": f"{round_qty(line['qty']):.6f}",
                 "unit_price_dzd": f"{round_qty(line['unit_price_dzd']):.6f}",
+                "discount_pct": format_dzd(line.get("discount_pct", "0.00")),
                 "tax_rate": f"{to_decimal(line.get('tax_rate', '19.0')):.1f}",
                 "line_ht_dzd": format_dzd(line["line_ht_dzd"]),
             }
@@ -76,10 +77,13 @@ def _source_invoice_mismatches(
     Review completeness alone is insufficient: a perfectly reviewed source
     document must not authorize a different invoice payload. This comparison
     is deliberately performed from the current rows in the caller's IMMEDIATE
-    transaction and is repeated at submit and approval. Both reviewable line
-    elements — quantity and unit price — are compared against the invoice's
-    lines in their canonical 6-decimal forms, with exact equality: the price
-    the reviewer bound to the paper is the price the invoice must carry.
+    transaction and is repeated at submit and approval. All three reviewable
+    line elements — quantity, unit price and discount — are compared against
+    the invoice's lines in their canonical forms (6-decimal quantity/price,
+    2-decimal discount), with exact equality, and each line's net amount is
+    re-derived from the decided values and compared with the invoice line:
+    the price and discount the reviewer bound to the paper are the price and
+    discount the invoice must carry, and the net must follow from them.
     """
     fields = {item["field_name"]: item for item in evaluation["fields"]}
     mismatches: List[str] = []
@@ -150,7 +154,7 @@ def _source_invoice_mismatches(
     # this).
     if source_lines:
         invoice_lines = conn.execute(
-            "SELECT qty, unit_price_dzd FROM supplier_invoice_lines"
+            "SELECT qty, unit_price_dzd, discount_pct, line_ht_dzd FROM supplier_invoice_lines"
             " WHERE company_id = ? AND invoice_id = ? ORDER BY id",
             (company_id, invoice["id"]),
         ).fetchall()
@@ -163,8 +167,11 @@ def _source_invoice_mismatches(
                 # row; a divergence means a corrupted evaluation. Refuse to
                 # compare rather than guess which price belongs to which line.
                 mismatches.append("LINE_PRICE_EVIDENCE_INCONSISTENT")
-            for index, (source_line, invoice_line, price_eval) in enumerate(
-                zip(source_lines, invoice_lines, line_prices), start=1
+            line_discounts = evaluation.get("line_discounts") or []
+            if len(line_discounts) != len(source_lines):
+                mismatches.append("LINE_DISCOUNT_EVIDENCE_INCONSISTENT")
+            for index, (source_line, invoice_line, price_eval, discount_eval) in enumerate(
+                zip(source_lines, invoice_lines, line_prices, line_discounts), start=1
             ):
                 try:
                     source_qty = round_qty(to_decimal(str(source_line["value"])))
@@ -174,9 +181,10 @@ def _source_invoice_mismatches(
                     continue
                 if source_qty != invoice_qty:
                     mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_MISMATCH")
-                # zip truncates to the shortest, so a short price list can
-                # only shrink the compared prefix — the count divergence was
-                # already flagged above, which blocks regardless.
+                # zip truncates to the shortest, so a short price/discount
+                # list can only shrink the compared prefix — the count
+                # divergence was already flagged above, which blocks
+                # regardless.
                 raw_source_price = price_eval["value"]
                 try:
                     source_price = round_qty(to_decimal(str(raw_source_price)))
@@ -186,6 +194,45 @@ def _source_invoice_mismatches(
                     continue
                 if raw_source_price is None or source_price != invoice_price:
                     mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISMATCH")
+                # The decided discount is the third binding: exact 2-decimal
+                # equality with the invoice line's first-class discount
+                # column. An invoice discount is never clamped or defaulted:
+                # an unparseable or missing reading is refused, not treated
+                # as zero.
+                raw_source_discount = discount_eval["value"]
+                try:
+                    source_discount = round_dzd(to_decimal(str(raw_source_discount)))
+                    invoice_discount = round_dzd(to_decimal(str(invoice_line["discount_pct"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_UNPARSEABLE")
+                    continue
+                if raw_source_discount is None or source_discount != invoice_discount:
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISMATCH")
+                # Line-net comparison, only where the representations are
+                # semantically equivalent: both sides mean the same
+                # ``qty × PU × (1 − discount/100)`` rounded to 2 decimals
+                # (``round_dzd``, ROUND_HALF_UP). The source net is derived
+                # from the *decided* quantity, price and discount — never
+                # from the payload's stored ``line_ht_dzd`` reading, which is
+                # a derived value nobody decided. Documented rounding policy:
+                # the decided 2-decimal discount is authoritative; an invoice
+                # whose net was validated against a raw discount with more
+                # precision than the canonical form may be flagged here by up
+                # to a centime — the honest repair is entering the invoice
+                # with the canonical 2-decimal discount.
+                derived_source_ht = round_dzd(
+                    source_qty * source_price * ((Decimal("100.00") - source_discount) / Decimal("100.00"))
+                )
+                try:
+                    invoice_ht = round_dzd(to_decimal(str(invoice_line["line_ht_dzd"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_LINE_HT_SOURCE_UNPARSEABLE")
+                    continue
+                if derived_source_ht != invoice_ht:
+                    mismatches.append(
+                        f"LINE_{index}_LINE_HT_SOURCE_MISMATCH:derived={derived_source_ht:.2f}"
+                        f"!=invoiced={invoice_ht:.2f}"
+                    )
 
     return mismatches
 
@@ -717,6 +764,12 @@ def create_and_validate_supplier_invoice(
             rate = to_decimal(line.get("tax_rate", "19.0"))
             if rate not in (Decimal("0.0"), Decimal("9.0"), Decimal("19.0")):
                 validation_errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
+            # Documented business rule (Phase 31): a discount is a percentage
+            # in [0, 100] inclusive. A negative or >100 discount is refused as
+            # a validation error — never clamped into range — so the invoice
+            # stays in NeedsReview and cannot be submitted.
+            if disc < Decimal("0.00") or disc > Decimal("100.00"):
+                validation_errors.append(f"LINE_{idx + 1}_DISCOUNT_OUT_OF_RANGE:{disc}")
 
             expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
             declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
@@ -1084,8 +1137,12 @@ def modify_draft_invoice_line(
 
         qty = round_qty(line["qty"])
         pu = round_qty(new_unit_price_dzd)
+        # The line's persisted discount is part of the net-amount formula; a
+        # price edit must re-derive the line amount from it, not silently drop
+        # the discount the line (and the payload hash) carries.
+        disc = to_decimal(line["discount_pct"])
         rate = to_decimal(line["tax_rate"])
-        new_ht = round_dzd(qty * pu)
+        new_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
         new_tva = round_dzd(new_ht * (rate / Decimal("100.00")))
         new_ttc = round_dzd(new_ht + new_tva)
 

@@ -306,6 +306,23 @@ def _confirm_extracted(db: ERPDatabase, company_id: int, document_id: str, user_
             field_name="line_unit_price", decision="CONFIRMED",
             expected_value=pev["value"], line_index=pev["line_index"],
         )
+    for dev in ev["line_discounts"]:
+        # The extraction emits no discount; the synthetic fixture lines carry
+        # no discount column and their printed nets equal qty × PU, so 0.00 is
+        # the honest transcription for an absent discount. A discount already
+        # on the payload (an earlier transcription) is confirmed as read.
+        if dev["value"] is not None:
+            decide_extracted_field_review(
+                db, company_id=company_id, user_id=user_id, document_id=document_id,
+                field_name="line_discount", decision="CONFIRMED",
+                expected_value=dev["value"], line_index=dev["line_index"],
+            )
+        else:
+            decide_extracted_field_review(
+                db, company_id=company_id, user_id=user_id, document_id=document_id,
+                field_name="line_discount", decision="CORRECTED",
+                value="0.00", line_index=dev["line_index"],
+            )
     final = _evaluate(db, company_id, document_id)
     assert final["satisfied"], final["blocking"]
     return final
@@ -374,9 +391,17 @@ def test_field_review_satisfies_the_gate_and_approval_rechecks_it(tmp_path: Path
             " WHERE document_id = ? ORDER BY id",
             (doc["document_id"],),
         ).fetchall()
-    assert len(rows) >= 10  # 8 required header fields + line quantity + line price (+ NOT_PRESENTs)
-    # Confirmed and honest-absent only: no correction, flag or stale record.
-    assert {r["decision"] for r in rows} <= {"CONFIRMED", "NOT_PRESENT"}
+    assert len(rows) >= 10  # 8 required header fields + line qty + price + discount (+ NOT_PRESENTs)
+    # Header fields and extracted line readings are confirmed or honestly
+    # absent only — no correction, flag or stale record. Line discounts are
+    # the one legitimate CORRECTED flow here: extraction never emits them, so
+    # each line's 0.00 is an attributed transcription (the fixture's printed
+    # nets equal qty × PU, proving the discount absent on the paper).
+    non_discount_rows = [r for r in rows if r["field_name"] != "line_discount"]
+    discount_rows = [r for r in rows if r["field_name"] == "line_discount"]
+    assert {r["decision"] for r in non_discount_rows} <= {"CONFIRMED", "NOT_PRESENT"}
+    assert {r["decision"] for r in discount_rows} == {"CORRECTED"}
+    assert all(r["reviewed_value"] == "0.00" for r in discount_rows)
     assert all(r["reviewed_by_id"] == 2 for r in rows)
     assert next(r for r in rows if r["field_name"] == "amount_ttc_dzd")["reviewed_value"] == "1190.00"
 
@@ -868,6 +893,527 @@ def test_sub_centime_price_identity_is_enforced_at_six_decimals(tmp_path: Path) 
     _confirm_extracted(db, 1, doc["document_id"])
     submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
     assert submitted["workflow_state"] == "PendingApproval"
+
+
+# ---------------------------------------------------------------------------
+# Phase 31: the decided discount and the derived line net
+# ---------------------------------------------------------------------------
+
+
+def _decide_discounted_review(db: ERPDatabase, document_id: str, *, discount: str = "10.00",
+                              ht: str = "900.00", tva: str = "171.00", ttc: str = "1071.00") -> dict:
+    """Complete a review where the paper shows a discount the extraction missed.
+
+    The reviewer transcribes the line discount, corrects the header totals to
+    the discounted values (extraction read the gross header), and confirms
+    everything else at its current value. For ``_SPEC`` (2 × 500.00, 10 %
+    discount): HT 900.00, TVA 171.00, TTC 1071.00 (BANK_TRANSFER → timbre 0).
+    """
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=document_id,
+        field_name="amount_ht_dzd", decision=DECISION_CORRECTED, value=ht,
+    )
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=document_id,
+        field_name="amount_tva_dzd", decision=DECISION_CORRECTED, value=tva,
+    )
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=document_id,
+        field_name="amount_ttc_dzd", decision=DECISION_CORRECTED, value=ttc,
+    )
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=document_id,
+        field_name="line_discount", decision=DECISION_CORRECTED, value=discount, line_index=0,
+    )
+    return _confirm_extracted(db, 1, document_id)
+
+
+def test_reviewed_discount_and_line_net_match_flows(tmp_path: Path) -> None:
+    """A discounted paper, fully decided, authorizes exactly that invoice.
+
+    The line discount is transcribed (10 %), the header totals corrected to
+    the discounted values, and the invoice carries discount_pct 10.00 with the
+    net 2 × 500.00 × 0.90 = 900.00 — submit and approval both pass the gate:
+    discount equality and the derived line net agree exactly.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    evaluation = _decide_discounted_review(db, doc["document_id"])
+    assert evaluation["satisfied"]
+    assert evaluation["line_discounts"][0]["value"] == "10.00"
+    assert evaluation["line_discounts"][0]["satisfied"] is True
+
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.00",
+                "tax_rate": "19", "line_ht_dzd": "900.00"}],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+    assert invoice["workflow_state"] == "Validated"
+    submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert submitted["workflow_state"] == "PendingApproval"
+    approved = decide_invoice_approval(
+        db, company_id=1, approver_user_id=3, invoice_id=invoice["invoice_id"], approve=True
+    )
+    assert approved["workflow_state"] == "Approved"
+
+
+def test_mismatched_source_discount_blocks_submission(tmp_path: Path) -> None:
+    """A decided discount the invoice ignores is flagged, and the net with it.
+
+    The paper shows a 10 % discount; the invoice is entered without one. Both
+    the discount comparison and the derived net (900.00 from the decided
+    values vs the invoiced 1000.00) are flagged — audited, chain valid.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    evaluation = _decide_discounted_review(db, doc["document_id"])
+    assert evaluation["satisfied"]
+
+    # The invoice matches the gross extraction (no discount anywhere), which
+    # is exactly the payload the extraction's raw header totals would accept.
+    invoice = _make_invoice(db, doc["document_id"])
+    assert invoice["workflow_state"] == "Validated"
+    with pytest.raises(FinancialIntegrityError) as excinfo:
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    message = str(excinfo.value)
+    assert "DOCUMENT_INVOICE_MISMATCH" in message
+    assert "LINE_1_DISCOUNT_SOURCE_MISMATCH" in message
+    assert "LINE_1_LINE_HT_SOURCE_MISMATCH:derived=900.00!=invoiced=1000.00" in message
+    blocks = [a for a in _audit_actions(db) if a[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH"]
+    assert len(blocks) == 1 and blocks[0][0] == 2
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_line_net_rounding_boundary_authoritative_discount(tmp_path: Path) -> None:
+    """The decided 2-decimal discount is authoritative for the derived net.
+
+    An invoice entered with a raw discount of more precision than the invoice
+    column stores (10.004 → stored 10.00) passes its own HT math against the
+    raw value, but the gate re-derives the net from the decided 2-decimal
+    discount and flags the centime difference — the honest repair is entering
+    the invoice with the canonical 2-decimal discount. No discount mismatch
+    fires: the stored discount equals the decided one exactly.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    # 2 × 500.00 with raw 10.004 % → net 899.96 (raw-derived); TVA 170.99.
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.004",
+                "tax_rate": "19", "line_ht_dzd": "899.96"}],
+        amount_ht="899.96", amount_tva="170.99", amount_ttc="1070.95",
+    )
+    assert invoice["workflow_state"] == "Validated"
+    _decide_discounted_review(db, doc["document_id"], discount="10.004",
+                              ht="899.96", tva="170.99", ttc="1070.95")
+    with pytest.raises(FinancialIntegrityError) as excinfo:
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    message = str(excinfo.value)
+    assert "LINE_1_LINE_HT_SOURCE_MISMATCH:derived=900.00!=invoiced=899.96" in message
+    assert "LINE_1_DISCOUNT_SOURCE_MISMATCH" not in message
+
+
+def test_discount_decision_boundaries_are_refused_or_bound_exactly(tmp_path: Path) -> None:
+    """Percent boundaries: [0, 100] inclusive binds canonically; outside is refused.
+
+    A negative transcription is refused (`FIELD_VALUE_NEGATIVE_AMOUNT`), so is
+    anything above 100 (`FIELD_VALUE_DISCOUNT_OUT_OF_RANGE`); French decimals
+    land on the canonical 2-decimal form; 100.00 binds and re-derives the net
+    to 0.00. No value is ever clamped.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+
+    with pytest.raises(ReviewPolicyValueError, match="FIELD_VALUE_NEGATIVE_AMOUNT"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_discount", decision=DECISION_CORRECTED, value="-5", line_index=0,
+        )
+    with pytest.raises(ReviewPolicyValueError, match="FIELD_VALUE_DISCOUNT_OUT_OF_RANGE"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_discount", decision=DECISION_CORRECTED, value="100.01", line_index=0,
+        )
+    # French decimal input binds canonically and recomputes the net.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_discount", decision=DECISION_CORRECTED, value="12,5", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["discount_pct"] == "12.50"
+    assert payload["line_ht_dzd"] == "875.00"  # 2 × 500.00 × (1 − 12.5 %)
+    # Idempotent replay of the same transcription.
+    replay = decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_discount", decision=DECISION_CORRECTED, value="12.50", line_index=0,
+    )
+    assert replay["idempotent_replay"] is True
+    # The inclusive upper boundary binds and zeroes the net.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_discount", decision=DECISION_CORRECTED, value="100", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["discount_pct"] == "100.00"
+    assert payload["line_ht_dzd"] == "0.00"
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["line_discounts"][0]["satisfied"] is True
+
+
+def test_invoice_creation_refuses_out_of_range_discount(tmp_path: Path) -> None:
+    """The documented rule also holds at the financial record: no clamping.
+
+    An invoice line with a negative or >100 discount lands in NeedsReview with
+    ``LINE_1_DISCOUNT_OUT_OF_RANGE`` and cannot be submitted — even when its
+    declared net was made arithmetically consistent with the invalid rate.
+    """
+    db, _vault, _ = _make_env(tmp_path)
+    # −5 % would *raise* the net: 2 × 500.00 × 1.05 = 1050.00.
+    invoice = _make_invoice(
+        db,
+        invoice_no="FAC-2026-0002",
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "-5.00",
+                "tax_rate": "19", "line_ht_dzd": "1050.00"}],
+        amount_ht="1050.00", amount_tva="199.50", amount_ttc="1249.50",
+    )
+    assert invoice["workflow_state"] == "NeedsReview"
+    assert any(e.startswith("LINE_1_DISCOUNT_OUT_OF_RANGE:") for e in invoice["validation_errors"])
+    with pytest.raises(FinancialIntegrityError, match="must be 'Validated'"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    # >100 % would *negate* the net: 2 × 500.00 × (1 − 1.5) = −500.00.
+    invoice = _make_invoice(
+        db,
+        invoice_no="FAC-2026-0003",
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "150.00",
+                "tax_rate": "19", "line_ht_dzd": "-500.00"}],
+        amount_ht="-500.00", amount_tva="-95.00", amount_ttc="-595.00",
+    )
+    assert invoice["workflow_state"] == "NeedsReview"
+    assert any(e.startswith("LINE_1_DISCOUNT_OUT_OF_RANGE:") for e in invoice["validation_errors"])
+
+
+def test_undecided_discount_blocks_until_transcribed(tmp_path: Path) -> None:
+    """A fully-confirmed quantity and price do not license an undecided discount.
+
+    With every decision made except the line discount, the document stays
+    unsatisfied (`REQUIRED_FIELD_NOT_DECIDED:line_discount[0]`) and the
+    invoice is refused; transcribing the honest 0.00 satisfies the review and
+    the same invoice flows.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+
+    ev = _evaluate(db, 1, doc["document_id"])
+    for fev in ev["fields"]:
+        if fev["status"] == "missing":
+            if not fev["required"]:
+                decide_extracted_field_review(
+                    db, company_id=1, user_id=2, document_id=doc["document_id"],
+                    field_name=fev["field_name"], decision=DECISION_NOT_PRESENT,
+                )
+            continue
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name=fev["field_name"], decision="CONFIRMED", expected_value=fev["value"],
+        )
+    for lev in ev["lines"]:
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_item_json", decision="CONFIRMED",
+            expected_value=lev["value"], line_index=lev["line_index"],
+        )
+    for pev in ev["line_prices"]:
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_unit_price", decision="CONFIRMED",
+            expected_value=pev["value"], line_index=pev["line_index"],
+        )
+    # The discount is deliberately left undecided.
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is False
+    assert "REQUIRED_FIELD_NOT_DECIDED:line_discount[0]" in evaluation["blocking"]
+    with pytest.raises(FinancialIntegrityError, match="DOCUMENT_REVIEW_UNSATISFIED"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    # The honest transcription closes the gap: the paper's net equals
+    # qty × PU, proving the discount absent.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_discount", decision=DECISION_CORRECTED, value="0.00", line_index=0,
+    )
+    submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert submitted["workflow_state"] == "PendingApproval"
+
+
+def test_absent_or_malformed_payload_discount_routes_to_transcription(tmp_path: Path) -> None:
+    """A discount that is not (correctly) on file cannot be confirmed.
+
+    Extraction never emits a discount, and an out-of-band malformed one is
+    just as unreviewable: CONFIRMED is refused in both cases — the evidence
+    the reviewer claims to have read is not there — and a CORRECTED
+    transcription is the only repair.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+
+    # Absent (extraction never wrote it): confirmed-at-zero is refused...
+    with pytest.raises(FinancialIntegrityError, match="FIELD_VALUE_CHANGED_SINCE_READ"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_discount", decision="CONFIRMED",
+            expected_value="0.00", line_index=0,
+        )
+    # ...and a malformed out-of-band write is treated exactly the same.
+    _set_line_payload(db, doc["document_id"], lambda p: p.update({"discount_pct": "abc"}))
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["line_discounts"][0]["status"] == "missing"
+    with pytest.raises(FinancialIntegrityError, match="FIELD_VALUE_CHANGED_SINCE_READ"):
+        decide_extracted_field_review(
+            db, company_id=1, user_id=2, document_id=doc["document_id"],
+            field_name="line_discount", decision="CONFIRMED",
+            expected_value="0.00", line_index=0,
+        )
+    # Transcription repairs both: the payload carries the canonical value and
+    # the review binds to it.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=2, document_id=doc["document_id"],
+        field_name="line_discount", decision=DECISION_CORRECTED, value="0.00", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["discount_pct"] == "0.00"
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["line_discounts"][0]["satisfied"] is True
+
+
+def test_source_discount_changed_after_decision_blocks_and_rebinds(tmp_path: Path) -> None:
+    """A source discount edited after the reviewer bound it cannot ride through.
+
+    The bound decision goes stale, the gate refuses on the review itself, a
+    CORRECTED transcription re-binds to the current payload value (rewriting
+    the derived net), and the previously matching invoice is then refused on
+    both the discount and the net — fail closed in both directions.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    _decide_discounted_review(db, doc["document_id"])  # 10 % decided, headers 900/171/1071
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.00",
+                "tax_rate": "19", "line_ht_dzd": "900.00"}],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+
+    # Out-of-band change of the source discount after the binding decision.
+    _set_line_payload(db, doc["document_id"], lambda p: p.update({"discount_pct": "20.00"}))
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is False
+    assert "FIELD_FLAGGED:line_discount[0]" in evaluation["blocking"]
+    with pytest.raises(FinancialIntegrityError, match="DOCUMENT_REVIEW_UNSATISFIED"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    # Re-bind to the current payload value; the derived net follows the
+    # corrected discount (2 × 500.00 × 0.80 = 800.00) without staling the
+    # quantity or price decisions.
+    decide_extracted_field_review(
+        db, company_id=1, user_id=4, document_id=doc["document_id"],
+        field_name="line_discount", decision=DECISION_CORRECTED, value="20.00", line_index=0,
+    )
+    payload = json.loads(
+        next(
+            f for f in db.list_extracted_fields(1, doc["document_id"])
+            if f["field_name"] == "line_item_json" and f["line_index"] == 0
+        )["normalized_value"]
+    )
+    assert payload["discount_pct"] == "20.00"
+    assert payload["line_ht_dzd"] == "800.00"
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    assert evaluation["satisfied"] is True
+    assert evaluation["lines"][0]["satisfied"] is True
+    assert evaluation["line_prices"][0]["satisfied"] is True
+    # The still-10 % invoice now differs from the re-bound source on both the
+    # discount and the net.
+    with pytest.raises(FinancialIntegrityError) as excinfo:
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    message = str(excinfo.value)
+    assert "LINE_1_DISCOUNT_SOURCE_MISMATCH" in message
+    assert "LINE_1_LINE_HT_SOURCE_MISMATCH:derived=800.00!=invoiced=900.00" in message
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_invoice_discount_tampered_after_submit_blocks_approval(tmp_path: Path) -> None:
+    """An invoice discount changed after submission is caught at approval."""
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    _decide_discounted_review(db, doc["document_id"])
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.00",
+                "tax_rate": "19", "line_ht_dzd": "900.00"}],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+    submitted = submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert submitted["workflow_state"] == "PendingApproval"
+
+    # Out-of-band tamper: the invoice's discount drops back to zero (its net
+    # stays at the discounted 900.00, so the payload is internally unlike
+    # anything its own math would produce).
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoice_lines SET discount_pct = '0.00' WHERE invoice_id = ?",
+            (invoice["invoice_id"],),
+        )
+    with pytest.raises(FinancialIntegrityError) as excinfo:
+        decide_invoice_approval(
+            db, company_id=1, approver_user_id=3, invoice_id=invoice["invoice_id"], approve=True
+        )
+    message = str(excinfo.value)
+    assert "LINE_1_DISCOUNT_SOURCE_MISMATCH" in message
+    assert "INVOICE_APPROVAL_BLOCKED_SOURCE_MISMATCH" in [
+        a[1] for a in _audit_actions(db)
+    ]
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+
+def test_invoice_discount_or_net_unparseable_blocks_submission(tmp_path: Path) -> None:
+    """Unparseable invoice-side discount or net is refused, never skipped.
+
+    ``supplier_invoice_lines`` keeps both as TEXT; an out-of-band write that
+    leaves either unreadable must fail closed (`LINE_1_DISCOUNT_SOURCE_UNPARSEABLE`
+    / `LINE_1_LINE_HT_SOURCE_UNPARSEABLE`) instead of silently comparing
+    nothing.
+    """
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    _decide_discounted_review(db, doc["document_id"])
+    invoice = _make_invoice(
+        db, doc["document_id"],
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.00",
+                "tax_rate": "19", "line_ht_dzd": "900.00"}],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoice_lines SET discount_pct = 'n/a' WHERE invoice_id = ?",
+            (invoice["invoice_id"],),
+        )
+    with pytest.raises(FinancialIntegrityError, match="LINE_1_DISCOUNT_SOURCE_UNPARSEABLE"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+
+    # Restore the discount, corrupt the net instead.
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE supplier_invoice_lines SET discount_pct = '10.00', line_ht_dzd = 'oops'"
+            " WHERE invoice_id = ?",
+            (invoice["invoice_id"],),
+        )
+    with pytest.raises(FinancialIntegrityError, match="LINE_1_LINE_HT_SOURCE_UNPARSEABLE"):
+        submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    assert any(
+        a[1] == "INVOICE_SUBMIT_BLOCKED_SOURCE_MISMATCH" for a in _audit_actions(db)
+    )
+
+
+def test_legacy_discounted_invoice_recomputes_and_posts(tmp_path: Path) -> None:
+    """Document-less discounted invoices: deterministic recompute, no gate.
+
+    The typed path carries discounts too: approve → post works on a discounted
+    invoice, the payload hash binds the discount, and a price edit re-derives
+    the net from the persisted discount (never drops it), landing the invoice
+    back in NeedsReview like any approval-invalidating edit.
+    """
+    db, _vault, _ = _make_env(tmp_path)
+    invoice = _make_invoice(
+        db,
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.00",
+                "tax_rate": "19", "line_ht_dzd": "900.00"}],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+    assert invoice["workflow_state"] == "Validated"
+
+    # The payload hash binds the discount: same payload without it hashes
+    # differently.
+    from dz_erp.procurement_stock import compute_invoice_payload_hash
+
+    base_line = {"sku": "SKU-1", "qty": "2", "unit_price_dzd": "500.00",
+                 "tax_rate": "19", "line_ht_dzd": "900.00"}
+    assert compute_invoice_payload_hash(
+        supplier_id=7, supplier_invoice_no="FAC-2026-0001", invoice_date="2026-02-14",
+        payment_method="BANK_TRANSFER", amount_ht_dzd="900.00", amount_tva_dzd="171.00",
+        amount_timbre_dzd="0.00", amount_ttc_dzd="1071.00",
+        lines=[{**base_line, "discount_pct": "10.00"}],
+    ) != compute_invoice_payload_hash(
+        supplier_id=7, supplier_invoice_no="FAC-2026-0001", invoice_date="2026-02-14",
+        payment_method="BANK_TRANSFER", amount_ht_dzd="900.00", amount_tva_dzd="171.00",
+        amount_timbre_dzd="0.00", amount_ttc_dzd="1071.00",
+        lines=[{**base_line, "discount_pct": "0.00"}],
+    )
+
+    # Approve and post the discounted invoice; the trial balance stays intact.
+    submit_invoice_for_approval(db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"])
+    decide_invoice_approval(db, company_id=1, approver_user_id=3, invoice_id=invoice["invoice_id"], approve=True)
+    posted = post_supplier_invoice(
+        db, company_id=1, accountant_user_id=4, invoice_id=invoice["invoice_id"], idempotency_key="disc-1"
+    )
+    assert posted["workflow_state"] == "Posted"
+    assert db.verify_audit_chain(company_id=1)["valid"] is True
+
+    # A price edit on a second discounted draft re-derives the net WITH the
+    # persisted discount: 2 × 550.00 × 0.90 = 990.00 — not the
+    # discount-dropping 1100.00 — and the edit returns the invoice to
+    # NeedsReview (approval-invalidating edits always do).
+    from dz_erp.procurement_stock import modify_draft_invoice_line
+
+    invoice = _make_invoice(
+        db,
+        invoice_no="FAC-2026-0004",
+        lines=[{"sku": "SKU-1", "description": "Widgets", "qty": "2",
+                "unit_price_dzd": "500.00", "discount_pct": "10.00",
+                "tax_rate": "19", "line_ht_dzd": "900.00"}],
+        amount_ht="900.00", amount_tva="171.00", amount_ttc="1071.00",
+    )
+    with db.transaction() as conn:
+        line_id = conn.execute(
+            "SELECT id FROM supplier_invoice_lines WHERE invoice_id = ?",
+            (invoice["invoice_id"],),
+        ).fetchone()["id"]
+    modified = modify_draft_invoice_line(
+        db, company_id=1, user_id=2, invoice_id=invoice["invoice_id"],
+        line_id=line_id, new_unit_price_dzd="550.00",
+    )
+    assert modified["workflow_state"] == "NeedsReview"
+    with db.transaction() as conn:
+        row = conn.execute(
+            "SELECT discount_pct, line_ht_dzd FROM supplier_invoice_lines WHERE id = ?",
+            (line_id,),
+        ).fetchone()
+    assert row["discount_pct"] == "10.00"
+    assert row["line_ht_dzd"] == "990.00"
 
 
 def test_legacy_invoice_without_document_is_unaffected(tmp_path: Path) -> None:

@@ -815,3 +815,90 @@ the Phase 29 head). Per module: `review_policy.py` 90 % (258 statements),
 710 (Phase 29 head) + 3 PR #4 tests + 10 new instances (9 functions, one parametrized ×2) = 723.
 No test was suppressed, weakened or skipped to obtain this result. CI for this exact head is
 reported with the PR, not assumed.
+
+### D. Follow-up on the same phase: the line discount is decided and the line net is re-derived (`fix/phase29-invoice-discount-and-line-net-consistency`)
+
+Subsection C named the remaining limitation explicitly: the per-line `discount_pct` was a
+decided-by-nobody input. This branch closes it. The prerequisite was verified first: invoice-side
+discounts are a first-class persisted field (`supplier_invoice_lines.discount_pct`, stored in the
+same 2-decimal `format_dzd` form as every other money string), the invoice's own validation pins
+every line's net to `qty × PU × (1 − discount/100)`, and the extraction pattern emits no discount at
+all — so the line discount becomes the third decided line element (`line_discount`, keyed by the
+same `line_index`, threshold 0.85), whose only entry path is the established attributed
+CORRECTED-transcription flow. The documented business rule is **0 ≤ discount ≤ 100, inclusive at
+both ends, never clamped**: a negative transcription is refused (`FIELD_VALUE_NEGATIVE_AMOUNT`),
+anything above 100 is refused (`FIELD_VALUE_DISCOUNT_OUT_OF_RANGE`), and the same range is enforced
+at invoice creation (`LINE_{n}_DISCOUNT_OUT_OF_RANGE` → `NeedsReview`, unsubmittable). A corrected
+discount rewrites the line payload and re-derives the line net deterministically — exactly like the
+quantity and price corrections — without staling the other decisions on the same line. Because the
+reviewed quantity, price and discount are now all decided, the source-derived line net becomes
+semantically comparable: the gate re-derives `round_dzd(qty × PU × (1 − discount/100))` from the
+*decided* canonical values (never the payload's stored `line_ht_dzd` reading, which is derived and
+undecided) inside the same IMMEDIATE transaction at submit and approval, and compares it exactly
+with the invoice line's `line_ht_dzd` (2-decimal, `round_dzd`, ROUND_HALF_UP on both sides — the
+same formula and rounding invoice creation enforces). Documented rounding policy: the decided
+2-decimal discount is authoritative; an invoice whose net was validated against a raw discount with
+more precision than the invoice column stores may be flagged by up to a centime — the honest repair
+is entering the invoice with the canonical 2-decimal discount (pinned by a test). No schema
+migration is needed (`ocr_field_reviews.field_name` is free TEXT; the trigger permits
+`normalized_value` updates). Two adjacent integrity gaps were closed in the same pass, both
+strictly fail-closed: `compute_invoice_payload_hash` now binds `discount_pct` (a first-class
+financial field was absent from the approved-payload digest), and `modify_draft_invoice_line`
+re-derives the net *with* the persisted discount instead of silently dropping it.
+
+Exact source-to-invoice mapping (all comparisons exact equality, no floats, no tolerance):
+
+| # | Source (reviewed decision) | Canonical | Invoice (financial record) | Canonical | Gate refusal codes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | `line_item_json[i]` → `qty` | 6-dec `round_qty` | `supplier_invoice_lines.qty` | 6-dec `round_qty` | `LINE_{i}_QUANTITY_SOURCE_MISMATCH` / `_UNPARSEABLE` |
+| 2 | `line_unit_price[i]` → payload `unit_price_dzd` | 6-dec `round_qty` | `supplier_invoice_lines.unit_price_dzd` | 6-dec `round_qty` | `LINE_{i}_PRICE_SOURCE_MISMATCH` / `_UNPARSEABLE` |
+| 3 | `line_discount[i]` → payload `discount_pct` (attributed transcription only) | 2-dec `format_dzd` | `supplier_invoice_lines.discount_pct` | 2-dec `format_dzd` | `LINE_{i}_DISCOUNT_SOURCE_MISMATCH` / `_UNPARSEABLE` |
+| 4 | derived net from the three decided values | 2-dec `round_dzd` | `supplier_invoice_lines.line_ht_dzd` | 2-dec `round_dzd` | `LINE_{i}_LINE_HT_SOURCE_MISMATCH` / `_UNPARSEABLE` |
+
+Not mapped (unchanged boundaries): PO lines carry no discount column (the 3-way match compares
+quantity, unit price and tax rate only); the payload's own `line_ht_dzd` reading is never compared
+(it is derived, undecided, and re-derived on every correction); per-line TVA/TTC remain derived-only
+with the header TVA/TTC totals decided and compared.
+
+New regression instances in `tests/test_phase29_ocr_review_policy.py` (37 → 48):
+
+| Test | What it proves |
+| :--- | :--- |
+| `test_reviewed_discount_and_line_net_match_flows` | A discounted paper, fully decided (discount transcribed 10 %, header totals corrected to the discounted values), authorizes exactly that invoice: discount equality and the derived net (900.00) agree exactly at submit and approval. |
+| `test_mismatched_source_discount_blocks_submission` | A decided 10 % discount the invoice ignores flags both the discount and the derived net (`LINE_1_DISCOUNT_SOURCE_MISMATCH` + `LINE_1_LINE_HT_SOURCE_MISMATCH:derived=900.00!=invoiced=1000.00`), audited, chain valid. |
+| `test_line_net_rounding_boundary_authoritative_discount` | An invoice entered with raw discount 10.004 (stored 10.00, net raw-derived 899.96) passes its own math but is flagged at the gate against the decided 2-decimal discount (derived 900.00) — with no discount mismatch; the documented rounding-policy boundary, pinned. |
+| `test_discount_decision_boundaries_are_refused_or_bound_exactly` | Negative refused (`FIELD_VALUE_NEGATIVE_AMOUNT`), 100.01 refused (`FIELD_VALUE_DISCOUNT_OUT_OF_RANGE`), French `12,5` binds canonically (`12.50`, net re-derived 875.00), idempotent replay, 100.00 binds inclusively and zeroes the net. |
+| `test_invoice_creation_refuses_out_of_range_discount` | −5 % and 150 % invoice lines land in `NeedsReview` with `LINE_1_DISCOUNT_OUT_OF_RANGE` and cannot be submitted — no clamping, even with an arithmetically consistent declared net. |
+| `test_undecided_discount_blocks_until_transcribed` | Quantity and price confirmed, discount undecided → `REQUIRED_FIELD_NOT_DECIDED:line_discount[0]`, submission refused; the honest 0.00 transcription (the paper's net equals qty × PU) satisfies and the same invoice flows. |
+| `test_absent_or_malformed_payload_discount_routes_to_transcription` | A discount that is not (correctly) on file cannot be CONFIRMED (absent or malformed out-of-band write both refuse `FIELD_VALUE_CHANGED_SINCE_READ`); CORRECTED transcription is the only repair and binds the canonical value. |
+| `test_source_discount_changed_after_decision_blocks_and_rebinds` | A source discount edited after the binding decision goes stale (`FIELD_FLAGGED:line_discount[0]`), submission refuses on the review, a CORRECTED transcription re-binds and re-derives the net (800.00) without staling the quantity/price decisions, and the still-10 % invoice is then refused on both the discount and the net — fail closed both ways. |
+| `test_invoice_discount_tampered_after_submit_blocks_approval` | The invoice's discount tampered out-of-band after submission is caught at approval (`INVOICE_APPROVAL_BLOCKED_SOURCE_MISMATCH`, chain valid). |
+| `test_invoice_discount_or_net_unparseable_blocks_submission` | An out-of-band unparseable invoice discount refuses `LINE_1_DISCOUNT_SOURCE_UNPARSEABLE`; an unparseable net refuses `LINE_1_LINE_HT_SOURCE_UNPARSEABLE` — the comparison never silently skips an unreadable value. |
+| `test_legacy_discounted_invoice_recomputes_and_posts` | Document-less discounted invoices approve and post; the payload hash binds the discount (different hash per discount); a price edit re-derives the net with the persisted discount (990.00, not the discount-dropping 1100.00) and returns the invoice to NeedsReview. |
+
+Cross-tenant isolation, attributed audit with bounded details, commit-then-refuse and audit-chain
+validation are re-proven unchanged (every gate query stays company-scoped; the new codes flow into
+the existing `mismatches[:20]` truncating audit), and the full suite re-proves invoice creation,
+approval, posting, trial-balance, duplicate-post, migration and recovery behavior it always
+covered. No test was weakened or skipped. Reordered lines remain covered by the swap test
+(positionally flagged, unchanged); duplicate lines by the duplicate test, now also deciding
+discounts.
+
+Local verification (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`, on this branch's tree):
+
+- `tests/test_phase29_ocr_review_policy.py` — **48 passed** (45.85 s).
+- `python tools/staging_acceptance.py` — **40/40 checks, exit 0** (the API-driven review completion
+  now also transcribes each line's discount through the documented API).
+- Ruff on the CI scope (`dz_erp tests tools`) — clean; `compileall` — clean; dependency graph — OK;
+  hash-lock — OK (51 pinned distributions, 1,277 hashes); risk register — 31 rows, consistent; `cv2`/`RapidOCR` import
+  assertion — OK; phase-22 doc-consistency tests — **15/15 passed**.
+- Full suite and coverage at this head: recorded in the closing paragraph below.
+
+**Full suite at the discount head** (Windows/CPython 3.12.10, `QT_QPA_PLATFORM=offscreen`,
+`pytest tests -q --cov=dz_erp --cov-report=term-missing --cov-report=xml`): **734 passed, 20 skipped, 0 failed, exit 0 in 21 min 25 s**.
+Coverage **85 %** (6,916 statements, 1,006 missed; from 6,844 statements at
+the Phase 30 head). Per module: `review_policy.py` 91 % (281 statements), `intake_ocr.py` 92 %,
+`procurement_stock.py` 83 %, `api.py` 87 %, `database.py` 94 %,
+`decimal_utils.py` 89 %. The total count reconciles exactly: 723 (Phase 30 head) + 11 new
+instances = 734. No test was suppressed, weakened or skipped to obtain this result. CI for this
+exact head is reported with the PR, not assumed.

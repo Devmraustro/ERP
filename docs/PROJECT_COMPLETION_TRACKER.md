@@ -29,11 +29,33 @@ hash-locked dependency set, `cv2` 4.11.0 + RapidOCR importable.
 | 13c | P2 Accounting | Qualified Algerian expert-comptable review of rates, brackets and thresholds | **BLOCKED_EXTERNAL** | — | — | Requires a signed review with the legal reference per rate | — |
 | 14 | P5 API | Failed-login throttling per (client, account) and per-request correlation logging | **DONE** | `dz_erp/rate_limit.py`, `dz_erp/api.py` | `tests/test_phase35_api_rate_limiting_and_request_logging.py` (16) | 16 passed; `docs/STAGING_SECURITY_CONFIGURATION.md` §4.2–4.3 | committed |
 | 14a | P5 API | Shared-store rate limiting for multi-replica deployment (or proxy-side limit ratified by the operator) | NOT_STARTED | — | — | Current control is per worker and documented as such | — |
-| 15 | P6 DB | Migration matrix (fresh / upgrade / interrupted / restore) documented per migration | NOT_STARTED | — | — | — | — |
-| 16 | P10 Infra | Container build, compose, health checks, environment template | NOT_STARTED | — | — | — | — |
-| 17 | P12 Docs | Security, data-protection, threat-model, incident-response, deployment, DR, user guides | NOT_STARTED | — | — | — | — |
+| 15 | P6 DB | Migration matrix: convergence, idempotency, preservation, interruption safety, atomic rebuild | **DONE** | `tests/test_phase38_migration_matrix.py`, `docs/MIGRATION_AND_DATA_SAFETY.md` | 24 tests | 24 passed | committed |
+| 15a | P6 DB | Migration against production-sized data (timing, locking) | **BLOCKED_EXTERNAL** | — | — | Needs a copy of real state | — |
+| 16 | P10 Infra | Container build, compose reference, health model, environment template, build-context hygiene | **IMPLEMENTED_NOT_VERIFIED** | `ops/Dockerfile`, `ops/docker-compose.yml`, `ops/erp.env.example`, `.dockerignore` | `tests/test_phase37_deployment_assets.py` (6) | 6 passed for the *properties*; **the image has never been built** — no container runtime here | committed |
+| 16a | P10 Infra | Build the image, run the stack, restore a backup into it, rotate a key in it | NOT_STARTED | — | — | Operator/platform-owner step, listed in `docs/PRODUCTION_DEPLOYMENT_GUIDE.md` §7 | — |
+| 17 | P12 Docs | Security final audit, threat model, data-protection posture, incident-response plan, deployment guide, backup/DR runbook, migration safety, accounting validation, QA report, executive and technical reports, AR/FR user guides | **DONE** | `docs/` (15 new documents, indexed in the README) | docs-consistency gate | 15 passed | committed |
+| 17a | P12 Docs | User guides reviewed by an Arabic-speaking accountant for terminology | NOT_STARTED | — | — | The guides are accurate about behaviour; terminology review is a human step | — |
 | 18 | External | Qualified Algerian SCF/tax review | **BLOCKED_EXTERNAL** | — | — | Requires an engaged expert-comptable | — |
 | 19 | External | KMS/HSM custody, provenance, off-host checkpoints, alerting, DR, OCR corpus, Law 18-07 | **BLOCKED_EXTERNAL** | — | — | See `docs/RELEASE_READINESS_MATRIX.md` | — |
+
+## Where the workstream stands
+
+| Priority | Area | Status |
+|---|---|---|
+| P0 | OCR duplicate-row integrity | **DONE** — 19 tests |
+| P1 | Re-verify Phases 29–33 | **DONE** — 196 passed / 1 skipped (interpreter floor) |
+| P2 | Accounting arithmetic + effective-dated tax configuration | **DONE** (mechanism) / **BLOCKED_EXTERNAL** (legal values) — 29 tests |
+| P3 | Core modules | **DONE** (pre-existing, re-verified by the full suite) |
+| P4 | OCR/AI production quality | **DONE** (pre-existing benchmark and fail-closed policy); authorised corpus **BLOCKED_EXTERNAL** |
+| P5 | Security audit + threat model + data protection + incident response | **DONE** (documents) / **BLOCKED_EXTERNAL** (legal determinations) |
+| P6 | Migrations and data safety | **DONE** (24 tests) / **BLOCKED_EXTERNAL** (production scale) |
+| P7 | Frontend/UX (Arabic RTL, French LTR) | **DONE** (pre-existing suites) / terminology review **NOT_STARTED** |
+| P8 | API hardening / OpenAPI | **DONE** — throttling, correlation logging, contract pin |
+| P9 | Test pipeline + final QA report | **DONE** — `docs/FINAL_QA_REPORT.md` |
+| P10 | Production infra (prepared, never deployed) | **IMPLEMENTED_NOT_VERIFIED** — image never built |
+| P11 | Measured benchmarks / concurrency | **DONE** for the benchmark that exists; production-scale concurrency **BLOCKED_EXTERNAL** |
+| P12 | Documentation set | **DONE** |
+| P17 | Preserve the PR chain; prepare merge order only | **DONE** — nothing merged, nothing closed |
 
 ## Standing rules applied to every row
 

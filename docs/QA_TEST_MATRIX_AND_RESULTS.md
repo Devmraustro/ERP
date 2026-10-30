@@ -1083,12 +1083,12 @@ Detailed rationale and the honest limits are in
 | | `test_g50_refuses_a_cross_tenant_request` | Tenant isolation on the workbook |
 | | `test_g50_for_an_empty_period_is_zero_not_an_error` | Empty period is zeroes, not a crash |
 
-Measured: **29 passed**, 1.84 s. Full suite after this phase: **859 passed, 21 failed,
-7 skipped**, 232 s, **78 %** coverage. The 21 failures are the 20 pre-existing
-`restore_and_verify_backup` interpreter-floor failures plus one test whose record-count
-assertion had to account for the new durable `HTTP_REQUEST` records — it was rewritten to
-assert the rejections **by event** and to additionally assert the request records are
-credential-free, which is stricter than before, not weaker.
+Measured: **29 passed**, 1.84 s. Full suite at the end of the workstream: **890 passed,
+20 failed, 7 skipped**, 231 s, **78 %** coverage, with the failure set `diff`-identical to
+the baseline. (At this phase it was 21: one older test counted records in the durable sink,
+which now also receives `HTTP_REQUEST` entries. It was rewritten to assert the rejections
+**by event** and to additionally assert those request records are credential-free —
+stricter than before, not weaker — and the count returned to the baseline 20.)
 
 ### Behaviour changes an operator must know about
 

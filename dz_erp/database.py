@@ -8,14 +8,16 @@ import json
 import os
 import sqlite3
 import threading
-from contextlib import contextmanager
+import time
+import uuid
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .decimal_utils import format_dzd, to_decimal
 from .rotation_audit import RecordedOperation, RotationLedger
-from .key_provider import FileKeyProvider
+from .key_provider import FileKeyProvider, KeyMaterialUnavailable
 from .key_rotation import (
     LEGACY_KEY_VERSION,
     MIN_HMAC_KEY_BYTES,
@@ -715,6 +717,87 @@ def _file_backed_db_has_audit_events(db_path: str) -> bool:
         conn.close()
 
 
+def _publish_key_file(key_path: Path, secret: bytes) -> bytes:
+    """Create the database's key file atomically, or adopt the existing one.
+
+    **Why this is not ``O_CREAT|O_EXCL`` followed by ``write``.** That was the
+    original implementation and it has a window: the creator publishes an empty
+    file, and a second process starting in the same instant sees it, reads it,
+    and raises ``KeyMaterialUnavailable: Key file ... is empty``. Two workers
+    booting together is the normal case for this application (a process pool, a
+    rolling restart, the multi-process tests), so the loser of that race could
+    fail to start for no real reason — intermittently, which is the worst way to
+    find out.
+
+    The material is therefore written to a private temporary file in the same
+    directory, fsynced, and *linked* into place. ``link`` is atomic and fails if
+    the name already exists, so a reader can only ever observe either no file or
+    a complete one: the winner's content is what everybody ends up reading, and
+    the loser adopts it instead of overwriting it.
+
+    ``os.link`` is unavailable on a few filesystems (FAT, some network mounts).
+    There the fallback is to re-check and read the winner's file, waiting
+    briefly for it to be non-empty; if it never is, the error says what the
+    operator has to do. Failure to publish a *usable* key must be visible, never
+    silently replaced with a different key — that would invalidate every
+    existing audit chain.
+    """
+    tmp_path = key_path.with_name(f".{key_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(secret)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(str(tmp_path), str(key_path))
+            return secret
+        except FileExistsError:
+            # Another process published first; its key is authoritative.
+            return FileKeyProvider(key_path).read()
+        except OSError:
+            # No hard links here: fall back to adopt-or-create with a wait.
+            if key_path.exists():
+                return _read_published_key(key_path)
+            try:
+                fd2 = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return _read_published_key(key_path)
+            with os.fdopen(fd2, "wb") as handle:
+                handle.write(secret)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return secret
+    finally:
+        if fd >= 0:  # pragma: no cover - only when os.fdopen itself failed
+            os.close(fd)
+        with suppress(FileNotFoundError):
+            os.unlink(str(tmp_path))
+
+
+def _read_published_key(key_path: Path, *, attempts: int = 50) -> bytes:
+    """Read a key file another process is publishing, waiting out the write.
+
+    Only reachable on filesystems without ``os.link``. A file that exists but is
+    still empty is briefly retried (50 × 20 ms) instead of being reported as
+    corrupt, because the alternative — declaring a per-process key — would make
+    the audit chain unverifiable across the very restart that is happening.
+    """
+    last: Optional[Exception] = None
+    for _attempt in range(attempts):
+        try:
+            return FileKeyProvider(key_path).read()
+        except KeyMaterialUnavailable as exc:
+            last = exc
+            time.sleep(0.02)
+    raise KeyMaterialUnavailable(
+        f"Key file {key_path} exists but never became readable: {last}. "
+        "Refusing to generate a second key, which would invalidate every existing "
+        "audit chain. Restore the key file or set ERP_AUDIT_HMAC_SECRET."
+    )
+
+
 def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
     """Resolve the HMAC key that chains ``audit_events``.
 
@@ -762,15 +845,7 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
             )
         secret = base64.urlsafe_b64encode(os.urandom(32))
         key_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            # O_EXCL: if two processes race to initialise the same database, the
-            # loser adopts the winner's key rather than replacing it.
-            fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return FileKeyProvider(key_path).read()
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(secret)
-        return secret
+        return _publish_key_file(key_path, secret)
 
     return DEFAULT_AUDIT_HMAC_SECRET
 

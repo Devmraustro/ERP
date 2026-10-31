@@ -238,3 +238,13 @@ engineering work:
 `NOT_PRODUCTION_READY` still applies, for those two decisions plus the
 deployment items that predate this round. **0 of 5 PRs** carry a human review.
 Nothing was merged, retargeted, closed, rebased or deployed.
+
+### S11g — delivery and CI
+
+| Item | Value |
+|---|---|
+| Code commit (F-R2-2/3/4/5/6, schema column, tests) | `9d5d112a7d0bc7a7549b809d14127b54ed46c616` |
+| CI on that commit | run `41239621096` — Windows ✅, 3.12 ✅, **3.11 ❌** on `test_phase49_audit_key_bootstrap_race` (`database is locked`) |
+| Final commit | `7be86d1…` (docs on top; code identical to `9d5d112a`) |
+| CI on the fresh run | run `41241542402` — **3/3 success** |
+| F-R3-1 | intermittent, pre-existing, **not reproduced** (12/12 local runs under load, 15×8-process trials 0 failures); the `journal_mode = WAL` hypothesis was measured and disproved; disclosed in `docs/PR_STACK_REVIEW.md` §10.8–10.9 rather than patched speculatively |

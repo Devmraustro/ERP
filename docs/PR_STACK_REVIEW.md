@@ -777,3 +777,17 @@ no fix and no test yet.
 Green CI on all five PRs is *not* evidence of production readiness, and nothing
 above should be read as such. Merging, retargeting and deploying remain with the
 human reviewer.
+
+### 9.10 Delivery commit and its CI
+
+| Item | Value |
+|---|---|
+| Reviewed code head | `b679bc496b8053384ab40bcbd86c5db474140f42` — every finding, probe and test result above was produced against it |
+| Delivery commit (this section) | `611ae09476995b1c1037f62efb6a5ecdf482ce0c` — **documentation only** (`docs/PR_STACK_REVIEW.md`, `docs/PROJECT_COMPLETION_TRACKER.md`, `docs/REMAINING_BLOCKERS.md`), no product code |
+| CI on the delivery commit | run **`41233472971`** — `Test, coverage and static checks (Python 3.11)` ✅, `(Python 3.12)` ✅, `Key rotation, backup and recovery on Windows` ✅ (3/3) |
+| Consequence for PR #7 | PR #7 is opened from this session's branch, so its head advanced `b679bc49 → 611ae09`; base, mergeability (`CLEAN`) and the chain are unchanged |
+
+The commit boundary matters on purpose: the findings describe code exactly as it
+stands at `b679bc49`, and the only thing added after that point is prose. A
+reviewer can therefore verify every repro above against the same tree the PRs
+contain.

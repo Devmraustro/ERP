@@ -91,3 +91,25 @@ owners supply evidence. The checker itself reports this split
 * When an external owner supplies evidence, the row's **Status** changes only
   with a citation to that evidence (where it is stored, who signed it, when) —
   never by rewording a procedure into a claim.
+
+---
+
+## 4. Remediation delta (Phase 45)
+
+The rows below changed with the R-01 … R-07 remediation. Nothing was promoted to
+`VERIFIED` on the strength of a code change alone; each row names what was
+actually executed.
+
+| Area | Before | After | Evidence |
+|---|---|---|---|
+| Throttle observability (R-01) | stale error mislabelled refusals | **VERIFIED** | 4 tests + fail-closed test, `test_phase43_limiter_hardening.py` |
+| Shared-backend concurrency (R-02) | untested | **VERIFIED at staging scale** (still not production scale) | multi-process writer/boundary/cleanup/lock/interruption tests |
+| Throttle read path (R-03) | write lock on every check | **VERIFIED**, contention reduced not removed | `read_probe()`; 0.794 ms vs 2.331 ms measured |
+| Request-id boundary (R-04) | unbounded | **VERIFIED** | `request_id.py` + 19 tests |
+| Tax-rule administration (R-05) | raw SQL only | **VERIFIED** mechanism / **BLOCKED_EXTERNAL** values | 35 tests, 3 endpoints |
+| Timbre documentation (R-06) | contradicted the code | **VERIFIED** | 3 documents corrected; docs-consistency test green |
+| Interpreter gate (R-07) | 4 copies, one wrong | **VERIFIED** rule / **BLOCKED_EXTERNAL** host | matrix tests + AST guard; drift case (3.12.0-3.12.9) now refused |
+| Production scale, DR, container, deployment | `BLOCKED_EXTERNAL` / `IMPLEMENTED_NOT_VERIFIED` | **unchanged** | not attempted here |
+
+This matrix still does **not** claim production readiness, and no row for legal
+or tax compliance moved.

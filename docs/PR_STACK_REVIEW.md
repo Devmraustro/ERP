@@ -372,3 +372,45 @@ authorising human, not quietly accepted here.
 "Ready for authorization" means *nothing in this review forbids the merge*. It
 does not mean the code is production-ready, and it does not substitute for the
 human review and the external gates above.
+
+---
+
+## 7. Remediation of R-01 … R-07 (Phase 45)
+
+The findings in §6 were remediated on the existing work branch
+`arena/7f12d627-erp`. **Nothing was merged, retargeted, closed, rebased,
+force-pushed or deployed**, and no published history was rewritten. This section
+is the disposition of each finding; §6 remains as written so the review of
+record is not silently edited into agreement with its own fixes.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| **R-01** stale backend-error flag | **FIXED_AND_VERIFIED** | `RequestThrottle` records errors per call (`_call_errors`, `_begin_call`); `current_backend_error` reports the live state and `backend_health()` separates current from historical failure. `describe_throttle_policy` exposes it. Tests: `test_a_backend_failure_explains_only_the_decision_it_affected`, `test_a_successful_call_clears_the_stale_error_but_not_the_history`, `test_an_ordinary_limit_rejection_is_never_reported_as_a_backend_failure`, `test_concurrent_failure_and_recovery_leave_no_thread_with_a_stale_error` (`tests/test_phase43_limiter_hardening.py`). Fail-closed behaviour is unchanged and separately asserted. |
+| **R-02** no concurrent-writer test | **FIXED_AND_VERIFIED** | `tests/test_phase43_limiter_hardening.py` adds multi-process writers on one SQLite file (`…lose_no_increment`), concurrent hits at the boundary (`…allow_exactly_the_limit`), concurrent expiry/cleanup (`…stay_bounded`), a write lock held by another process (`…is_waited_out_not_dropped`), a backend interruption that fails closed and recovers, and high-cardinality bounding. Measured, recorded in the test output: `hit()` behind a held lock waits ~2036 ms and then succeeds — no lost increment, no unbounded state. |
+| **R-03** `blocked()` takes a write lock | **FIXED_AND_VERIFIED** | `SqliteRateLimitStore.blocked()` reads through the new `ERPDatabase.read_probe()` instead of `BEGIN IMMEDIATE`. Measured locally: `blocked()` 0.794 ms vs `hit()` 2.331 ms sequentially; under a lock held by another process `blocked()` returns in ~1 ms while `hit()` waits ~2 s. **The claim is bounded**: `read_probe` still takes the process `RLock`, so contention is *reduced, not eliminated*, and no test asserts it is lock-free. Correctness is pinned by `test_the_read_optimisation_does_not_change_what_is_counted`, `test_the_probe_sees_committed_events_and_not_uncommitted_ones` and `test_the_probe_does_not_bypass_in_process_transaction_isolation`; the rate limit is not weakened anywhere. |
+| **R-04** unbounded `X-Request-Id` | **FIXED_AND_VERIFIED** | `dz_erp/request_id.py`: `MAX_REQUEST_ID_LENGTH = 128`, `^[A-Za-z0-9._:-]+$`, `sanitize_request_id` returns a server-side uuid4 for anything else. A rejected value is never echoed and never logged (not truncated-in-part); the 429 path obeys the same rule; two clients may share an id and neither request is dropped. `tests/test_phase47_request_id_boundary.py` (19 tests) covers over-long, empty, whitespace, control, non-ASCII, RTL-override, zero-width, terminal-escape and duplicate cases, plus the "no request content in the header" property. |
+| **R-05** no audited timbre rule path | **FIXED_AND_VERIFIED** (code) / **BLOCKED_EXTERNAL** (values) | DRAFT → approve path with segregation of duties (`TIMBRE_RULE_SOD_VIOLATION`), explicit overlap policy (refused by default; `supersede` may only narrow a window no posted invoice cites), one audit event per step inside the same transaction, tenant scoping and role checks enforced in the service, and three endpoints (`GET`/`POST /api/v1/tax/timbre-rules`, `POST …/{version_code}/approve`). No value is ever defaulted: an incomplete rule is refused (`TIMBRE_RULE_VALUE_REQUIRED`). `tests/test_phase46_timbre_rule_administration.py` (35 tests). The **rates themselves** remain the expert-comptable's determination — unchanged and still `BLOCKED_EXTERNAL`. |
+| **R-06** stale documentation | **FIXED_AND_VERIFIED** | Three documents claimed the resolved rule identity was not persisted and tracked it as `NOT_STARTED`; Phase 40 had made that false. Corrected in `ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §7 (rewritten to describe the six persisted columns, the append-only version ledger, the immutability triggers, the posting-time re-resolution and the two real limits: legacy invoices are not back-filled, reversals inherit provenance), `TECHNICAL_REPORT.md` and `RISK_REGISTER.md`; the administration path is documented in §3.1 and in `ALGERIAN_SCF_LOCALIZATION_SPEC.md` §3. `tests/test_phase22_register_and_docs_consistency.py` still passes. |
+| **R-07** interpreter gate unverified locally | **FIXED_AND_VERIFIED** (rule) / **BLOCKED_EXTERNAL** (host 3.11.2) | The gate now exists once: `security_audit.safe_restore_supported`, consumed by the library and by every gated test. The drift that caused the finding is real and is now caught: `test_phase32` carried `>= (3, 11, 17) and < (3, 13)`, which **admits 3.12.0-3.12.9 — versions on which restore correctly refuses**; CI only missed it because `setup-python` resolves the newest 3.12. `tests/test_phase48_restore_interpreter_matrix.py` (32 tests + 1 environment-gated) pins every boundary tuple, asserts 3.12.0-3.12.9 are refused, asserts the restore path raises rather than degrading on every unsupported tuple, asserts the module contains exactly one version gate and that `restore_and_verify_backup` calls the predicate, and **bans re-duplication** by scanning the test tree with an AST check. The gate itself is untouched and still fails closed; this host is CPython 3.11.2, so the round trip executes on CI (3.11/3.12) and is recorded here as environment-blocked locally, never as passing. |
+
+### 7.1 A defect found *by* the remediation
+
+Making the R-02 tests honest surfaced a real product defect: concurrent
+`ERPDatabase` construction raced the schema migrations and failed with
+`sqlite3.OperationalError: trigger trg_ocr_field_preserve_raw already exists`.
+`_migrate_schema` now runs its whole sequence inside one `BEGIN IMMEDIATE`;
+`_migrate_ocr_confidence` stays outside it, because it toggles
+`PRAGMA foreign_keys`, which is a no-op inside a transaction. Regression test:
+`test_concurrent_process_startup_does_not_race_the_schema_migrations` (five
+processes starting at once). This was not in the review's finding list and would
+have appeared as an intermittent production start-up failure.
+
+### 7.2 What this closure does **not** claim
+
+* the tax values, the G50 box mapping and the legal reading of the timbre
+  brackets remain `BLOCKED_EXTERNAL` (expert-comptable sign-off);
+* rate limiting is still **per process** (shared SQLite is single-host by
+  construction) — no distributed claim is made;
+* the restore round trip is verified on CI's 3.11/3.12, not on this sandbox's
+  3.11.2;
+* no container image was built here, and nothing was deployed.

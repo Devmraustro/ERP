@@ -259,6 +259,13 @@ def test_a_real_backup_restore_round_trip_is_verified_on_this_interpreter(
     a test that quietly passes by doing nothing: on an unsupported interpreter
     the evidence is recorded as environment-blocked (and the fail-closed test
     above still runs), never as a pass.
+
+    The assertions are the ones the requirement names, and nothing weaker: the
+    restored database is verified by content hash, its audit chain verifies, the
+    vault round-trips, and the restored artefacts reopen without the original
+    process. An earlier version of this test guessed at the report's keys and
+    would have failed on the interpreter where the path actually runs — the exact
+    failure mode R-07 is about, so the keys are asserted explicitly.
     """
     if not HOST_IS_SUPPORTED:
         pytest.skip(
@@ -279,24 +286,35 @@ def test_a_real_backup_restore_round_trip_is_verified_on_this_interpreter(
 
     key = Fernet.generate_key()
     backup = tmp_path / "backup.enc"
-    manifest = create_encrypted_backup(db, vault, backup, key)
-    assert backup.exists() and manifest
+    meta = create_encrypted_backup(db, vault, backup, key)
+    assert backup.exists() and meta
 
     report = restore_and_verify_backup(
-        backup_path=backup,
+        backup_path=Path(meta["backup_path"]),
         backup_encryption_key=key,
         restore_target_dir=tmp_path / "restored",
     )
-    # The same assertions hold on every supported interpreter: the restored
-    # database is byte-identical to the archived one and the ledger opens.
-    restored_files = report.get("restored_files") or report.get("files") or []
-    assert restored_files, f"restore reported no files: {sorted(report)}"
-    restored_db = tmp_path / "restored" / "erp.sqlite3"
-    if restored_db.exists():
-        restored = ERPDatabase(str(restored_db))
-        with restored.transaction() as conn:
-            row = conn.execute("SELECT name FROM companies WHERE id = 1").fetchone()
-        assert row["name"] == "Tenant Alpha"
+
+    # The report's contract, named explicitly rather than probed optimistically.
+    for expected_key in ("restored_db", "restored_vault", "db_sha256_verified",
+                         "vault_files_verified", "audit_chains_valid"):
+        assert expected_key in report, f"restore report lost {expected_key}: {sorted(report)}"
+    assert report["db_sha256_verified"] is True
+    assert report["audit_chains_valid"] is True
+    # No document was filed in this vault, so the manifest lists none: the count
+    # is the number of vault hashes that verified, not a constant.
+    assert report["vault_files_verified"] == 0
+
+    # ``restored_db`` is a live object (this is what the R-07 defect got wrong);
+    # the data must be readable through it, not through a guessed path.
+    restored_db = report["restored_db"]
+    with restored_db.transaction() as conn:
+        row = conn.execute("SELECT name FROM companies WHERE id = 1").fetchone()
+    assert row["name"] == "Tenant Alpha", "the restored tenant row must round-trip"
+
+    # The restore is isolated: the live source database is untouched by it.
+    with db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM companies").fetchone()["n"] == 1
 
 
 def test_the_host_interpreter_is_recorded_rather_than_assumed(

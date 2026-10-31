@@ -124,3 +124,24 @@ production-ready and none may be merged without G1–G7 in the execution plan.
 * No accounting or tax rule was changed. No posted record is rewritten. No
   migration deletes or merges evidence.
 * Commits go to `arena/7f12d627-erp` only; no force-push, no merge, no deploy.
+
+---
+
+## S8. Findings remediated (Phase 45) — 2026-10-31
+
+| Row | Work | Status | Evidence |
+|---|---|---|---|
+| S8a | **R-01** — clear the throttle's backend error on success; distinguish current from historical failure | **DONE** (`FIXED_AND_VERIFIED`) | `dz_erp/rate_limit.py`; 4 dedicated tests + fail-closed test in `test_phase43_limiter_hardening.py` |
+| S8b | **R-02** — real concurrent-writer coverage on the shared SQLite backend | **DONE** (`FIXED_AND_VERIFIED`) | multi-process writer / boundary / cleanup / lock-contention / interruption / cardinality tests; `hit()` waited 2036 ms behind a held lock and succeeded |
+| S8c | **R-03** — a read-only throttle check that does not take the global write lock | **DONE** (`FIXED_AND_VERIFIED`, bounded) | `ERPDatabase.read_probe()`; 0.794 ms vs 2.331 ms; contention reduced, not eliminated (RLock still held) |
+| S8d | **R-04** — bound and validate `X-Request-Id` | **DONE** (`FIXED_AND_VERIFIED`) | `dz_erp/request_id.py`; `test_phase47_request_id_boundary.py` (19 tests) |
+| S8e | **R-05** — audited, authorized timbre rule administration | **DONE** (`FIXED_AND_VERIFIED`) for the mechanism; **BLOCKED_EXTERNAL** for the values | `localization.create_timbre_rule_version` / `approve_timbre_rule_version`; 3 endpoints; `test_phase46_timbre_rule_administration.py` (35 tests) |
+| S8f | **R-06** — retire the false "rule label is not persisted" claim | **DONE** (`FIXED_AND_VERIFIED`) | `ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §7, `TECHNICAL_REPORT.md`, `RISK_REGISTER.md`, `ALGERIAN_SCF_LOCALIZATION_SPEC.md` §3 |
+| S8g | **R-07** — verify safe backup/restore on the supported interpreters | **DONE** (`FIXED_AND_VERIFIED`) for the rule; **BLOCKED_EXTERNAL** for this host | one `safe_restore_supported` predicate; `test_phase48_restore_interpreter_matrix.py` (32 + 1 gated); 3.12.0-3.12.9 now correctly refused |
+| S8h | Concurrent start-up migration race (found during S8b) | **DONE** (`FIXED_AND_VERIFIED`) | one `BEGIN IMMEDIATE` around the migration sequence; 5-process regression test |
+| S8i | Row 13b (rule identity persisted) | already `DONE` — the docs said otherwise; see S8f | Phase 40, 22 tests |
+
+**Not done, and not implied by the above:** production-scale timing, a container
+build, a deployment, multi-replica rate limiting, and every legal/tax
+determination. Those rows are untouched (`IMPLEMENTED_NOT_VERIFIED` /
+`BLOCKED_EXTERNAL`) and are listed in `docs/REMAINING_BLOCKERS.md`.

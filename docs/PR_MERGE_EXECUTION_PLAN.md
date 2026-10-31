@@ -145,3 +145,39 @@ Two cases where a re-run is required:
 This plan is complete and **deliberately unexecuted**. The stack is reviewed,
 the order is verified, and every remaining gate is named with an owner. Work
 stops here pending explicit authorization.
+
+---
+
+## 8. Remediation result (Phase 45) — the gate table is now closed
+
+G5, G6 and G7 above were the three items that stood between the stack and an
+explicit merge authorization. They are closed on `arena/7f12d627-erp`; §2–§7 are
+left as written so the plan of record is not retro-edited.
+
+| Gate | Was | Now | Evidence |
+|---|---|---|---|
+| **G5** R-01 | finding open | **closed** | `dz_erp/rate_limit.py`: per-call error record, `current_backend_error`, `backend_health()`; `tests/test_phase43_limiter_hardening.py` (17 tests) |
+| **G6** R-05 | finding open | **closed** (code) | DRAFT → two-person approve, explicit overlap policy, audit per step, three endpoints; `tests/test_phase46_timbre_rule_administration.py` (35 tests). The tax *values* stay `BLOCKED_EXTERNAL` — this gate never covered them |
+| **G7** R-06 | finding open | **closed** | `ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §7 rewritten; `TECHNICAL_REPORT.md`, `RISK_REGISTER.md`, `ALGERIAN_SCF_LOCALIZATION_SPEC.md` corrected |
+| (R-02) concurrent writers | not a gate, needed for honesty | **closed** | multi-process writer, boundary, cleanup, lock-contention, interruption and high-cardinality tests; latency recorded |
+| (R-03) `blocked()` write lock | not a gate | **closed, bounded claim** | `read_probe()`; 0.794 ms read vs 2.331 ms write; contention reduced, **not** eliminated |
+| (R-04) `X-Request-Id` | not a gate | **closed** | `dz_erp/request_id.py` + 19 tests |
+| (R-07) interpreter gate | not a gate | **closed** (rule) / **BLOCKED_EXTERNAL** (host) | one predicate, matrix-parameterised tests, AST guard against a second copy |
+
+### 8.1 Ordering is unchanged
+
+This section changes *what* is left, not *how* it is applied. The order in §4
+still holds exactly: `#3` → retarget `#4` → `#5` → `#6` → `#7`, one at a time,
+each after the previous is in `main`, each with its own green CI on its own head.
+**No step in this plan has been executed**: nothing was merged, retargeted,
+closed, rebased, marked ready or deployed, and no branch was force-pushed.
+
+### 8.2 Required before authorization (unchanged in substance, now unblocked)
+
+1. Human review of PR #7 (draft, 0 reviews). The remediation is *evidence for*
+   that review, not a substitute for it.
+2. Confirmation that the finding classification in
+   `docs/PR_STACK_REVIEW.md` §7 is accepted — in particular that R-05's code fix
+   does not imply the tax values are legally qualified.
+3. The external gates in `docs/REMAINING_BLOCKERS.md` remain exactly as listed;
+   none of them was closed by this remediation.

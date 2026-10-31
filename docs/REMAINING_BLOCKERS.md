@@ -57,3 +57,21 @@ Their classification and reproduction commands are in
 2. **Container build** — needs a runtime; everything else about the image is asserted.
 3. **Alerting / off-host / DR / concurrency** — one real deployment and a named operator.
 4. **R-SCF / R-LAW** — longest lead time; start first even though they finish last.
+
+---
+
+## Remediation note (Phase 45, 2026-10-31)
+
+The seven findings from the independent review (R-01 … R-07) are **no longer
+blockers**; their disposition is in `docs/PR_STACK_REVIEW.md` §7 and their code
+and test evidence is committed on `arena/7f12d627-erp`. Nothing in this file was
+cleared by that work, and two rows are worth restating because a reader could
+otherwise mistake a code fix for an external one:
+
+| Row | Still blocked on | Why the code fix does not clear it |
+|---|---|---|
+| Tax values (timbre brackets, TVA rates) | expert-comptable sign-off | R-05 built the *door* for a new rule version. It deliberately has no default value, so it adds no legal claim; whether the seeded brackets are the law's is still a professional determination. |
+| Safe backup/restore verification | a 3.11.17+ / 3.12.10+ interpreter with real data | R-07 fixed the *rule* and made it testable across its whole version space, and CI runs the round trip on both supported lines. This sandbox is 3.11.2, where restore correctly refuses; production-sized restore timing and a restore drill remain external. |
+
+Everything else in this document — container build, off-host backup, alerting,
+DR drill, concurrency at production scale, Law 18-07 retention — is unchanged.

@@ -921,3 +921,40 @@ that strengthens, not weakens, what they assert.
 ### 10.7 Delivery
 
 See §10.8 for the commit and CI of this section.
+
+### 10.8 Delivery, CI, and one intermittent CI failure reported as-is
+
+| Item | Value |
+|---|---|
+| Code changes (F-R2-2/3/4/5/6) | `9d5d112a7d0bc7a7549b809d14127b54ed46c616` |
+| CI on that commit | run `41239621096` — Windows ✅, Python 3.12 ✅, **Python 3.11 ❌** |
+| Failing step | `Run the complete test suite with coverage` |
+| Failing test | `tests/test_phase49_audit_key_bootstrap_race.py::test_every_concurrent_worker_opens_the_same_database` |
+| Error | `STARTUPCAUSE ('', 'sqlite3.OperationalError: database is locked')` |
+
+**This is reported rather than explained away.** What is known and what is not:
+
+* The failing test is **not** one added in this round, and neither it nor the
+  start-up path it exercises was modified by `9d5d112a` — the only change in
+  `database.py` is one added `PRAGMA table_info(products)` inside the migration
+  transaction, plus an `ALTER` that never executes on a database created after
+  this commit (the column is in the schema).
+* The same test passes **6/6 at the parent commit and 6/6 at this commit** on
+  this host with both cores saturated by CPU load.
+* A deliberate attempt to force the race — 15 trials × 8 processes opening the
+  same brand-new database simultaneously — produced **0/15** failures.
+* The obvious hypothesis (that `PRAGMA journal_mode = WAL` ignores
+  `busy_timeout`) is **wrong**: measured, it waits the full 30 s configured
+  timeout and only then raises `database is locked`, so the failure implies some
+  connection held a lock for over 30 seconds — which a handful of short-lived
+  migrations should not be able to do.
+
+So the mechanism is **not identified**, and no speculative change to locking was
+made on the strength of one unreproduced failure: a blind retry around the WAL
+switch would have been a guess dressed as a fix. It is recorded as follow-up
+**F-R3-1** (pre-existing, intermittent, concurrent start-up), to be investigated
+with the CI runner's own timing rather than invented here.
+
+The job could not be re-run through the API (`run 41239621096 cannot be rerun`),
+so a fresh run was triggered by the documentation commit that follows. Its result
+is recorded in §10.9.

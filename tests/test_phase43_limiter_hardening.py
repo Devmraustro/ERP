@@ -86,6 +86,17 @@ class _ScriptedStore:
         return self.inner.describe()
 
 
+def _diagnose(stdout: str, stderr: str) -> str:
+    """One short line naming why a child process failed.
+
+    Kept deliberately compact: CI surfaces this in the job annotation, where a
+    dumped traceback for every child would be truncated to unreadability. The
+    last exception line is the part that identifies the cause.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    return f"rc-detail out={stdout.strip()[:40]!r} err={lines[-1][:180] if lines else '<none>'!r}"
+
+
 def _run_in_processes(scripts: list[str], *, timeout: int = 180) -> list[tuple[str, str, int]]:
     """Start every script, then collect ``(stdout, stderr, returncode)`` for each.
 
@@ -494,10 +505,17 @@ def test_concurrent_process_startup_does_not_race_the_schema_migrations(tmp_path
         )
         for _ in range(5)
     ]
-    completed = _run_in_processes(scripts)
-    summaries = _summary(completed)
-    assert all(code == 0 for _out, _err, code in summaries), summaries
-    assert all(out.strip() == "OPENED" for out, _err, _code in summaries)
+    # The race is timing-dependent, so it is attempted several times rather than
+    # once: a single lucky start-up is not evidence that the sequence is
+    # serialised, and a rare failure that only appears under a loaded CI runner
+    # would otherwise look like a flake instead of a defect.
+    failures: list[str] = []
+    for _round in range(5):
+        summaries = _summary(_run_in_processes(scripts))
+        bad = [s for s in summaries if s[2] != 0 or s[0].strip() != "OPENED"]
+        if bad:
+            failures.extend(_diagnose(out, err) for out, err, _code in bad)
+    assert failures == [], "concurrent start-up failed: " + " | ".join(failures[:4])
 
     # And the schema it converged on is the expected one, not a half-migrated mix.
     db = ERPDatabase(db_path)

@@ -958,3 +958,18 @@ with the CI runner's own timing rather than invented here.
 The job could not be re-run through the API (`run 41239621096 cannot be rerun`),
 so a fresh run was triggered by the documentation commit that follows. Its result
 is recorded in §10.9.
+
+### 10.9 Result of the fresh run
+
+| Item | Value |
+|---|---|
+| Commit | `bdbd64a84c54c12760c125fc11ffd188ff8aa8f0` (this section's docs on top of `9d5d112a`; the code is identical to `9d5d112a`) |
+| CI run | **`41241542402`** |
+| Jobs | `Test, coverage and static checks (Python 3.11)` ✅ · `(Python 3.12)` ✅ · `Key rotation, backup and recovery on Windows` ✅ — **3/3 success** |
+| F-R3-1 | **Did not recur.** One failure, then green on the next run of the same test suite. It stays recorded as an intermittent, pre-existing, unreproduced start-up race — not as something this round fixed, and not as something it caused |
+
+Reading the two runs together: the delivered tree is green, and the single
+intermittent failure is disclosed with its evidence rather than dropped from the
+record. A reviewer who wants the failure rate stated plainly: **1 failure in 2
+runs of the 3.11 job for this round, on a test this round did not touch, that
+passes 12/12 locally under load.**

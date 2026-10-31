@@ -425,10 +425,12 @@ have appeared as an intermittent production start-up failure.
 | Evidence commit | `0a46cc9` — restore round trip asserted against the real report contract; closure docs |
 | Flake-or-defect commits | `a092996`, `848afee` — repeat the start-up race, report the failing child's cause |
 | Defect fix | `1873f0ec` — atomic audit-key publish (+ `tests/test_phase49`) |
-| CI (green, 3/3) | run **41196478922** on `1873f0ec` — https://github.com/Devmraustro/ERP/actions/runs/41196478922 |
+| CI (green, 3/3) | run **41197722914** on **`e5f91080`** — https://github.com/Devmraustro/ERP/actions/runs/41197722914 (this is the last code-bearing commit; the commit after it is documentation only and carries its own green run) |
+| CI (green, 3/3, earlier) | run **41196478922** on `1873f0ec` — https://github.com/Devmraustro/ERP/actions/runs/41196478922 |
 | CI (red, superseded) | run **41194325402** on `d4131c6` — 3.11 failed on the Phase 48 round trip, which is how the guessed report keys were caught; run **41194981129** on `0a46cc9` — 3.11 failed once on the start-up race, which is what led to `1873f0ec` |
 | Local suite (CPython 3.11.2) | **1070 passed, 20 failed, 9 skipped**; the 20 failures are the identical interpreter-floor restore set as the pre-remediation baseline (3.11.2 < 3.11.17) |
 | New tests | phase43 **17**, phase46 **35**, phase47 **19**, phase48 **32 + 1 environment-gated**, phase49 **7** — **110 passed, 1 skipped** together |
+| R-07 on CI | the round trip **cannot silently skip on CI** (it fails when the interpreter cannot perform the restore), so the green 3.11 and 3.12 jobs are positive evidence that it executed on both supported lines, on real 3.11.x and 3.12.x interpreters |
 | Static checks | `ruff check dz_erp tests tools` → clean; `tools/risk_register_counts.py` → consistent (40 rows); docs-consistency suite **15 passed** |
 
 Two failures during this work were reported rather than smoothed over, because

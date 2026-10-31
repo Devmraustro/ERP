@@ -165,6 +165,9 @@ class TimbreRuleVersionInput(BaseModel):
     valid_from: str
     valid_to: Optional[str] = None
     min_amount_dzd: str
+    #: A decimal ceiling, or "none" to declare the rule deliberately uncapped.
+    #: Omitting it is refused (TIMBRE_RULE_CAP_NOT_DECLARED): a missing value
+    #: must never silently mean "no ceiling".
     max_amount_dzd: Optional[str] = None
     threshold_dzd: str
     brackets: List[Dict[str, Any]]

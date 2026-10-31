@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -47,10 +48,14 @@ from dz_erp.intake_ocr import PrivateDocumentVault
 from dz_erp.localization import (
     TaxRuleConfigurationError,
     TimbreRuleAdministrationError,
+    _builtin_timbre_rule,
     approve_timbre_rule_version,
+    calculate_droit_de_timbre,
     create_timbre_rule_version,
     list_timbre_rule_versions,
+    load_official_odoo_chart,
     resolve_timbre_rule,
+    timbre_provenance_snapshot,
 )
 
 PASSWORD = "Admin#2026x"
@@ -121,6 +126,7 @@ def _create(db: ERPDatabase, ids: dict[str, int], **overrides) -> dict:
         valid_to=None,
         min_amount_dzd="5.00",
         threshold_dzd="300.00",
+        max_amount_dzd="none",  # deliberately uncapped, declared
         brackets=BRACKETS,
         reason="Finance Law 2027, art. 12 — bracket table reviewed by the tax signatory",
     )
@@ -289,6 +295,7 @@ def test_only_accountants_and_admins_may_administer_rules(tmp_path: Path) -> Non
         create_timbre_rule_version(
             db, 1, ids["clerk"], version_code="X-1", valid_from="2027-01-01", valid_to=None,
             min_amount_dzd="5.00", threshold_dzd="300.00", brackets=BRACKETS, reason="clerk attempt",
+            max_amount_dzd="none",  # deliberately uncapped, declared
         )
     # A draft created properly still cannot be approved by a clerk.
     _create(db, ids)
@@ -310,11 +317,13 @@ def test_administration_is_tenant_scoped(tmp_path: Path) -> None:
         create_timbre_rule_version(
             db, 2, ids["creator"], version_code="X-2", valid_from="2027-01-01", valid_to=None,
             min_amount_dzd="5.00", threshold_dzd="300.00", brackets=BRACKETS, reason="foreign user",
+            max_amount_dzd="none",  # deliberately uncapped, declared
         )
     # The same code in another company is a separate row, not a conflict.
     other = create_timbre_rule_version(
         db, 2, ids["other_tenant"], version_code="LF-2027-CASH", valid_from="2027-01-01",
         valid_to=None, min_amount_dzd="6.00", threshold_dzd="400.00", brackets=BRACKETS,
+        max_amount_dzd="none",  # deliberately uncapped, declared
         reason="Tenant Beta's own 2027 rule",
     )
     assert other["version_code"] == "LF-2027-CASH"
@@ -517,6 +526,7 @@ def test_two_concurrent_creations_of_the_same_version_produce_exactly_one_rule(
             create_timbre_rule_version(
                 db, 1, ids["creator"], version_code="LF-RACE", valid_from="2027-01-01",
                 valid_to=None, min_amount_dzd="5.00", threshold_dzd="300.00",
+                max_amount_dzd="none",  # deliberately uncapped, declared
                 brackets=BRACKETS, reason="concurrent creation",
             )
             outcomes.append("created")
@@ -596,6 +606,7 @@ def test_the_endpoints_enforce_role_sod_and_validation(tmp_path: Path) -> None:
         "valid_from": "2029-01-01",
         "min_amount_dzd": "5.00",
         "threshold_dzd": "300.00",
+        "max_amount_dzd": "none",
         "brackets": BRACKETS,
         "reason": "Finance Law 2029",
     }
@@ -645,6 +656,7 @@ def test_an_overlap_over_http_is_a_conflict_not_a_bad_request(tmp_path: Path) ->
         "valid_from": "2031-01-01",
         "min_amount_dzd": "5.00",
         "threshold_dzd": "300.00",
+        "max_amount_dzd": "none",
         "brackets": BRACKETS,
         "reason": "Finance Law 2031",
     }
@@ -749,3 +761,131 @@ def test_a_legacy_database_gains_active_rules_and_drafts_stay_ignored(tmp_path: 
         assert row["review_state"] == "ACTIVE", "existing configuration stays in force"
         assert row["reviewed_by_id"] is None, "and no reviewer is invented for it"
         assert resolve_timbre_rule(conn, 1, "2026-01-01").version_code == "PRE-EXISTING"
+
+
+# ---------------------------------------------------------------------------
+# F-R2-1 — a cap is a decision, never a default
+# ---------------------------------------------------------------------------
+def test_fr2_1_omitting_the_cap_is_refused_rather_than_meaning_uncapped(tmp_path: Path) -> None:
+    """An undeclared ceiling must not silently become "no ceiling".
+
+    The specification advertised a 10,000.00 DZD ceiling on the top stamp-duty
+    band while every rule stored ``max NULL``; nothing had ever *decided* the
+    rule was uncapped, the field was simply omitted. A rule version now has to
+    say which it is.
+    """
+    db, ids = _build(tmp_path)
+
+    with pytest.raises(TimbreRuleAdministrationError, match="TIMBRE_RULE_CAP_NOT_DECLARED"):
+        create_timbre_rule_version(
+            db, 1, ids["creator"],
+            version_code="LF-2028-CASH", valid_from="2028-01-01", valid_to=None,
+            min_amount_dzd="5.00", threshold_dzd="300.00", brackets=BRACKETS,
+            reason="cap field deliberately omitted to prove it is refused",
+        )
+    # An empty string is an omission too, not a zero ceiling.
+    with pytest.raises(TimbreRuleAdministrationError, match="TIMBRE_RULE_CAP_NOT_DECLARED"):
+        _create(db, ids, version_code="LF-2028-CASH2", max_amount_dzd="   ")
+    # A malformed declaration is refused, not coerced.
+    with pytest.raises(TimbreRuleAdministrationError, match="TIMBRE_RULE_VALUE_INVALID"):
+        _create(db, ids, version_code="LF-2028-CASH3", max_amount_dzd="about 10k")
+
+    with db.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM timbre_rules WHERE version_code LIKE 'LF-2028-%'"
+        ).fetchone()["n"] == 0
+
+
+def test_fr2_1_a_declared_cap_is_honoured_at_its_boundary(tmp_path: Path) -> None:
+    """The cap *mechanism* works and is bounded — with synthetic figures only.
+
+    The values here are invented test data (a 1,000.00 DZD ceiling on a clearly
+    fake table); this asserts the arithmetic, not any Algerian figure, which
+    stays BLOCKED_EXTERNAL.
+    """
+    db, ids = _build(tmp_path)
+    _create(db, ids, version_code="LF-2029-CASH", valid_from="2029-01-01",
+            brackets=[{"up_to": None, "rate": "0.10"}], max_amount_dzd="1000.00")
+    _approve(db, ids, version_code="LF-2029-CASH")
+
+    with db.transaction() as conn:
+        rule = resolve_timbre_rule(conn, 1, "2029-06-01")
+    assert rule.max_amount_dzd == "1000.00"
+
+    # 10 % of 9,999.00 = 999.90 -> under the cap, unchanged.
+    assert calculate_droit_de_timbre("9999.00", "CASH", **rule.as_kwargs()) == Decimal("999.90")
+    # 10 % of 10,000.00 = 1,000.00 -> exactly the cap.
+    assert calculate_droit_de_timbre("10000.00", "CASH", **rule.as_kwargs()) == Decimal("1000.00")
+    # 10 % of 10,000.01 = 1,000.00 (rounded) -> still at the cap.
+    assert calculate_droit_de_timbre("10000.01", "CASH", **rule.as_kwargs()) == Decimal("1000.00")
+    # Far above it -> held at the cap, never above.
+    assert calculate_droit_de_timbre("600000.00", "CASH", **rule.as_kwargs()) == Decimal("1000.00")
+    # Non-cash is never charged, capped or not.
+    assert calculate_droit_de_timbre("600000.00", "BANK_TRANSFER", **rule.as_kwargs()) == Decimal("0.00")
+
+
+def test_fr2_1_the_shipped_seed_is_uncapped_and_says_so_in_its_provenance(tmp_path: Path) -> None:
+    """Pins today's shipped behaviour, including the disputed band.
+
+    Until the accountant of record rules on the ceiling (docs/REMAINING_BLOCKERS.md
+    LB-1), the seeded rule applies 2 % with no ceiling and records that fact in
+    the per-invoice provenance. These numbers are what the code does, not a
+    claim about what the law requires.
+    """
+    # A clean company carrying only the shipped seed: _build() installs a fake
+    # ACTIVE test rule that would shadow it.
+    db = ERPDatabase(str(tmp_path / "seed.sqlite3"))
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO companies (id, code, name, country_code, chart_template, created_at)"
+            " VALUES (1, 'DZ1', 'Seed Co', 'DZ', 'dz', '2026-01-01')"
+        )
+    load_official_odoo_chart(db, company_id=1, apply_fixes_immediately=True, actor_user_id=None)
+    with db.transaction() as conn:
+        rule = resolve_timbre_rule(conn, 1, "2026-02-14")
+    assert rule.version_code == "LF-2025-CASH-TIMBRE"
+    assert rule.max_amount_dzd is None  # deliberate, see the seeding comment
+
+    kwargs = rule.as_kwargs()
+    # Boundaries around the disputed band: 100,000.00 stays on the 1.5 % band,
+    # one cent above it enters the 2 % band.
+    assert calculate_droit_de_timbre("100000.00", "CASH", **kwargs) == Decimal("1500.00")
+    assert calculate_droit_de_timbre("100000.01", "CASH", **kwargs) == Decimal("2000.00")
+    # The band the specification used to describe as capped at 10,000.00:
+    assert calculate_droit_de_timbre("500000.00", "CASH", **kwargs) == Decimal("10000.00")
+    assert calculate_droit_de_timbre("500000.01", "CASH", **kwargs) == Decimal("10000.00")
+    # A base whose 2 % exceeds the disputed ceiling: the code does NOT cap it.
+    assert calculate_droit_de_timbre("600000.00", "CASH", **kwargs) == Decimal("12000.00")
+
+    snapshot = timbre_provenance_snapshot(
+        rule, base_amount="600000.00", payment_method="CASH",
+        computed_amount="12000.00", stage="validation",
+    )
+    # An auditor can see from the invoice alone that no ceiling was applied.
+    assert snapshot["rule"]["max_amount_dzd"] is None
+    assert snapshot["calculation"]["amount_timbre_dzd"] == "12000.00"
+
+
+def test_fr2_1_the_specification_does_not_claim_a_ceiling_the_seed_does_not_apply() -> None:
+    """A documentation/code guard, so the contradiction cannot quietly return.
+
+    Finding F-R2-1 survived several review rounds because prose and code drifted
+    apart with nothing to compare them. This test reads the spec's stamp-duty
+    section and refuses a stated ceiling that the shipped seed does not apply.
+    """
+    import re
+
+    spec_path = Path(__file__).resolve().parents[1] / "docs" / "ALGERIAN_SCF_LOCALIZATION_SPEC.md"
+    if not spec_path.exists():  # pragma: no cover - packaging without docs
+        pytest.skip("specification not present in this checkout")
+    section = spec_path.read_text(encoding="utf-8")
+
+    stated = re.findall(r"capped at \$?([0-9][0-9,]*(?:\.[0-9]{2})?)", section)
+    applied = _builtin_timbre_rule().max_amount_dzd
+    assert applied is None, (
+        "the built-in rule now applies a ceiling; update this guard and the spec together"
+    )
+    assert not stated, (
+        "The specification states a stamp-duty ceiling the shipped rule does not apply: "
+        f"{stated}. Either configure it (with the rule text in force) or remove the claim."
+    )

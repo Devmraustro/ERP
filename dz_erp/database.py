@@ -213,6 +213,11 @@ CREATE TABLE IF NOT EXISTS products (
     standard_cost_dzd       TEXT NOT NULL DEFAULT '0.000000',
     stock_account_code      TEXT NOT NULL DEFAULT '31',
     clearing_account_code   TEXT NOT NULL DEFAULT '380',
+    -- F-R2-3: where a receipt-cost / invoice-price difference is booked.
+    -- NULL means no policy has been approved: the difference is then
+    -- recorded on the invoice as an explained, audited residual instead of
+    -- being posted to an account nobody chose.
+    price_variance_account_code TEXT,
     expense_account_code    TEXT NOT NULL DEFAULT '600',
     income_account_code     TEXT NOT NULL DEFAULT '700',
     UNIQUE(company_id, sku)
@@ -1138,6 +1143,7 @@ class ERPDatabase:
         self._migrate_review_evidence(conn)
         self._migrate_timbre_provenance(conn)
         self._migrate_timbre_rule_administration(conn)
+        self._migrate_price_variance_account(conn)
 
     def _migrate_review_policy(self, conn: sqlite3.Connection) -> None:
         """Phase 29 review-policy schema, idempotently, on pre-existing databases.
@@ -1258,6 +1264,18 @@ class ERPDatabase:
         for name, ddl in additions:
             if name not in cols:
                 conn.execute(f"ALTER TABLE timbre_rules ADD COLUMN {name} {ddl}")
+
+    def _migrate_price_variance_account(self, conn: sqlite3.Connection) -> None:
+        """Add the per-product variance account (F-R2-3). Additive only.
+
+        NULL is the historical and current behaviour — no variance is posted —
+        so existing products keep exactly the treatment they had. Nothing is
+        backfilled with a guessed account code: the account is a policy
+        decision and arrives through configuration.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+        if cols and "price_variance_account_code" not in cols:
+            conn.execute("ALTER TABLE products ADD COLUMN price_variance_account_code TEXT")
 
     def _migrate_timbre_provenance(self, conn: sqlite3.Connection) -> None:
         """Phase 40 (F-04): record which stamp-duty rule produced each amount.

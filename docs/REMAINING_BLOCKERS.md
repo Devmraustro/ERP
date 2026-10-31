@@ -124,3 +124,110 @@ the behaviour, so they close only with a fix plus tests.
 Everything recorded above under "Human review gate" still applies: **0 of 5 PRs**
 carry a human review, and `NOT_PRODUCTION_READY` stands for the external reasons
 in this file independently of the two blockers above.
+
+---
+
+## Round 3 (2026-10-31) — what the remediation fixed, and the two decisions it cannot take
+
+The four findings below were reproduced, fixed in code and pinned by regression
+tests. Two of them surfaced a question that is **not** an engineering question:
+it needs the accountant of record, and nothing in this repository may answer it
+by choosing a number. They are recorded here as **LB-1** and **LB-2**.
+
+### LB-1 — Is the top stamp-duty band capped, and at what figure?
+
+**Status: `BLOCKED_EXTERNAL`.** Owner: the accountant of record (expert-comptable)
+of the deploying company. Required evidence: the *droit de timbre* rule text in
+force for the invoice period (Code du Timbre / the Finance Law article that sets
+the band), stated as a ceiling in DZD or explicitly as "no ceiling".
+
+**What was wrong.** The specification asserted a **10,000.00 DZD** ceiling on the
+2 % band while both the compiled-in rule and the seeded `LF-2025-CASH-TIMBRE` row
+stored `max_amount_dzd = NULL`. Nothing had ever *decided* the rule was uncapped;
+the field was simply omitted, and the prose was never checked against the code.
+Consequence: a 500,000.00 DZD cash base produced exactly 10,000.00 (2 %), a
+600,000.00 base produced 12,000.00, and an invoice that declared the documented
+10,000.00 ceiling was **refused** with `TIMBRE_MISMATCH`.
+
+**What was done instead of guessing.**
+
+1. The specification no longer states a ceiling it cannot source: it records that
+   the shipped seed applies **none**, that the ceiling is **UNDETERMINED**, and
+   why. This is a statement about our code, not a claim about Algerian law.
+2. A rule version can no longer acquire a cap position by omission. The audited
+   administration path requires `max_amount_dzd` to be **declared**: a decimal
+   ceiling, or the explicit sentinel `none` meaning "reviewed and deliberately
+   uncapped". Anything else — including `NULL` and `""` — raises
+   `TIMBRE_RULE_CAP_NOT_DECLARED`. This is the "no undocumented defaults" design:
+   the question is forced in front of a human with the authority to answer it.
+3. A **doc/code guard test** reads the specification and fails if it ever states
+   a ceiling the shipped rule does not apply. Verified to fail when the old
+   sentence is reintroduced.
+4. The disputed band is pinned by boundary tests at 100,000.00, 100,000.01,
+   500,000.00, 500,000.01 and 600,000.00 DZD, so today's behaviour cannot drift
+   while the decision is pending.
+
+**What happens when the answer arrives.** If the band is capped at some figure,
+an authorised user creates a new rule version through `POST /api/v1/tax/timbre-rules`
+with that `max_amount_dzd`, a second user approves it, and the effective-dated
+resolution applies it from then on. **No code change is needed**, invoices
+already posted keep their recorded provenance, and the cap mechanism itself is
+proven by `test_fr2_1_a_declared_cap_is_honoured_at_its_boundary` using a
+synthetic figure. If the answer is "uncapped", the specification sentence is
+already correct and nothing changes.
+
+### LB-2 — Which account carries a purchase price variance?
+
+**Status: `BLOCKED_EXTERNAL`.** Owner: the accountant of record. Required
+evidence: the account code (SCF) to which a receipt-cost ↔ invoice-price
+difference is booked, and the policy choice between booking the variance on the
+invoice and revaluing the stock.
+
+**What was wrong.** The GRN credits the stock-clearing account (`380`) at receipt
+cost; the invoice debits the same account at invoice price. A difference allowed
+by `price_tolerance_dzd` was posted nowhere, so `380` kept a permanent residual:
+1,000.00 received against 1,010.00 invoiced left **+100.00** on `380` for ever,
+and 990.00 left **−100.00**. Totals still balanced, so only a clearing-account
+review would ever notice.
+
+**What was done instead of inventing a policy.**
+
+1. `products.price_variance_account_code` — nullable, no default, additive
+   migration. **No account code was chosen for you**; there is no compiled-in
+   variance account anywhere in the code.
+2. When a product has one, the invoice debit is split: the clearing account gets
+   the *receipt* value (so the GRN nets to 0.00) and the variance account gets
+   the difference, on the debit side when invoiced above receipt and the credit
+   side when below. The split is exact — the two halves always add back to the
+   invoiced line, with no rounding cent of its own.
+3. When a product has none, the historical posting is preserved unchanged **but
+   the residual is no longer anonymous**: the post result carries
+   `unallocated_price_variances` and an audit event
+   `PRICE_VARIANCE_UNALLOCATED` names the amount, the line and the reason
+   (`NO_PRICE_VARIANCE_ACCOUNT_CONFIGURED`).
+4. Ten regression tests cover the exact match, both directions, above-tolerance
+   refusal, partial receipt + partial invoice, multiple receipts against one
+   invoice, rounding, the unconfigured case and the reversal mirror.
+
+**Not decided here, on purpose:** whether the variance belongs on a purchase
+variance account, a cost-of-goods adjustment, or a stock revaluation; and whether
+the tolerance itself (`price_tolerance_dzd`) is a control the business wants.
+
+### Fixed and verified in this round (no external dependency)
+
+| Finding | Fix | Tests |
+|---|---|---|
+| **F-R2-2** reversal idempotency | `request_sha256` compared at both `REVERSE_INVOICE` sites; mismatch → `IDEMPOTENCY_KEY_PAYLOAD_MISMATCH`, audited as `REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH` | `tests/test_phase33_invoice_lifecycle.py` — 3 tests (both paths, changed reason, changed invoice, concurrency) |
+| **F-R2-4** negative amounts | non-positive unit price and negative header totals refused at validation, on correcting edits, and again at posting | `tests/test_phase33_invoice_lifecycle.py` — 4 tests |
+| **F-R2-5** weak row assertion | exact 16-row pin plus required-field coverage by name | `tests/test_phase29_ocr_review_policy.py` |
+| **F-R2-6** dead `None` branch | `None` tested before parsing; distinct `..._SOURCE_MISSING` codes | `tests/test_phase29_ocr_review_policy.py::test_fr2_6_*` |
+
+**R-08 and R-09 remain open and unchanged.** This round was authorized to fix
+F-R2-2, prepare F-R2-1, investigate F-R2-3/F-R2-4 and fix the two nits; the
+audit-key publish residuals were out of scope, are still un-fixed, and still have
+no regression test. Their recorded consequence stands: a lost key file fails
+loudly (`AuditKeyUnavailableError`) and never mints a replacement.
+
+Nothing in this file was cleared by the remediation. `NOT_PRODUCTION_READY` still
+applies for the external reasons above and for the deployment items that predate
+this round.

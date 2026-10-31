@@ -388,6 +388,13 @@ def load_official_odoo_chart(
                 (company_id, xml_id, name_en, name_fr, use, rate, acct_code, reason, b_tag, t_tag),
             )
 
+        # ``max_amount_dzd = NULL`` here is a *deliberate, reviewable* statement
+        # that this seeded rule carries no ceiling — it is not an omitted field.
+        # The spec used to advertise a 10,000.00 DZD ceiling on the top band that
+        # no rule ever applied (finding F-R2-1); the ceiling is undetermined
+        # until the accountant of record supplies the rule text in force. See
+        # docs/ALGERIAN_SCF_LOCALIZATION_SPEC.md §3 and docs/REMAINING_BLOCKERS.md
+        # (LB-1). Setting a figure here without that document would invent law.
         conn.execute(
             """
             INSERT INTO timbre_rules (
@@ -1252,6 +1259,34 @@ def _validate_reason(reason: Any, action: str) -> str:
     return text
 
 
+#: The only way to declare a stamp-duty rule *deliberately uncapped*.
+#:
+#: A missing ``max_amount_dzd`` used to mean "no ceiling" without anyone saying
+#: so, which is how the specification came to advertise a 10,000.00 DZD ceiling
+#: that no rule ever applied (finding F-R2-1). A rule must now state its cap
+#: position explicitly: either a decimal ceiling, or this sentinel meaning
+#: "reviewed and deliberately uncapped". ``None``/omitted is refused.
+TIMBRE_CAP_DECLARED_UNCAPPED = "none"
+
+
+def _cap_or_refuse(value: Any) -> Optional[str]:
+    """Parse an explicit cap declaration; ``None`` stored means uncapped.
+
+    Returns the formatted ceiling, or ``None`` for a deliberate
+    :data:`TIMBRE_CAP_DECLARED_UNCAPPED` declaration. An omitted value is
+    refused rather than silently interpreted as "uncapped".
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise TimbreRuleAdministrationError(
+            "TIMBRE_RULE_CAP_NOT_DECLARED:max_amount_dzd must be declared explicitly — either a "
+            "decimal ceiling, or 'none' to record that the rule is deliberately uncapped. "
+            "Omitting it would silently choose a tax treatment nobody reviewed."
+        )
+    if isinstance(value, str) and value.strip().lower() == TIMBRE_CAP_DECLARED_UNCAPPED:
+        return None
+    return _amount_or_refuse(value, "max_amount_dzd", required=True)
+
+
 def _amount_or_refuse(value: Any, field_name: str, *, required: bool = True) -> Optional[str]:
     if value is None or (isinstance(value, str) and not value.strip()):
         if required:
@@ -1334,7 +1369,7 @@ def create_timbre_rule_version(
     parsed_brackets = _brackets_from_input(brackets, code)
     minimum = _amount_or_refuse(min_amount_dzd, "min_amount_dzd")
     threshold = _amount_or_refuse(threshold_dzd, "threshold_dzd")
-    maximum = _amount_or_refuse(max_amount_dzd, "max_amount_dzd", required=False)
+    maximum = _cap_or_refuse(max_amount_dzd)
     now_iso = datetime.now(timezone.utc).isoformat()
 
     with db.transaction() as conn:

@@ -210,13 +210,21 @@ def _source_invoice_mismatches(
                 # divergence was already flagged above, which blocks
                 # regardless.
                 raw_source_price = price_eval["value"]
+                # A decided-but-absent reading is its own case. It used to be
+                # unreachable: ``str(None)`` raised inside the parser below, so
+                # a missing price was reported as "unparseable" — a different
+                # and less accurate refusal. The None test therefore comes
+                # first, and the parse only sees real strings (F-R2-6).
+                if raw_source_price is None:
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISSING")
+                    continue
                 try:
                     source_price = round_qty(to_decimal(str(raw_source_price)))
                     invoice_price = round_qty(to_decimal(str(invoice_line["unit_price_dzd"])))
                 except (ValueError, TypeError, ArithmeticError):
                     mismatches.append(f"LINE_{index}_PRICE_SOURCE_UNPARSEABLE")
                     continue
-                if raw_source_price is None or source_price != invoice_price:
+                if source_price != invoice_price:
                     mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISMATCH")
                 # The decided discount is the third binding: exact 2-decimal
                 # equality with the invoice line's first-class discount
@@ -224,13 +232,16 @@ def _source_invoice_mismatches(
                 # an unparseable or missing reading is refused, not treated
                 # as zero.
                 raw_source_discount = discount_eval["value"]
+                if raw_source_discount is None:
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISSING")
+                    continue
                 try:
                     source_discount = round_dzd(to_decimal(str(raw_source_discount)))
                     invoice_discount = round_dzd(to_decimal(str(invoice_line["discount_pct"])))
                 except (ValueError, TypeError, ArithmeticError):
                     mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_UNPARSEABLE")
                     continue
-                if raw_source_discount is None or source_discount != invoice_discount:
+                if source_discount != invoice_discount:
                     mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISMATCH")
                 # Line-net comparison, only where the representations are
                 # semantically equivalent: both sides mean the same
@@ -516,6 +527,13 @@ def _validate_invoice_lines(
             errors.append(f"LINE_{idx + 1}_DISCOUNT_OUT_OF_RANGE:{disc}")
         if qty <= Decimal("0.000000"):
             errors.append(f"LINE_{idx + 1}_QTY_NONPOSITIVE:{qty}")
+        # F-R2-4: the same policy that refuses a non-positive quantity refuses a
+        # non-positive unit price. A negative price is not how this system models
+        # a credit note — a reversal is an IN_REFUND document with positive
+        # amounts (see reverse_posted_invoice) — so a negative price can only
+        # produce a negative-valued payable line that no workflow expects.
+        if pu <= Decimal("0.000000"):
+            errors.append(f"LINE_{idx + 1}_PRICE_NONPOSITIVE:{pu}")
 
         expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
         declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
@@ -588,6 +606,17 @@ def _validate_invoice_totals(
     rule version governs the calculation instead of a constant.
     """
     errors: List[str] = []
+    # F-R2-4: zero is legitimate (exempt, fully discounted); a negative total is
+    # not. A credit note carries positive amounts, so a negative header can only
+    # come from a malformed payload — and it would post a negative payable.
+    for label, value in (
+        ("HT", ht_dec),
+        ("TVA", tva_dec),
+        ("TIMBRE", timbre_dec),
+        ("TTC", ttc_dec),
+    ):
+        if value < Decimal("0.00"):
+            errors.append(f"HEADER_AMOUNT_NEGATIVE:{label}={value:.2f}")
     if sum_line_ht != ht_dec:
         errors.append(f"HEADER_HT_MISMATCH:sum_lines={sum_line_ht:.2f}!=header_ht={ht_dec:.2f}")
     if sum_line_tva != tva_dec:
@@ -1992,6 +2021,10 @@ def modify_draft_invoice_line(
         rate = to_decimal(line["tax_rate"])
         if qty <= Decimal("0.000000"):
             raise FinancialIntegrityError(f"LINE_QTY_NONPOSITIVE:{qty}")
+        if pu <= Decimal("0.000000"):
+            # F-R2-4: a correction may not introduce the amount the validation
+            # gate refuses.
+            raise FinancialIntegrityError(f"LINE_PRICE_NONPOSITIVE:{pu}")
         if disc < Decimal("0.00") or disc > Decimal("100.00"):
             raise FinancialIntegrityError(f"LINE_DISCOUNT_OUT_OF_RANGE:{disc}")
 
@@ -2213,6 +2246,54 @@ def _refuse_posting_and_recover(
         )
 
 
+def _line_price_variance(
+    conn: Any,
+    company_id: int,
+    line: Any,
+    qty: Any,
+    line_ht: Any,
+) -> tuple[Any, Any, Any]:
+    """Receipt value, invoice value and their difference for one storable line.
+
+    The GRN credits the clearing account at the *receipt* cost recorded on
+    ``goods_receipt_lines``; the invoice debits the same account at the
+    *invoice* price. When those differ, the gap does not belong on the clearing
+    account — it is a purchase price variance. This returns:
+
+    * ``received_value`` — what the matched receipts put on the clearing account;
+    * ``invoice_value`` — what the invoice charges for the same quantity;
+    * ``variance`` — ``invoice_value - received_value`` (positive = invoiced
+      above receipt).
+
+    A line with no receipt history, or a non-storable line, has no receipt cost
+    to compare against and returns a zero variance, leaving the historical
+    treatment untouched.
+    """
+    zero = Decimal("0.00")
+    if not line["product_id"] or not line["po_line_id"]:
+        return line_ht, line_ht, zero
+    received = conn.execute(
+        """
+        SELECT COALESCE(SUM(CAST(grl.qty_done AS REAL) * CAST(grl.unit_cost_dzd AS REAL)), 0) AS v,
+               COALESCE(SUM(CAST(grl.qty_done AS REAL)), 0) AS q
+        FROM goods_receipt_lines grl
+        JOIN goods_receipts gr ON gr.id = grl.grn_id
+        WHERE grl.po_line_id = ? AND grl.company_id = ? AND gr.company_id = ?
+        """,
+        (line["po_line_id"], company_id, company_id),
+    ).fetchone()
+    received_qty = Decimal(str(received["q"] or 0))
+    if received_qty <= zero:
+        return line_ht, line_ht, zero
+    # Receipt cost per unit, then the share of it attributable to the invoiced
+    # quantity. Quantising keeps the two halves exactly additive: the split can
+    # never introduce a rounding cent of its own.
+    unit_received = Decimal(str(received["v"])) / received_qty
+    received_value = round_dzd(unit_received * qty)
+    invoice_value = round_dzd(line_ht)
+    return received_value, invoice_value, (invoice_value - received_value)
+
+
 def _post_supplier_invoice_in_transaction(
     db: ERPDatabase,
     company_id: int,
@@ -2312,16 +2393,30 @@ def _post_supplier_invoice_in_transaction(
 
         lines = conn.execute("SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)).fetchall()
         je_lines: List[Dict[str, Any]] = []
+        # F-R2-3: receipt-cost vs invoice-price differences, and whether an
+        # approved account exists to carry them.
+        price_variances: List[Dict[str, Any]] = []
+        unallocated_variances: List[Dict[str, Any]] = []
 
         # Re-verify 3-way match at posting time under transaction lock and update qty_invoiced
         for line in lines:
             qty = round_qty(line["qty"])
             line_ht = round_dzd(line["line_ht_dzd"])
+            if qty <= Decimal("0.000000") or line_ht < Decimal("0.00"):
+                # F-R2-4: the gates above refuse this; posting re-checks rather
+                # than trusting the stored row, because a negative amount here
+                # would book a negative payable and a negative net line whose
+                # debit/credit totals still balance.
+                raise FinancialIntegrityError(
+                    f"LINE_AMOUNT_NONPOSITIVE:qty={qty},line_ht={line_ht}"
+                )
             debit_acct = "600"
+            variance_account: Optional[str] = None
             if line["product_id"]:
                 prod = conn.execute("SELECT * FROM products WHERE id = ?", (line["product_id"],)).fetchone()
                 if prod and prod["is_storable"]:
                     debit_acct = prod["clearing_account_code"]  # 380 Achats stockés clearing account
+                    variance_account = prod["price_variance_account_code"]
                 elif prod:
                     debit_acct = prod["expense_account_code"]
 
@@ -2342,15 +2437,52 @@ def _post_supplier_invoice_in_transaction(
                     (f"{new_invoiced:.6f}", po_line["id"]),
                 )
 
+            # Split the debit between what the stock was actually received at
+            # (the clearing account, so the GRN credit nets out) and the
+            # difference caused by a price change between receipt and invoice.
+            received_value, invoice_value, variance = _line_price_variance(
+                conn, company_id, line, qty, line_ht
+            )
             je_lines.append(
                 {
                     "account_code": debit_acct,
                     "label": f"Bill {inv['supplier_invoice_no']} - {line['description']}",
-                    "debit_dzd": format_dzd(line_ht),
+                    "debit_dzd": format_dzd(received_value if variance != 0 else line_ht),
                     "credit_dzd": "0.00",
                     "g50_tag": "E3B91_base",
                 }
             )
+            if variance != 0:
+                record = {
+                    "line_id": int(line["id"]),
+                    "product_id": line["product_id"],
+                    "qty": f"{qty:.6f}",
+                    "received_value_dzd": format_dzd(received_value),
+                    "invoice_value_dzd": format_dzd(invoice_value),
+                    "variance_dzd": format_dzd(variance),
+                    "variance_account_code": variance_account,
+                }
+                if variance_account:
+                    # Positive variance = invoiced above receipt (extra cost);
+                    # negative = invoiced below (a gain). Book it on the side
+                    # that keeps the entry balanced, never both.
+                    je_lines.append(
+                        {
+                            "account_code": variance_account,
+                            "label": f"Écart de prix {inv['supplier_invoice_no']} - {line['description']}",
+                            "debit_dzd": format_dzd(variance) if variance > 0 else "0.00",
+                            "credit_dzd": format_dzd(-variance) if variance < 0 else "0.00",
+                            "g50_tag": None,
+                        }
+                    )
+                    price_variances.append(record)
+                else:
+                    # No approved accounting policy: the invoice bears the full
+                    # invoice price on the clearing account exactly as before,
+                    # but the residual is named, quantified and audited rather
+                    # than left unexplained (see docs/REMAINING_BLOCKERS.md LB-2).
+                    je_lines[-1]["debit_dzd"] = format_dzd(line_ht)
+                    unallocated_variances.append(record)
 
         tva_dec = round_dzd(inv["amount_tva_dzd"])
         if tva_dec > Decimal("0.00"):
@@ -2470,8 +2602,33 @@ def _post_supplier_invoice_in_transaction(
             "entry_number": entry_no,
             "total_debit_dzd": format_dzd(total_debit),
             "total_credit_dzd": format_dzd(total_credit),
+            "price_variances": price_variances,
+            "unallocated_price_variances": unallocated_variances,
             "idempotent_replay": False,
         }
+        if unallocated_variances:
+            # The residual is real and stays on the clearing account because no
+            # approved account exists to carry it. Naming it here means it is
+            # never an unexplained balance: an auditor can match the amount to
+            # a policy decision (docs/REMAINING_BLOCKERS.md LB-2).
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=accountant_user_id,
+                action_type="PRICE_VARIANCE_UNALLOCATED",
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state={
+                    "invoice_id": invoice_id,
+                    "reason": "NO_PRICE_VARIANCE_ACCOUNT_CONFIGURED",
+                    "note": (
+                        "Receipt cost and invoice price differ; the difference remains on the "
+                        "clearing account because no variance account is configured for the "
+                        "product. Configure products.price_variance_account_code to book it."
+                    ),
+                    "lines": unallocated_variances,
+                },
+            )
         conn.execute(
             """
             INSERT INTO idempotency_records (company_id, idempotency_key, operation, request_sha256, status, response_json, created_at)
@@ -2510,6 +2667,12 @@ def reverse_posted_invoice(
             (company_id, idempotency_key),
         ).fetchone()
         if idem:
+            # The key identifies the operation, not the request: a replay must
+            # also carry the fingerprint recorded with it. A different reason is
+            # a different reversal request, so it is refused rather than being
+            # answered with someone else's cached success.
+            if idem["request_sha256"] != req_hash:
+                raise FinancialIntegrityError("IDEMPOTENCY_KEY_PAYLOAD_MISMATCH")
             cached = json.loads(idem["response_json"])
             cached["idempotent_replay"] = True
             return cached
@@ -2723,6 +2886,28 @@ def _create_reversal_request(
             (company_id, idempotency_key),
         ).fetchone()
         if idem:
+            # The key identifies the operation, not the request: a replay must
+            # also carry the fingerprint recorded with it. A different reason is
+            # a different reversal request, so it is refused rather than being
+            # answered with someone else's cached success. The refusal is
+            # audited by the public wrapper after the attempt is rolled back.
+            if idem["request_sha256"] != req_hash:
+                raise _RefusedAttempt(
+                    "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH: this idempotency key was already used for "
+                    "a different reversal request; the recorded result is not a replay of this one.",
+                    action_type="REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH",
+                    target_model="supplier_invoices",
+                    target_id=str(original_invoice_id),
+                    after_state={
+                        "company_id": company_id,
+                        "original_invoice_id": original_invoice_id,
+                        "idempotency_key": idempotency_key,
+                        "attempted_reason": reason,
+                        "attempted_request_sha256": req_hash,
+                        "recorded_request_sha256": idem["request_sha256"],
+                        "refusal_reason": "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH",
+                    },
+                )
             cached = json.loads(idem["response_json"])
             cached["idempotent_replay"] = True
             return cached

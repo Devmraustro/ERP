@@ -49,6 +49,7 @@ from dz_erp.procurement_stock import (
     modify_draft_invoice_line,
     post_reversal,
     post_supplier_invoice,
+    reverse_posted_invoice,
     revalidate_supplier_invoice,
     submit_invoice_for_approval,
     submit_reversal_for_approval,
@@ -1097,3 +1098,270 @@ def test_migration_is_idempotent_and_repeated_runs_are_safe(tmp_path):
     assert _invoice(reopened, invoice_id)["workflow_state"] == "Posted"
     assert reopened.verify_audit_chain(1)["valid"] is True
     assert _document_state(reopened, document_id) == "Posted"
+
+
+# ---------------------------------------------------------------------------
+# F-R2-2 — REVERSE_INVOICE idempotency must compare the request fingerprint
+# ---------------------------------------------------------------------------
+def _reversal_side_effects(db) -> dict:
+    """Everything a duplicate reversal could move: notes, entries, payment rows."""
+    with db.transaction() as conn:
+        return {
+            "credit_notes": conn.execute(
+                "SELECT COUNT(*) AS n FROM supplier_invoices WHERE invoice_type = 'IN_REFUND'"
+            ).fetchone()["n"],
+            "journal_entries": conn.execute(
+                "SELECT COUNT(*) AS n FROM journal_entries"
+            ).fetchone()["n"],
+            "idempotency_records": conn.execute(
+                "SELECT COUNT(*) AS n FROM idempotency_records WHERE operation = 'REVERSE_INVOICE'"
+            ).fetchone()["n"],
+        }
+
+
+def test_fr2_2_same_reversal_key_with_a_different_reason_is_refused_not_replayed(env):
+    """A key identifies the request, not just the operation.
+
+    Regression for F-R2-2: ``_create_reversal_request`` replayed a
+    ``REVERSE_INVOICE`` key without comparing ``request_sha256``, so a second
+    request carrying a *different reason* was answered with the first request's
+    cached success — a silently dropped request reported as a successful replay.
+    """
+    db, vault, client = env
+    _document_id, invoice_id = _reviewed_invoice(db, vault)
+    _post(db, invoice_id)
+
+    first = create_reversal_request(db, 1, 4, invoice_id, "supplier dispute", "rev-fr2-2")
+    after_first = _reversal_side_effects(db)
+
+    # 1. Identical request: still a safe replay, same credit note, no new rows.
+    replay = create_reversal_request(db, 1, 4, invoice_id, "supplier dispute", "rev-fr2-2")
+    assert replay["idempotent_replay"] is True
+    assert replay["credit_note_invoice_id"] == first["credit_note_invoice_id"]
+    assert _reversal_side_effects(db) == after_first
+
+    # 2. Same key, different reason: refused, never reported as a replay.
+    with pytest.raises(FinancialIntegrityError, match="IDEMPOTENCY_KEY_PAYLOAD_MISMATCH") as refused:
+        create_reversal_request(db, 1, 4, invoice_id, "duplicate billing", "rev-fr2-2")
+    assert not isinstance(refused.value, sqlite3.IntegrityError)
+
+    # 3. No second credit note, no second entry, no overwritten record.
+    assert _reversal_side_effects(db) == after_first
+
+    # 4. The refusal is attributed evidence, committed outside the rollback.
+    with db.transaction() as conn:
+        event = conn.execute(
+            "SELECT after_json FROM audit_events"
+            " WHERE action_type = 'REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH'"
+            " ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    payload = json.loads(event["after_json"])
+    assert payload["attempted_reason"] == "duplicate billing"
+    assert payload["refusal_reason"] == "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH"
+    assert payload["attempted_request_sha256"] != payload["recorded_request_sha256"]
+
+    # 5. Over HTTP the refusal is a stable conflict, never a 500.
+    token = client.post(
+        "/api/v1/auth/token", json={"username": "acct_a", "password": "Acct#2026x"}
+    ).json()["access_token"]
+    resp = client.post(
+        f"/api/v1/invoices/{invoice_id}/reverse",
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "rev-fr2-2"},
+        json={"reason": "duplicate billing"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH" in resp.json()["detail"]
+
+    assert db.trial_balance(1)["balanced"] is True
+    assert db.verify_audit_chain(1)["valid"] is True
+
+
+def test_fr2_2_direct_reversal_path_also_rejects_a_changed_fingerprint(env):
+    """The same guard on the lower-level ``reverse_posted_invoice`` entry point.
+
+    Both affected call sites are covered independently: this one posts the
+    credit note itself, so a replay that was wrongly answered would be a
+    duplicate ledger entry rather than just a wrong response.
+    """
+    db, vault, _client = env
+    _document_id, invoice_id = _reviewed_invoice(db, vault)
+    _post(db, invoice_id)
+
+    first = reverse_posted_invoice(db, 1, 4, invoice_id, "supplier dispute", "rev-direct-fr2-2")
+    after_first = _reversal_side_effects(db)
+
+    replay = reverse_posted_invoice(db, 1, 4, invoice_id, "supplier dispute", "rev-direct-fr2-2")
+    assert replay["idempotent_replay"] is True
+    assert replay["credit_note_invoice_id"] == first["credit_note_invoice_id"]
+
+    with pytest.raises(FinancialIntegrityError, match="IDEMPOTENCY_KEY_PAYLOAD_MISMATCH"):
+        reverse_posted_invoice(db, 1, 4, invoice_id, "a different reason", "rev-direct-fr2-2")
+
+    assert _reversal_side_effects(db) == after_first
+    # Exactly one reversal entry exists, and the original still points at it.
+    with db.transaction() as conn:
+        reversal = conn.execute(
+            "SELECT id, total_debit_dzd FROM journal_entries WHERE id = ?",
+            (first["reversal_journal_entry_id"],),
+        ).fetchone()
+        original = conn.execute(
+            "SELECT reversal_entry_id FROM journal_entries WHERE id ="
+            " (SELECT journal_entry_id FROM supplier_invoices WHERE id = ?)",
+            (invoice_id,),
+        ).fetchone()
+    assert reversal is not None
+    assert original["reversal_entry_id"] == first["reversal_journal_entry_id"]
+    assert db.trial_balance(1)["balanced"] is True
+
+
+def test_fr2_2_concurrent_reversal_retries_never_duplicate_or_misreport(env):
+    """Concurrency, not just sequencing.
+
+    Four threads race on one key: identical requests must converge on a single
+    credit note (one write, three replays), and a thread carrying a different
+    reason must be refused rather than handed the winner's result.
+    """
+    db, vault, _client = env
+    _document_id, invoice_id = _reviewed_invoice(db, vault)
+    _post(db, invoice_id)
+
+    results = []
+    lock = threading.Lock()
+
+    def _attempt(reason):
+        try:
+            res = create_reversal_request(db, 1, 4, invoice_id, reason, "rev-race-fr2-2")
+            outcome = ("replay", res["credit_note_invoice_id"]) if res.get("idempotent_replay") \
+                else ("created", res["credit_note_invoice_id"])
+        except FinancialIntegrityError as exc:
+            assert "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH" in str(exc), exc
+            outcome = ("refused", None)
+        with lock:
+            results.append(outcome)
+
+    identical = [threading.Thread(target=_attempt, args=("supplier dispute",)) for _ in range(3)]
+    for t in identical:
+        t.start()
+    for t in identical:
+        t.join()
+    created = [r for r in results if r[0] == "created"]
+    assert len(created) == 1, results
+    assert len([r for r in results if r[0] == "replay"]) == 2, results
+    assert _reversal_side_effects(db)["credit_notes"] == 1
+
+    # A late different-reason retry on the same key is refused, not replayed.
+    with pytest.raises(FinancialIntegrityError, match="IDEMPOTENCY_KEY_PAYLOAD_MISMATCH"):
+        create_reversal_request(db, 1, 4, invoice_id, "changed reason", "rev-race-fr2-2")
+    assert _reversal_side_effects(db)["credit_notes"] == 1
+    assert db.trial_balance(1)["balanced"] is True
+    assert db.verify_audit_chain(1)["valid"] is True
+
+
+# ---------------------------------------------------------------------------
+# F-R2-4 — non-positive amounts are refused, without forbidding credit notes
+# ---------------------------------------------------------------------------
+def test_fr2_4_a_negative_unit_price_never_reaches_validation_or_posting(env):
+    """The quantity rule already refused non-positive quantities; price did not.
+
+    A negative price multiplied by a positive quantity produced a negative line
+    that matched a negative header, so the invoice validated, was approved and
+    posted a negative payable (``600`` debit −1000.00 / ``401`` credit −1000.00).
+    """
+    db, vault, client = env
+    created = _create(
+        db, document_id=None, invoice_no="FAC-NEG-1",
+        amount_ht="-1000.00", amount_tva="-190.00", amount_ttc="-1190.00",
+        lines=[_line(qty="2", price="-500.00")],
+    )
+    assert created["workflow_state"] == "NeedsReview"
+    assert any("LINE_1_PRICE_NONPOSITIVE" in e for e in created["validation_errors"])
+
+    # The recoverable state is a gate, not a suggestion: submission is refused.
+    with pytest.raises(FinancialIntegrityError):
+        submit_invoice_for_approval(db, 1, 2, created["invoice_id"])
+
+    with db.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM journal_entries"
+        ).fetchone()["n"] == 0
+    assert db.trial_balance(1)["balanced"] is True
+
+
+def test_fr2_4_a_negative_header_total_is_refused_even_with_positive_lines(env):
+    db, _vault, _client = env
+    created = _create(
+        db, document_id=None, invoice_no="FAC-NEG-2",
+        amount_ht="-1000.00", amount_tva="190.00", amount_ttc="-810.00",
+        lines=[_line(qty="2", price="500.00")],
+    )
+    codes = " ".join(created["validation_errors"])
+    assert "HEADER_AMOUNT_NEGATIVE:HT=-1000.00" in codes
+    assert created["workflow_state"] == "NeedsReview"
+
+    zero_but_legitimate = _create(
+        db, document_id=None, invoice_no="FAC-ZERO-1",
+        amount_ht="0.00", amount_tva="0.00", amount_ttc="0.00",
+        lines=[_line(qty="2", price="500.00", discount="100")],
+    )
+    # A fully discounted invoice is zero, not negative: it validates.
+    assert zero_but_legitimate["workflow_state"] == "Validated", zero_but_legitimate["validation_errors"]
+
+
+def test_fr2_4_a_correcting_edit_cannot_introduce_a_nonpositive_price(env):
+    from dz_erp.database import FinancialIntegrityError as _FIE
+
+    db, vault, _client = env
+    document_id = _upload(db, vault)["document_id"]
+    _review_all(db, 1, document_id)
+    created = _create(db, document_id=document_id, invoice_no="FAC-EDIT-1")
+    invoice_id = created["invoice_id"]
+    with db.transaction() as conn:
+        line_id = conn.execute(
+            "SELECT id FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)
+        ).fetchone()["id"]
+
+    with pytest.raises(_FIE, match="LINE_PRICE_NONPOSITIVE"):
+        modify_draft_invoice_line(db, 1, 2, invoice_id, line_id, new_unit_price_dzd="-1.00")
+
+    # The refusal left the stored line untouched.
+    with db.transaction() as conn:
+        stored = conn.execute(
+            "SELECT unit_price_dzd FROM supplier_invoice_lines WHERE id = ?", (line_id,)
+        ).fetchone()
+    assert Decimal(stored["unit_price_dzd"]) > 0
+
+
+def test_fr2_4_a_reversal_still_credit_notes_with_positive_amounts(env):
+    """The legitimate route to a negative movement is a credit note, unchanged."""
+    db, vault, _client = env
+    _document_id, invoice_id = _reviewed_invoice(db, vault)
+    _post(db, invoice_id)
+
+    first = create_reversal_request(db, 1, 4, invoice_id, "supplier dispute", "neg-route-1")
+    note_id = first["credit_note_invoice_id"]
+    with db.transaction() as conn:
+        note = conn.execute(
+            "SELECT amount_ht_dzd, amount_tva_dzd, amount_ttc_dzd, invoice_type"
+            " FROM supplier_invoices WHERE id = ?", (note_id,)
+        ).fetchone()
+    # A credit note is an IN_REFUND carrying positive amounts, never a negative
+    # invoice — which is why refusing negative amounts forbids nothing.
+    assert note["invoice_type"] == "IN_REFUND"
+    assert Decimal(note["amount_ht_dzd"]) > 0
+    assert Decimal(note["amount_ttc_dzd"]) > 0
+
+    submit_reversal_for_approval(db, 1, 4, note_id)
+    decide_reversal_approval(db, 1, 3, note_id, approve=True)
+    post_reversal(db, 1, 4, note_id, "neg-post-1")
+    with db.transaction() as conn:
+        lines = conn.execute(
+            "SELECT l.debit_dzd, l.credit_dzd FROM journal_entry_lines l"
+            " JOIN journal_entries je ON je.id = l.journal_entry_id"
+            " JOIN supplier_invoices si ON si.journal_entry_id = je.reversal_entry_id"
+            " WHERE si.id = ?",
+            (invoice_id,),
+        ).fetchall()
+    assert lines, "the credit note posted no journal lines"
+    # Every posted amount is non-negative; direction is carried by the side.
+    assert all(Decimal(row["debit_dzd"]) >= 0 and Decimal(row["credit_dzd"]) >= 0 for row in lines)
+    assert db.trial_balance(1)["balanced"] is True

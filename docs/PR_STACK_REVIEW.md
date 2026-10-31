@@ -791,3 +791,133 @@ The commit boundary matters on purpose: the findings describe code exactly as it
 stands at `b679bc49`, and the only thing added after that point is prose. A
 reviewer can therefore verify every repro above against the same tree the PRs
 contain.
+
+---
+
+## 10. Round 3 — targeted remediation (2026-10-31)
+
+This section records what changed after §9, which asked for changes. Every fix
+below is backed by a test that fails without it; nothing was merged, retargeted
+or deployed, and no claim in §9 was quietly dropped.
+
+Reviewed head going in: `b679bc496b8053384ab40bcbd86c5db474140f42`.
+Delivery head coming out: see §10.7.
+
+### 10.1 F-R2-2 — reversal idempotency · **FIXED**
+
+Both `REVERSE_INVOICE` sites now compare the fingerprint, exactly as
+`POST_INVOICE` (`procurement_stock.py:2236`) and `POST_REVERSAL` (`:3133`) did:
+
+| Site | Change |
+|---|---|
+| `reverse_posted_invoice` (`procurement_stock.py:2514`) | `if idem["request_sha256"] != req_hash: raise FinancialIntegrityError("IDEMPOTENCY_KEY_PAYLOAD_MISMATCH")` |
+| `_create_reversal_request` (`procurement_stock.py:2737`) | same guard, raised as `_RefusedAttempt` carrying `REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH`, so the refusal is audited by the public wrapper *after* the attempt rolls back |
+
+Behaviour, measured rather than asserted:
+
+```
+A. same key same reason   -> replay: True  | same credit note: True | no new rows: True
+B. different reason       -> refused: IDEMPOTENCY_KEY_PAYLOAD_MISMATCH | no side effect: True
+C. different invoice      -> refused: IDEMPOTENCY_KEY_PAYLOAD_MISMATCH | no side effect: True
+D. direct path, same      -> replay: True  | no new rows: True
+D. direct path, changed   -> refused: IDEMPOTENCY_KEY_PAYLOAD_MISMATCH | no side effect: True
+HTTP: first 200 · same 200 replay=True · changed 409
+audit: [('REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH', 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH')]
+```
+
+Concurrency (four threads on one key): identical retries → 1 created + 3 replays,
+**1** credit note; different reasons → 1 created, 3 refused, still **1** credit
+note. Tests: `tests/test_phase33_invoice_lifecycle.py::test_fr2_2_*` (3).
+
+### 10.2 F-R2-1 — the timbre ceiling · **BLOCKED_EXTERNAL, mechanism FIXED**
+
+No figure was chosen. What changed instead is that the contradiction is gone and
+cannot come back silently:
+
+* the specification states what the code actually does (no ceiling from the
+  shipped seed) and names the decision as undetermined (`docs/ALGERIAN_SCF_LOCALIZATION_SPEC.md` §3);
+* `create_timbre_rule_version` now requires an **explicit** cap declaration —
+  a decimal ceiling or the sentinel `none` — and raises
+  `TIMBRE_RULE_CAP_NOT_DECLARED` for an omission, so "no ceiling" can never again
+  be an accident of a missing field;
+* a doc/code guard test fails if the spec states a ceiling the shipped rule does
+  not apply (verified: reintroducing the old sentence fails it with
+  `['10,000.00']`);
+* boundary tests pin 100,000.00 → 1,500.00, 100,000.01 → 2,000.00,
+  500,000.00 → 10,000.00, 600,000.00 → 12,000.00, and the cap mechanism is proven
+  separately with a synthetic 1,000.00 ceiling.
+
+Decision required and owner: **LB-1** in `docs/REMAINING_BLOCKERS.md`.
+
+### 10.3 F-R2-3 — clearing account 380 · **mechanism FIXED, policy BLOCKED_EXTERNAL**
+
+Measured across every shape the task named (values in DZD):
+
+| Shape | `380` before | `380` after the fix, account configured |
+|---|---|---|
+| exact match | 0.00 | 0.00 |
+| +10/unit within tolerance | **+100.00** | **0.00** (variance +100.00 to `608`) |
+| −10/unit within tolerance | **−100.00** | **0.00** (variance −100.00 to `608`) |
+| beyond tolerance | refused `THREE_WAY_MATCH_PRICE_MISMATCH` | still refused |
+| partial receipt + partial invoice | 0.00 | 0.00 |
+| two receipts, one invoice | 0.00 | 0.00 |
+| rounding-shaped line | 0.00 | 0.00 |
+| reversal of a variance invoice | — | `608` nets to 0.00, `401` to 0.00 |
+
+`products.price_variance_account_code` is nullable with **no default** — the
+account is a policy choice and was not invented. With no account configured the
+historical posting is preserved and the residual is named in the post result and
+audited as `PRICE_VARIANCE_UNALLOCATED`, so it is never unexplained. Tests:
+`tests/test_phase47_price_variance_clearing.py` (10, including the additive
+migration). Decision required: **LB-2**.
+
+### 10.4 F-R2-4 — negative amounts · **FIXED**
+
+The domain was traced rather than assumed: non-positive **quantities** were
+already refused, and negative headers were only caught indirectly through the
+header-reconciliation mismatch. A negative **unit price** was not caught at all —
+`qty × −price` produced a negative line that matched a negative header, so the
+invoice validated, was approved and posted `600` debit −1000.00 / `401` credit
+−1000.00, balanced.
+
+Refusing it is unambiguous here because the project already (a) refuses
+non-positive quantities, and (b) models a credit note as an `IN_REFUND`
+document carrying positive amounts. Nothing about negative invoices is part of
+the documented domain. Guards now sit at validation
+(`LINE_n_PRICE_NONPOSITIVE`, `HEADER_AMOUNT_NEGATIVE`), on a correcting edit
+(`LINE_PRICE_NONPOSITIVE`) and at posting (`LINE_AMOUNT_NONPOSITIVE`); zero stays
+valid (a fully discounted invoice), and a test proves the legitimate credit-note
+route still posts positive amounts. Tests: `test_fr2_4_*` (4).
+
+### 10.5 F-R2-5 / F-R2-6 — the two nits · **CLOSED**
+
+* PR #6's bound is now an exact `len(rows) == 16` plus a by-name assertion of the
+  eight required header fields and the three line elements. The old `>= 10`
+  pinned nothing; the exact pin fails if any decision goes missing.
+* PR #5's `None` branch was **not** deleted: `_field_evaluation` legitimately
+  emits `"value": None` for a decided-but-absent reading, so the branch was
+  misplaced, not wrong. It now runs *before* the parse, and the refusal is
+  specific: `LINE_n_PRICE_SOURCE_MISSING` / `..._DISCOUNT_SOURCE_MISSING` instead
+  of `..._UNPARSEABLE`, which sends the clerk to a different repair. A genuinely
+  unparseable value keeps its own code. Test: `test_fr2_6_*`.
+
+### 10.6 Verification
+
+| Check | Result |
+|---|---|
+| Targeted suites | phase33 40 passed · phase46 39 passed · phase47 10 passed · phase29 49 passed |
+| Full suite (CPython 3.11.2) | **20 failed, 1092 passed, 9 skipped** in 247.60 s |
+| Baseline at `2e123a9` | 20 failed, 1070 passed, 9 skipped → **+22 tests, the same 20 failures** |
+| The 20 failures | every one is the interpreter gate (`requires Python 3.11.17+ or 3.12.10+`); re-ran the 20 in isolation: 20 failed, all on that message |
+| `ruff check dz_erp tests tools` | **All checks passed** |
+| `tools/risk_register_counts.py` | consistent, **45 rows** (5 added: P10–P14) |
+| `tests/test_phase22_register_and_docs_consistency.py` | 15 passed |
+
+No test was skipped, weakened or deleted. Three existing call sites in
+`tests/test_phase46_timbre_rule_administration.py` were made **more explicit**
+(`max_amount_dzd="none"`) because the production code now demands a declaration;
+that strengthens, not weakens, what they assert.
+
+### 10.7 Delivery
+
+See §10.8 for the commit and CI of this section.

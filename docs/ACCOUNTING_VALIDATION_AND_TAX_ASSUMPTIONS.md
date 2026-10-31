@@ -22,6 +22,10 @@ that is *not* the same as being compliant.
 | Tax breakdown reconciles with the header | `tax_breakdown` accumulates per rate | `test_tax_breakdown_reconciles_with_the_header` |
 | Line order is irrelevant to every total | independent per-line rounding | `test_line_order_does_not_change_any_total` |
 | No sub-centime residue survives (3 × 0.10 DZD) | quantisation at each step | `test_awkward_quantities_leave_no_sub_centime_residue` |
+| A line quantity and unit price must be **strictly positive** | `_validate_invoice_lines` (`LINE_n_QTY_NONPOSITIVE`, `LINE_n_PRICE_NONPOSITIVE`), re-checked on a correcting edit and at posting | `test_fr2_4_*` (phase33) |
+| Header HT/TVA/timbre/TTC may be **zero**, never negative | `_validate_invoice_totals` (`HEADER_AMOUNT_NEGATIVE`) | `test_fr2_4_a_negative_header_total_is_refused_even_with_positive_lines` |
+| A credit note is a **positive-amount** `IN_REFUND`, never a negative invoice | `reverse_posted_invoice` | `test_fr2_4_a_reversal_still_credit_notes_with_positive_amounts` |
+| A receipt-cost ↔ invoice-price difference does not stay on the clearing account | `_line_price_variance`, `products.price_variance_account_code` | `tests/test_phase47_price_variance_clearing.py` |
 
 Quantities are carried at 6 decimals and money at 2, which is why
 `3 × 0.10` yields `0.30` rather than a binary-float artefact.
@@ -38,6 +42,15 @@ otherwise           -> round(base × rate), floored at min, capped at max
 Verified boundaries: exactly `300.00` → `0.00`; `300.01` → the `5.00` minimum;
 `20 000.00` → `200.00`; `150 000.00` → `3 000.00`; a configured `max_duty`
 caps the result; `BANK_TRANSFER` and `CHEQUE` (any case) always yield `0.00`.
+
+**The shipped seed applies no ceiling.** Whether the top band (2 % above
+100,000.00 DZD) is capped at all, and at what figure, is **UNDETERMINED** and
+must not be inferred from this repository: it is blocker **LB-1** in
+`docs/REMAINING_BLOCKERS.md`, owned by the accountant of record. A rule version
+cannot acquire a cap position by omission — the administration path requires an
+explicit declaration, a decimal ceiling or `none` (`TIMBRE_RULE_CAP_NOT_DECLARED`
+otherwise) — and the per-invoice provenance records the ceiling that was actually
+applied.
 
 ## 3. Effective-dated configuration (the change in this phase)
 

@@ -203,3 +203,38 @@ fix either way plus a regression test at a 600,000.00 base. F-R2-2 is a containe
 fix at two call sites with a clear test. Nothing was merged, retargeted, closed,
 rebased, force-pushed, marked ready or deployed to produce this pass, and no
 product code was modified.
+
+---
+
+## S11. Round 3 — targeted remediation (2026-10-31)
+
+Supersedes the §S10 status line. §S10 recorded two blockers; this round fixed the
+one that needed no external decision, prepared the other for one, and closed the
+two review nits. Detail and evidence: `docs/PR_STACK_REVIEW.md` §10.
+
+| Row | Finding | Disposition | Evidence |
+|---|---|---|---|
+| S11a | **F-R2-2** reversal idempotency | **FIXED** | `request_sha256` compared at both `REVERSE_INVOICE` sites (`procurement_stock.py:2514`, `:2737`); mismatch → `IDEMPOTENCY_KEY_PAYLOAD_MISMATCH`, HTTP 409, audited `REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH`; 3 tests incl. concurrency (1 credit note, 3 replays) |
+| S11b | **F-R2-1** timbre ceiling | **BLOCKED_EXTERNAL** (LB-1), mechanism FIXED | spec now states the code applies no ceiling and names the decision; `TIMBRE_RULE_CAP_NOT_DECLARED` forces an explicit cap declaration; doc/code guard test verified to fail on a reintroduced claim; boundaries pinned at 100,000.00/100,000.01/500,000.00/600,000.00 |
+| S11c | **F-R2-3** clearing 380 | **mechanism FIXED**, policy BLOCKED_EXTERNAL (LB-2) | `products.price_variance_account_code` (nullable, no default, additive migration); invoice debit split receipt-cost / variance; `380` nets to 0.00 when configured; unconfigured residual named + audited as `PRICE_VARIANCE_UNALLOCATED`; 10 tests |
+| S11d | **F-R2-4** negative amounts | **FIXED** | non-positive price and negative headers refused at validation, on edit and at posting; zero stays valid; credit notes unaffected (4 tests) |
+| S11e | **F-R2-5 / F-R2-6** nits | **CLOSED** | exact 16-row pin + required-field names; `None` checked before parsing with distinct `..._SOURCE_MISSING` codes (1 test) |
+| S11f | Verification | **DONE** | full suite 20F/1092P/9S (was 20F/1070P/9S — +22 tests, same 20 interpreter-gate failures); `ruff` clean; risk register consistent at 45 rows; docs consistency 15 passed |
+
+**Status: `CHANGES_REQUIRED` → `READY_FOR_HUMAN_APPROVAL` for the code, with two
+external decisions outstanding.**
+
+What that means precisely: every defect this review could fix without inventing a
+tax figure or an accounting policy is fixed and tested. What remains is **not**
+engineering work:
+
+* **LB-1** — whether the top stamp-duty band is capped, and at what figure
+  (accountant of record). The code needs no change when the answer arrives: a new
+  rule version through the audited two-person path is enough.
+* **LB-2** — which SCF account carries a purchase price variance, and whether the
+  policy is "book on invoice" or "revalue stock" (accountant of record). The
+  mechanism is in place; only the account is missing.
+
+`NOT_PRODUCTION_READY` still applies, for those two decisions plus the
+deployment items that predate this round. **0 of 5 PRs** carry a human review.
+Nothing was merged, retargeted, closed, rebased or deployed.

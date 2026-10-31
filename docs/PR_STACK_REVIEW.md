@@ -1145,3 +1145,18 @@ Trial balance balanced in every case; `verify_audit_chain` valid throughout.
 **Status: `CHANGES_REQUIRED` is cleared for code; `BLOCKED_EXTERNAL` remains for
 LB-1 and LB-2; `NOT_PRODUCTION_READY` still applies.** Nothing was merged,
 retargeted, rebased, squashed or deployed.
+
+### 11.8 Delivery
+
+| Item | Value |
+|---|---|
+| Code + tests commit | `646b878059f101783bc8c3cdcb4c4ecf5824fd39` |
+| CI run on that commit | `41246684305` — `Test, coverage and static checks (Python 3.11)` ✅ · `(Python 3.12)` ✅ · `Key rotation, backup and recovery on Windows` ✅ — **3/3 success** |
+| Commit after it | this section's prose only; behaviour identical to `646b8780` |
+| Branch / PR | `arena/7f12d627-erp`, PR #7 `OPEN`, `CLEAN` against its base |
+
+The 3.11 job — the one that failed on `9d5d112a` and made this round necessary —
+passed on the first attempt, which is consistent with the fix but is **not**
+offered as proof of it. The proof is the deterministic reproduction in §11.1: the
+failure is now produced on demand by holding a `RESERVED` lock, and the test that
+covers the fix fails when the fix is removed.

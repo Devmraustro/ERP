@@ -71,6 +71,38 @@ Resolution rules, identical for both, and each covered by a test:
 5. **Tenant-scoped**: a company never borrows another company's rate table.
 6. **Inactive rows are ignored** for VAT (`active = 0`).
 
+### 3.1 Adding a rule version (the administration path)
+
+A version reaches the database only through `dz_erp.localization`
+(`create_timbre_rule_version`, `approve_timbre_rule_version`) — reachable over
+HTTP at `POST /api/v1/tax/timbre-rules` and
+`POST /api/v1/tax/timbre-rules/{version_code}/approve`. Raw SQL remains
+possible for an operator with database access; it is no longer the *supported*
+path, and a hand-inserted row is still subject to the immutability triggers.
+
+* **Nothing is active on creation.** A new rule is `review_state = 'DRAFT'` and
+  the resolver ignores it entirely, so a proposal cannot price an invoice, not
+  even for a moment.
+* **A second, different person activates it.** Approval requires an accountant
+  or admin role *and* a reviewer other than the creator (`TIMBRE_RULE_SOD_VIOLATION`),
+  so one person cannot both propose and bless a rate. Neither step has a
+  default: an incomplete rule is refused (`TIMBRE_RULE_VALUE_REQUIRED`) rather
+  than filled with a number nobody chose.
+* **Overlap is decided at approval**, not silently. Two windows claiming the
+  same day are refused by default (`TIMBRE_RULE_OVERLAP`);
+  `overlap_policy='supersede'` closes the older window to the day before the
+  new one, and is refused outright if a posted invoice cites that older version
+  (`TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE`) — history is narrowed forward,
+  never rewritten.
+* **Both steps are audited** in the same transaction as the change
+  (`TIMBRE_RULE_VERSION_CREATED`, `TIMBRE_RULE_VERSION_APPROVED`, carrying
+  actor, timestamp, version, window, bracket values and reason), so the
+  configuration history is part of the hash-chained audit log.
+* **Tenant-scoped and role-checked at the service**, not merely at the
+  endpoint: a direct caller is refused identically to an HTTP client.
+
+Covered by `tests/test_phase46_timbre_rule_administration.py` (35 tests).
+
 Wiring: invoice creation and revalidation resolve the rule for the invoice date
 and pass it to line and header validation; the post-edit recompute path resolves
 it again. The line-rate whitelist is the resolved set, so a 9 % line on a 2026
@@ -121,13 +153,44 @@ bracket. Owner: the engagement's tax signatory. Required evidence: a signed
 review naming the source text and effective dates. Until then the release
 readiness matrix keeps the tax rows **Blocked (external evidence required)**.
 
-## 7. Known limitation, stated rather than hidden
+## 7. Rule identity *is* persisted, and how it is read back
 
-The resolved rule label (`version_code` / `configured@YYYY-MM-DD`) is returned by
-the resolver but is **not yet persisted on the invoice**. The amounts are
-persisted, so a posted invoice remains reproducible from the configuration
-history, but answering "which rule version did this invoice use?" currently
-requires reproducing the resolution for its date. Persisting the label on
-`supplier_invoices` (and echoing it in the posting audit record) is the
-follow-up; it is listed as `NOT_STARTED` in
-`docs/PROJECT_COMPLETION_TRACKER.md` rather than being implied to exist.
+> **Correction (R-06).** Earlier revisions of this document — and of
+> `docs/TECHNICAL_REPORT.md` and `docs/RISK_REGISTER.md` — stated that the
+> resolved rule label was "not yet persisted on the invoice" and tracked the
+> work as `NOT_STARTED`. That was out of date: the follow-up landed in Phase 40
+> and the claim was never retired. The product was being described as weaker
+> than it is, which is its own kind of inaccuracy.
+
+Validation records the governing rule on the invoice itself, in six columns of
+`supplier_invoices`:
+
+| Column | Meaning |
+|---|---|
+| `timbre_rule_version` | the `version_code` that governed the calculation |
+| `timbre_rule_source` | `configured` or `builtin_default` (the compiled-in `builtin-default-v1` fallback), so a stored figure can never be mistaken for a configured one |
+| `timbre_rule_hash` | SHA-256 over the canonical rule content, so "same version code, different brackets" is detectable |
+| `timbre_rule_valid_from` / `_valid_to` | the window in force on the invoice date |
+| (snapshot) | the resolved bracket/threshold/min/max inputs, replayed to reproduce the stored amount without re-resolving — which is what makes the figure reproducible even after later configuration changes |
+
+The identity is written on first use and reused; an append-only
+`timbre_rule_versions` ledger records the content of each version the first
+time any invoice uses it. Immutability triggers abort `UPDATE`/`DELETE` of a
+`timbre_rules` row cited by a **Posted** invoice, and posting re-resolves and
+refuses with `TIMBRE_RULE_CHANGED_SINCE_VALIDATION` if the rule moved between
+validation and posting. `GET /api/v1/invoices/{id}` returns the provenance.
+
+Two limits are real and remain stated:
+
+* **a legacy invoice** (validated before Phase 40) reports `unavailable` and is
+  **not back-filled** — inventing provenance for a calculation nobody recorded
+  would be fabrication; posting such an invoice records the rule governing it at
+  posting time, labelled as such;
+* **a reversal** inherits the original invoice's provenance rather than
+  re-resolving, because a reversal must reverse the posting that happened.
+
+Evidence: `tests/test_phase40_timbre_rule_provenance.py` (22 tests), covering
+recording, snapshot replay, first-use-once, the effective-date boundary,
+`test_a_new_rule_version_does_not_change_an_existing_invoice`,
+rewrite/delete refusal, ledger append-onlyness, posting-time re-resolution,
+concurrent change-and-post, legacy behaviour and tenant scoping.

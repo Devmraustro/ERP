@@ -336,7 +336,7 @@ enforced at three points, in the same transaction that moves the record forward.
 | Human review of any PR | **BLOCKED** | 0 reviews recorded on #3–#7. An agent review is not a substitute for the accountable reviewer. |
 | Branch-protection / required-check configuration | **BLOCKED (unknown)** | `403` on the protection endpoint with this token; rulesets empty. Somebody with admin rights must state whether merges are gated. |
 | Distributed rate limiting across replicas | **NOT_STARTED** (by design) | Only a shared-file backend exists; never claimed. |
-| Timbre rule configuration path with attribution (R-05) | **NOT_STARTED** | Needs a reviewed, audited admin path; today it is raw SQL. |
+| Timbre rule configuration path with attribution (R-05) | **FIXED_AND_VERIFIED** | Was raw SQL. Now an audited, two-person administration path (DRAFT → approve, segregation of duties, overlap refused by default) at `POST /api/v1/tax/timbre-rules` and `…/{version}/approve`; `tests/test_phase46_timbre_rule_administration.py` (35 tests). See §7. |
 | Production-scale behaviour (timing, contention, DR) | **BLOCKED_EXTERNAL** | Needs real data, a real host and a drill. R-02/R-03 are staging-scale observations only. |
 | Container image build/run | **NOT_STARTED** | No container runtime here; the assets are property-tested, never executed. |
 | Legal/accounting determinations (SCF, rates, retention, ANPDP) | **BLOCKED_EXTERNAL** | Unchanged by this review. |

@@ -10,11 +10,12 @@ import sys
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .database import ERPDatabase, TenantIsolationError
+from .database import AuthorizationError, ERPDatabase, TenantIsolationError
 from .decimal_utils import format_dzd, round_dzd, to_decimal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -626,14 +627,22 @@ def resolve_timbre_rule(
     * Rows exist but none covers the date -> :class:`TaxRuleConfigurationError`.
       This is the ambiguous case an operator must fix; guessing here would post
       a different amount of stamp duty than the law requires.
+
+    Only ``review_state = 'ACTIVE'`` rows are candidates. A ``DRAFT`` is a
+    proposal that has not been approved by a second accountant (see
+    :func:`approve_timbre_rule_version`), and a draft that resolved would let an
+    unreviewed rate price a real invoice.
     """
     day = _normalise_iso_date(on_date, what="invoice date")
+    # Only ACTIVE rules can govern an amount. A DRAFT is a proposal awaiting its
+    # second, differently-attributed approval (finding R-05); letting it resolve
+    # would mean an unreviewed rate silently priced a real invoice.
     rows = conn.execute(
         """
         SELECT version_code, valid_from, valid_to, min_amount_dzd, max_amount_dzd,
                threshold_dzd, brackets_json
         FROM timbre_rules
-        WHERE company_id = ?
+        WHERE company_id = ? AND review_state = 'ACTIVE'
         ORDER BY valid_from DESC, id DESC
         """,
         (company_id,),
@@ -1136,6 +1145,448 @@ def assert_timbre_rule_unchanged(
             f"current={current_rule.version_code}@{current[:12]}; "
             "re-validate the invoice against the current rule before posting"
         )
+
+# ---------------------------------------------------------------------------
+# Phase 46 (finding R-05) — audited timbre-rule administration
+# ---------------------------------------------------------------------------
+# Before this, the only writer of ``timbre_rules`` was the chart-template seed.
+# Once a version had priced a posted invoice the immutability triggers correctly
+# froze it, so adopting a new Finance Law meant raw SQL: no actor, no reason, no
+# audit event, no authorization, and no protection against two windows silently
+# overlapping. The evidence side was strong; the door was a hole in the wall.
+#
+# The rules implemented here:
+#   * a rule is created as a DRAFT and is invisible to the resolver;
+#   * it becomes ACTIVE only through a second, *different* accountant's recorded
+#     approval (segregation of duties), which is compared against the rules
+#     already in force for overlap;
+#   * every step appends an audit event carrying actor, timestamp, version,
+#     effective window, values and reason;
+#   * nothing is ever deleted, and a rule referenced by a posted invoice cannot
+#     be updated (enforced by trigger) or superseded (refused here first, with a
+#     readable reason);
+#   * no rate is ever defaulted or invented: every numeric field must be
+#     supplied. Whether those supplied values are the law is the expert-
+#     comptable's decision, not this module's.
+
+TIMBRE_ADMIN_ROLES = ("accountant", "admin")
+_TIMBRE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MAX_TIMBRE_REASON_LENGTH = 500
+#: Explicit policies for a new ACTIVE window that overlaps one already in force.
+#: ``reject`` is the default; ``supersede`` closes the older window the day
+#: before the new one starts, and is refused if a posted invoice cites it.
+TIMBRE_OVERLAP_POLICIES = ("reject", "supersede")
+
+
+class TimbreRuleAdministrationError(ValueError):
+    """A refused administration request, with a stable machine-readable prefix."""
+
+
+def _timbre_admin_user(conn: Any, company_id: int, user_id: int, action: str) -> Any:
+    """Resolve the actor inside the tenant; refuse an inactive or wrong-role user."""
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ? AND company_id = ?", (user_id, company_id)
+    ).fetchone()
+    if user is None or not user["is_active"]:
+        raise TenantIsolationError(
+            f"User {user_id} is not an active member of company {company_id}; {action} refused."
+        )
+    if user["role"] not in TIMBRE_ADMIN_ROLES:
+        raise AuthorizationError(
+            f"TIMBRE_RULE_ADMIN_ROLE_REQUIRED: role '{user['role']}' may not {action}; "
+            f"allowed roles are {TIMBRE_ADMIN_ROLES}."
+        )
+    return user
+
+
+def _brackets_from_input(brackets: Any, version_code: str) -> List[Dict[str, Optional[str]]]:
+    """Parse caller-supplied brackets, refusing anything the resolver could not use."""
+    if brackets is None:
+        raise TimbreRuleAdministrationError("TIMBRE_RULE_BRACKETS_REQUIRED: brackets must be supplied.")
+    raw = json.dumps(brackets) if isinstance(brackets, (list, dict)) else brackets
+    try:
+        parsed = _parse_brackets(raw, version_code=version_code)
+    except TaxRuleConfigurationError as exc:
+        raise TimbreRuleAdministrationError(f"TIMBRE_RULE_BRACKETS_INVALID: {exc}") from exc
+    except (TypeError, ValueError) as exc:  # malformed JSON is a caller error, not a crash
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_BRACKETS_INVALID:{version_code}: {exc}"
+        ) from exc
+    if not parsed:
+        raise TimbreRuleAdministrationError("TIMBRE_RULE_BRACKETS_INVALID: brackets list is empty.")
+    return parsed
+
+
+def _validate_window(valid_from: Any, valid_to: Any) -> Tuple[str, Optional[str]]:
+    """Validate the effective window, reporting every failure as an admin error.
+
+    ``_normalise_iso_date`` raises :class:`TaxRuleConfigurationError`, which is
+    right for the resolver but wrong at the administration boundary: a caller
+    sending ``2027-13-01`` deserves a 422 field error, not a configuration
+    failure. The message and code are preserved, only the class changes.
+    """
+    try:
+        start = _normalise_iso_date(valid_from, what="timbre rule valid_from")
+        if valid_to in (None, ""):
+            return start, None
+        end = _normalise_iso_date(valid_to, what="timbre rule valid_to")
+    except TaxRuleConfigurationError as exc:
+        raise TimbreRuleAdministrationError(f"TIMBRE_RULE_WINDOW_INVALID: {exc}") from exc
+    if end <= start:
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_WINDOW_INVALID: valid_to ({end}) must be after valid_from ({start})."
+        )
+    return start, end
+
+
+def _validate_reason(reason: Any, action: str) -> str:
+    text = ("" if reason is None else str(reason)).strip()
+    if not text:
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_REASON_REQUIRED: {action} must record why it was done."
+        )
+    if len(text) > MAX_TIMBRE_REASON_LENGTH:
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_REASON_TOO_LONG: {len(text)} > {MAX_TIMBRE_REASON_LENGTH} characters."
+        )
+    return text
+
+
+def _amount_or_refuse(value: Any, field_name: str, *, required: bool = True) -> Optional[str]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            raise TimbreRuleAdministrationError(
+                f"TIMBRE_RULE_VALUE_REQUIRED:{field_name} must be supplied; no default is invented."
+            )
+        return None
+    try:
+        dec = to_decimal(str(value))
+    except (ValueError, TypeError) as exc:
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_VALUE_INVALID:{field_name}={value!r} is not a decimal amount."
+        ) from exc
+    if dec < Decimal("0.00"):
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_VALUE_NEGATIVE:{field_name}={value!r} must not be negative."
+        )
+    return format_dzd(dec)
+
+
+def _overlapping_active_rules(
+    conn: Any, company_id: int, start: str, end: Optional[str]
+) -> List[Any]:
+    """Active rules whose effective window touches ``[start, end]`` (end=None = open)."""
+    rows = conn.execute(
+        "SELECT * FROM timbre_rules WHERE company_id = ? AND review_state = 'ACTIVE'",
+        (company_id,),
+    ).fetchall()
+    overlapping = []
+    for row in rows:
+        other_start = str(row["valid_from"])
+        other_end = row["valid_to"]
+        if end is not None and other_start > end:
+            continue
+        if other_end not in (None, "") and str(other_end) < start:
+            continue
+        overlapping.append(row)
+    return overlapping
+
+
+def _posted_invoices_citing(conn: Any, company_id: int, version_code: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM supplier_invoices
+        WHERE company_id = ? AND timbre_rule_version = ? AND workflow_state = 'Posted'
+        """,
+        (company_id, version_code),
+    ).fetchone()
+    return int(row["n"])
+
+
+def create_timbre_rule_version(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    *,
+    version_code: str,
+    valid_from: str,
+    valid_to: Optional[str],
+    min_amount_dzd: Any,
+    threshold_dzd: Any,
+    brackets: Any,
+    reason: str,
+    max_amount_dzd: Any = None,
+) -> Dict[str, Any]:
+    """Create a timbre rule version as a DRAFT. It governs nothing until approved.
+
+    Refuses a duplicate version code (the row is unique per company), an invalid
+    window or bracket set, and any attempt to omit a value — there is no default
+    rate here on purpose: a stamp-duty figure must come from a reviewed
+    configuration, never from a convenience constant.
+    """
+    code = (version_code or "").strip()
+    if not _TIMBRE_VERSION_RE.match(code):
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_VERSION_INVALID:{version_code!r} must match {_TIMBRE_VERSION_RE.pattern}."
+        )
+    start, end = _validate_window(valid_from, valid_to)
+    why = _validate_reason(reason, "creating a rule version")
+    parsed_brackets = _brackets_from_input(brackets, code)
+    minimum = _amount_or_refuse(min_amount_dzd, "min_amount_dzd")
+    threshold = _amount_or_refuse(threshold_dzd, "threshold_dzd")
+    maximum = _amount_or_refuse(max_amount_dzd, "max_amount_dzd", required=False)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with db.transaction() as conn:
+        user = _timbre_admin_user(conn, company_id, user_id, "create a timbre rule version")
+        existing = conn.execute(
+            "SELECT * FROM timbre_rules WHERE company_id = ? AND version_code = ?",
+            (company_id, code),
+        ).fetchone()
+        if existing is not None:
+            raise TimbreRuleAdministrationError(
+                f"TIMBRE_RULE_VERSION_EXISTS:{code} already exists in review_state "
+                f"'{existing['review_state']}'. A rule version is never rewritten; create a new one."
+            )
+        conn.execute(
+            """
+            INSERT INTO timbre_rules (
+                company_id, version_code, valid_from, valid_to, min_amount_dzd,
+                max_amount_dzd, threshold_dzd, brackets_json, review_state,
+                reason, created_by_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?)
+            """,
+            (
+                company_id,
+                code,
+                start,
+                end,
+                minimum,
+                maximum,
+                threshold,
+                json.dumps(parsed_brackets, sort_keys=True),
+                why,
+                user_id,
+                now_iso,
+            ),
+        )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type="TIMBRE_RULE_VERSION_CREATED",
+            target_model="timbre_rules",
+            target_id=code,
+            after_state={
+                "version_code": code,
+                "review_state": "DRAFT",
+                "valid_from": start,
+                "valid_to": end,
+                "min_amount_dzd": minimum,
+                "max_amount_dzd": maximum,
+                "threshold_dzd": threshold,
+                "brackets": parsed_brackets,
+                "reason": why,
+                "actor": user["username"],
+                "created_at": now_iso,
+                "note": "a draft governs nothing until a second accountant approves it",
+            },
+        )
+    return {
+        "version_code": code,
+        "review_state": "DRAFT",
+        "valid_from": start,
+        "valid_to": end,
+        "min_amount_dzd": minimum,
+        "max_amount_dzd": maximum,
+        "threshold_dzd": threshold,
+        "brackets": parsed_brackets,
+        "reason": why,
+        "created_by_id": user_id,
+        "created_at": now_iso,
+        "in_force": False,
+    }
+
+
+def approve_timbre_rule_version(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    *,
+    version_code: str,
+    reason: str,
+    overlap_policy: str = "reject",
+) -> Dict[str, Any]:
+    """Approve a DRAFT, making it ACTIVE for its effective window.
+
+    Three independent guards, in this order:
+
+    1. **Authorization and segregation of duties** — the approver must be an
+       active accountant/admin of *this* company and must not be the person who
+       created the version. One person cannot both propose and enact a tax rate.
+    2. **Overlap** — the window is compared with every ACTIVE rule. The default
+       policy refuses an overlap. ``supersede`` is available only with an
+       explicit choice, a reason, and only when no posted invoice cites the rule
+       being closed; it narrows that rule's ``valid_to`` to the day before the
+       new window instead of deleting anything.
+    3. **The database's own rules** — the immutability triggers still abort an
+       update of a rule referenced by a posted invoice, so a race between this
+       check and a concurrent posting cannot rewrite the explanation of an
+       amount already in the ledger.
+    """
+    if overlap_policy not in TIMBRE_OVERLAP_POLICIES:
+        raise TimbreRuleAdministrationError(
+            f"TIMBRE_RULE_OVERLAP_POLICY_INVALID:{overlap_policy!r} is not one of {TIMBRE_OVERLAP_POLICIES}."
+        )
+    code = (version_code or "").strip()
+    why = _validate_reason(reason, "approving a rule version")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    superseded: List[Dict[str, Any]] = []
+
+    with db.transaction() as conn:
+        user = _timbre_admin_user(conn, company_id, user_id, "approve a timbre rule version")
+        row = conn.execute(
+            "SELECT * FROM timbre_rules WHERE company_id = ? AND version_code = ?",
+            (company_id, code),
+        ).fetchone()
+        if row is None:
+            raise TenantIsolationError(
+                f"TIMBRE_RULE_NOT_FOUND:{code} does not exist in company {company_id}."
+            )
+        if row["review_state"] != "DRAFT":
+            raise TimbreRuleAdministrationError(
+                f"TIMBRE_RULE_NOT_A_DRAFT:{code} is already '{row['review_state']}'; "
+                "approval is a one-way transition from DRAFT."
+            )
+        if int(row["created_by_id"] or 0) == int(user_id):
+            raise AuthorizationError(
+                "TIMBRE_RULE_SOD_VIOLATION: the accountant who created a rule version cannot "
+                "also approve it. A second accountant or an administrator must review it."
+            )
+
+        start = str(row["valid_from"])
+        end = None if row["valid_to"] in (None, "") else str(row["valid_to"])
+        overlapping = _overlapping_active_rules(conn, company_id, start, end)
+        if overlapping:
+            names = [str(r["version_code"]) for r in overlapping]
+            if overlap_policy == "reject":
+                raise TimbreRuleAdministrationError(
+                    f"TIMBRE_RULE_OVERLAP:{code} ({start}..{end or 'open'}) overlaps active "
+                    f"rule(s) {names}. Refusing to let two rules claim the same day; choose "
+                    "an explicit overlap_policy='supersede' if the older window must be closed."
+                )
+            from datetime import date as _date, timedelta as _timedelta
+
+            day_before = (_date.fromisoformat(start) - _timedelta(days=1)).isoformat()
+            for other in overlapping:
+                posted = _posted_invoices_citing(conn, company_id, str(other["version_code"]))
+                if posted:
+                    raise TimbreRuleAdministrationError(
+                        f"TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE:{other['version_code']} has "
+                        f"{posted} posted invoice(s); its window cannot be closed. Post a new "
+                        "version starting after its own valid_to instead."
+                    )
+                if str(other["valid_from"]) > day_before:
+                    raise TimbreRuleAdministrationError(
+                        f"TIMBRE_RULE_SUPERSEDE_IMPOSSIBLE:{other['version_code']} starts "
+                        f"{other['valid_from']}, after the new window's first day; "
+                        "close its window manually is not supported — choose a later start date."
+                    )
+                conn.execute(
+                    "UPDATE timbre_rules SET valid_to = ? WHERE id = ? AND company_id = ?",
+                    (day_before, other["id"], company_id),
+                )
+                superseded.append(
+                    {"version_code": str(other["version_code"]), "valid_to": day_before}
+                )
+
+        conn.execute(
+            """
+            UPDATE timbre_rules
+            SET review_state = 'ACTIVE', reviewed_by_id = ?, reviewed_at = ?, reason = COALESCE(reason, ?)
+            WHERE id = ? AND company_id = ?
+            """,
+            (user_id, now_iso, why, row["id"], company_id),
+        )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type="TIMBRE_RULE_VERSION_APPROVED",
+            target_model="timbre_rules",
+            target_id=code,
+            before_state={"review_state": "DRAFT", "valid_to": row["valid_to"]},
+            after_state={
+                "version_code": code,
+                "review_state": "ACTIVE",
+                "valid_from": start,
+                "valid_to": end,
+                "min_amount_dzd": format_dzd(row["min_amount_dzd"]),
+                "max_amount_dzd": row["max_amount_dzd"],
+                "threshold_dzd": format_dzd(row["threshold_dzd"]),
+                "brackets": json.loads(row["brackets_json"]),
+                "reason": why,
+                "reviewed_by": user["username"],
+                "reviewed_at": now_iso,
+                "created_by_id": row["created_by_id"],
+                "superseded": superseded,
+                "overlap_policy": overlap_policy,
+            },
+        )
+    return {
+        "version_code": code,
+        "review_state": "ACTIVE",
+        "valid_from": start,
+        "valid_to": end,
+        "reviewed_by_id": user_id,
+        "reviewed_at": now_iso,
+        "reason": why,
+        "superseded": superseded,
+        "in_force": True,
+    }
+
+
+def list_timbre_rule_versions(
+    db: ERPDatabase, company_id: int, user_id: int
+) -> List[Dict[str, Any]]:
+    """Every rule version of this tenant, drafts included, with what it can prove."""
+    with db.transaction() as conn:
+        _timbre_admin_user(conn, company_id, user_id, "read the timbre rule configuration")
+        rows = conn.execute(
+            """
+            SELECT * FROM timbre_rules WHERE company_id = ? ORDER BY valid_from DESC, id DESC
+            """,
+            (company_id,),
+        ).fetchall()
+        ledger = {
+            str(r["version_code"])
+            for r in conn.execute(
+                "SELECT DISTINCT version_code FROM timbre_rule_versions WHERE company_id = ?",
+                (company_id,),
+            ).fetchall()
+        }
+    described = []
+    for row in rows:
+        described.append(
+            {
+                "version_code": str(row["version_code"]),
+                "review_state": str(row["review_state"]),
+                "valid_from": str(row["valid_from"]),
+                "valid_to": row["valid_to"],
+                "min_amount_dzd": format_dzd(row["min_amount_dzd"]),
+                "max_amount_dzd": row["max_amount_dzd"],
+                "threshold_dzd": format_dzd(row["threshold_dzd"]),
+                "brackets": json.loads(row["brackets_json"]),
+                "created_by_id": row["created_by_id"],
+                "created_at": row["created_at"],
+                "reviewed_by_id": row["reviewed_by_id"],
+                "reviewed_at": row["reviewed_at"],
+                "in_force": str(row["review_state"]) == "ACTIVE",
+                "used_by_posted_invoice_ledger": str(row["version_code"]) in ledger,
+                "reason": row["reason"],
+            }
+        )
+    return described
 
 
 def generate_g50_preparation_workbook(

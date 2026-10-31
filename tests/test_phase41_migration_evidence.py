@@ -38,7 +38,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-import sys
 import time
 from pathlib import Path
 
@@ -46,6 +45,7 @@ import pytest
 
 from dz_erp.auth import hash_password
 from dz_erp.database import ERPDatabase
+from dz_erp.security_audit import safe_restore_supported
 from dz_erp.intake_ocr import PrivateDocumentVault
 
 #: Each generation is the set of objects that generation did not have yet.
@@ -289,10 +289,8 @@ def _foreign_key_violations(path: Path) -> list[tuple]:
 
 
 def _supports_safe_restore() -> bool:
-    version = sys.version_info[:3]
-    return (version[:2] == (3, 11) and version >= (3, 11, 17)) or (
-        version[:2] == (3, 12) and (3, 12, 10) <= version < (3, 13)
-    )
+    """The shared gate (Phase 45, R-07) — never a local copy of the rule."""
+    return safe_restore_supported()
 
 
 # ---------------------------------------------------------------------------

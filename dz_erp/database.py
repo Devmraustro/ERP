@@ -167,6 +167,18 @@ CREATE TABLE IF NOT EXISTS timbre_rules (
     max_amount_dzd  TEXT,
     threshold_dzd   TEXT NOT NULL DEFAULT '300.00',
     brackets_json   TEXT NOT NULL,
+    -- Phase 46 (finding R-05): a rule is never in force because somebody
+    -- inserted a row. It is created as a DRAFT, which the resolver ignores, and
+    -- only a second, differently-attributed approval makes it ACTIVE. Rows that
+    -- predate this column default to ACTIVE because they are, factually, the
+    -- configuration that has been in force; nothing is back-filled beyond that.
+    review_state    TEXT NOT NULL DEFAULT 'ACTIVE'
+                        CHECK (review_state IN ('DRAFT', 'ACTIVE')),
+    reason          TEXT,
+    created_by_id   INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    created_at      TEXT,
+    reviewed_by_id  INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    reviewed_at     TEXT,
     UNIQUE(company_id, version_code)
 );
 
@@ -911,6 +923,43 @@ class ERPDatabase:
             "events_by_version": by_version,
         }
 
+    def read_probe(self, sql: str, params: Any = ()) -> Optional[sqlite3.Row]:
+        """Run ONE read-only statement without taking the write lock.
+
+        ``transaction()`` opens ``BEGIN IMMEDIATE`` because it exists to guard
+        writes. A pure read — the rate limiter asking "is this client blocked?"
+        on every authentication attempt — does not need that lock, and taking it
+        made every unrelated business write wait on a check that changes nothing
+        (finding R-03).
+
+        Why this is safe rather than merely faster:
+
+        * the statement runs in autocommit mode, so SQLite gives it a read
+          snapshot and it cannot dirty the database or leave a transaction open;
+        * file-backed databases run in WAL, where readers never block writers
+          and readers see a consistent snapshot rather than a torn one;
+        * the process-wide ``RLock`` is still taken, so a probe can never
+          interleave with a transaction in this process. It blocks only while a
+          write transaction is genuinely in progress — the honest cost of
+          reading the same database, not an extra one;
+        * every decision that *writes* still goes through ``transaction()``.
+
+        Callers are expected to pass a pure ``SELECT``; nothing here tries to
+        police that, because the only production caller is the limiter's read
+        path and tests assert the behaviour end to end.
+        """
+        with self._lock:
+            conn = (
+                self._persistent_conn
+                if self._persistent_conn is not None
+                else self._create_connection()
+            )
+            try:
+                return conn.execute(sql, params).fetchone()
+            finally:
+                if self._persistent_conn is None:
+                    conn.close()
+
     def _create_connection(self) -> sqlite3.Connection:
         if self._read_only:
             uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
@@ -933,15 +982,55 @@ class ERPDatabase:
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(SCHEMA_SQL)
+        # The OCR confidence migration toggles ``PRAGMA foreign_keys``, which is a
+        # no-op inside a transaction, so it must run outside one and manage its
+        # own. It is therefore sequenced first; everything else runs under the
+        # single write transaction opened by ``_migrate_schema``.
+        self._migrate_ocr_confidence(conn)
         self._migrate_schema(conn)
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
-        """Idempotently upgrade pre-existing databases to the authenticated schema.
+        """Idempotently upgrade pre-existing databases, as one serialised unit.
 
         `CREATE TABLE IF NOT EXISTS` cannot add columns to a table that already
         exists, so databases created before authentication was introduced are
         brought forward here. Safe to run on every startup.
+
+        **Concurrency (Phase 43).** These migrations used to run as a sequence of
+        autocommitted statements. Every step guards itself with a check
+        (``PRAGMA table_info`` before ``ALTER``, ``DROP TRIGGER`` before
+        ``CREATE TRIGGER``), and that is safe for one process — but two processes
+        starting at the same moment on one database file interleave *between*
+        the check and the DDL. Real multi-process startup reproduced it:
+
+            sqlite3.OperationalError: trigger trg_ocr_field_preserve_raw already exists
+
+        because both processes dropped the trigger and then both created it. The
+        whole sequence therefore now runs inside one ``BEGIN IMMEDIATE``
+        transaction: the check-and-DDL pairs become atomic, and two starting
+        workers serialise instead of racing. This also strengthens the F-06
+        guarantee for these steps — an interruption rolls the entire set back
+        rather than leaving half of it applied, and the next start re-runs it.
+
+        The ``DROP``/``CREATE`` of the trigger deliberately does **not** use
+        ``CREATE TRIGGER IF NOT EXISTS``: replacing an outdated trigger body is
+        the point (a legacy database must also protect the newer column), and
+        inside this transaction the replacement cannot race anyone.
         """
+        if conn.in_transaction:
+            raise sqlite3.OperationalError(
+                "Schema migration must start outside an active transaction."
+            )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._migrate_schema_body(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def _migrate_schema_body(self, conn: sqlite3.Connection) -> None:
+        """The migration steps themselves; always called inside one transaction."""
         user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if user_cols and "password_hash" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
@@ -968,12 +1057,12 @@ class ERPDatabase:
                 "ALTER TABLE audit_events ADD COLUMN hmac_key_version INTEGER NOT NULL DEFAULT 1"
             )
 
-        self._migrate_ocr_confidence(conn)
         self._migrate_review_policy(conn)
         self._migrate_approval_binding(conn)
         self._migrate_document_routing(conn)
         self._migrate_review_evidence(conn)
         self._migrate_timbre_provenance(conn)
+        self._migrate_timbre_rule_administration(conn)
 
     def _migrate_review_policy(self, conn: sqlite3.Connection) -> None:
         """Phase 29 review-policy schema, idempotently, on pre-existing databases.
@@ -1069,6 +1158,31 @@ class ERPDatabase:
         for column, definition in additions.items():
             if column not in cols:
                 conn.execute(f"ALTER TABLE source_documents ADD COLUMN {column} {definition}")
+
+    def _migrate_timbre_rule_administration(self, conn: sqlite3.Connection) -> None:
+        """Add the review-state columns that make rule activation explicit (R-05).
+
+        Additive only: every pre-existing ``timbre_rules`` row becomes ``ACTIVE``
+        through the column DEFAULT, which preserves the behaviour those rows
+        already had. No value, window or bracket is touched, no row is created
+        and no trigger is dropped, so an interrupted run leaves the database in a
+        state the next start finishes (the same forward-recovery contract as the
+        rest of the migration sequence, F-06).
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(timbre_rules)").fetchall()}
+        if not cols:
+            return
+        additions = (
+            ("review_state", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+            ("reason", "TEXT"),
+            ("created_by_id", "INTEGER REFERENCES users(id) ON DELETE RESTRICT"),
+            ("created_at", "TEXT"),
+            ("reviewed_by_id", "INTEGER REFERENCES users(id) ON DELETE RESTRICT"),
+            ("reviewed_at", "TEXT"),
+        )
+        for name, ddl in additions:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE timbre_rules ADD COLUMN {name} {ddl}")
 
     def _migrate_timbre_provenance(self, conn: sqlite3.Connection) -> None:
         """Phase 40 (F-04): record which stamp-duty rule produced each amount.

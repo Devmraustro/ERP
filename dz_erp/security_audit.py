@@ -1069,6 +1069,41 @@ def _lstat_restore_path(path: Path) -> Optional[os.stat_result]:
     return metadata
 
 
+#: The interpreter families whose ``tarfile`` extraction filter is known to be
+#: complete enough for a safe restore, and the first patched release of each.
+#: 3.11 below 3.11.17 and 3.12 below 3.12.10 carry the link-fallback and
+#: leave-then-return bypasses; 3.13+ is not supported by the pinned OCR
+#: dependency, so it is deliberately excluded rather than silently allowed.
+SAFE_RESTORE_MINIMUMS: Dict[Tuple[int, int], Tuple[int, int, int]] = {
+    (3, 11): (3, 11, 17),
+    (3, 12): (3, 12, 10),
+}
+SAFE_RESTORE_MAX_EXCLUSIVE: Tuple[int, int, int] = (3, 13, 0)
+SAFE_RESTORE_UNSUPPORTED_MESSAGE = (
+    "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); "
+    "unsafe archive member types and paths are rejected."
+)
+
+
+def safe_restore_supported(version_info: Any = None) -> bool:
+    """Is a *safe* backup restore possible on this interpreter?
+
+    The one predicate. Both the library and every test that gates a
+    backup/restore assertion call this, so the matrix cannot drift: before
+    Phase 45 the tests carried three hand-written copies of the rule, and one of
+    them (``>= (3, 11, 17) and < (3, 13)``) wrongly accepted 3.12.0-3.12.9 —
+    versions on which the restore correctly refuses. That copy was skipped by CI
+    only because CI resolves the newest 3.12.
+    """
+    version = tuple((version_info if version_info is not None else sys.version_info))[:3]
+    if version >= SAFE_RESTORE_MAX_EXCLUSIVE:
+        return False
+    minimum = SAFE_RESTORE_MINIMUMS.get(tuple(version[:2]))
+    if minimum is None:
+        return False
+    return version >= minimum
+
+
 def restore_and_verify_backup(
     backup_path: Path,
     backup_encryption_key: bytes,
@@ -1089,16 +1124,8 @@ def restore_and_verify_backup(
     # we therefore independently reject every link/special member and every
     # non-canonical/escaping path before extraction; this blocks the tarfile
     # link-fallback and leave-then-return path bypasses even on older filter code.
-    version = tuple(sys.version_info[:3])
-    supported_runtime = (
-        (version[:2] == (3, 11) and version >= (3, 11, 17))
-        or (version[:2] == (3, 12) and version >= (3, 12, 10))
-    )
-    if not supported_runtime:
-        raise FinancialIntegrityError(
-            "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ "
-            "(and below 3.13); unsafe archive member types and paths are rejected."
-        )
+    if not safe_restore_supported():
+        raise FinancialIntegrityError(SAFE_RESTORE_UNSUPPORTED_MESSAGE)
     safe_data_filter = getattr(tarfile, "data_filter", None)
     if safe_data_filter is None:
         raise FinancialIntegrityError(

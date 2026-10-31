@@ -133,8 +133,9 @@ deliberate Phase 35 addition, and every affected path is green in CI.
 
 | Limitation | Consequence | Tracked as |
 |---|---|---|
-| Resolved tax-rule version is not persisted on the invoice | Reproducible from configuration history, but not queryable per invoice | `NOT_STARTED` |
-| Rate limiting is per process | Multi-replica needs a proxy limit | `NOT_STARTED` |
+| Resolved tax-rule version **is** persisted (Phase 40: `timbre_rule_version` / `_source` / `_hash` / window + snapshot, with an append-only version ledger) | Corrected in R-06 — this row previously claimed `NOT_STARTED`; a legacy invoice predating Phase 40 still reports `unavailable` and is deliberately not back-filled | `FIXED_AND_VERIFIED` |
+| Rate limiting is per process | Multi-replica needs a proxy limit; the shared-SQLite backend is single-host by construction | `IMPLEMENTED_NOT_VERIFIED` (multi-replica) |
+| Tax-rule changes require database access | Now an audited, segregation-of-duties administration path (`POST /api/v1/tax/timbre-rules`, `…/approve`) | `FIXED_AND_VERIFIED` (R-05) |
 | Container image never built here | Deployment artefacts unproven | `IMPLEMENTED_NOT_VERIFIED` |
 | No migration against production-sized data | Timing/locking unknown | `BLOCKED_EXTERNAL` |
 | No MFA, no device binding | Token usable until TTL/revocation | accepted risk |

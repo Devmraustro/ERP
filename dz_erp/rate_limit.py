@@ -416,6 +416,13 @@ class SqliteRateLimitStore:
     Events older than the widest window are deleted (at most once per second),
     and the table is capped at ``max_rows`` so a flood cannot grow it without
     bound. Both operations run inside the same transaction as the insert.
+
+    The cap is enforced *when a process prunes*, so under concurrent writers the
+    table can stand at ``max_rows`` plus at most one event per writer that
+    inserted after its own prune. That is the precise guarantee, and Phase 43
+    measures it (``tests/test_phase43_limiter_hardening.py``): it is bounded, it
+    is not an absolute, and no caller should treat ``max_rows`` as a hard row
+    count at every instant.
     """
 
     name = "sqlite"
@@ -491,13 +498,32 @@ class SqliteRateLimitStore:
         return allowed, 0 if allowed else self._retry_after(float(oldest), window_seconds, now)
 
     def blocked(self, scope: str, key: str, limit: int, window_seconds: float) -> bool:
+        """Is this key over its limit? A read, and nothing more.
+
+        The original implementation answered this question inside
+        ``db.transaction()``, i.e. inside ``BEGIN IMMEDIATE`` — a read that
+        queued behind, and held, the application database's write lock on every
+        authentication attempt (finding R-03). It now runs through
+        ``ERPDatabase.read_probe``: one autocommit SELECT on a read snapshot,
+        still serialised with in-process transactions by the same ``RLock``.
+
+        This changes *when* the lock is taken, never what is counted: the same
+        committed events, the same window, the same ``>= limit`` test. ``hit()``
+        still records events inside a write transaction, so a block decision can
+        never be based on an event that was rolled back.
+        """
         now = time.time()
-        with self._db.transaction() as conn:
-            row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM {self.TABLE} "
-                f"WHERE scope = ? AND key = ? AND occurred_at > ?",
-                (scope, key, now - window_seconds),
-            ).fetchone()
+        sql = (
+            f"SELECT COUNT(*) AS n FROM {self.TABLE} "
+            f"WHERE scope = ? AND key = ? AND occurred_at > ?"
+        )
+        params = (scope, key, now - window_seconds)
+        probe = getattr(self._db, "read_probe", None)
+        if probe is not None:
+            row = probe(sql, params)
+        else:  # pragma: no cover - a store may be built on a minimal fake
+            with self._db.transaction() as conn:
+                row = conn.execute(sql, params).fetchone()
         return int(row["n"]) >= limit
 
     def reset(self, scope: str, key: str) -> None:
@@ -585,9 +611,20 @@ class RequestThrottle:
             60.0,
             max_keys=self.max_keys,
         )
-        #: Set when a backend error was swallowed in ``fail_open`` mode, so a
-        #: caller can audit that a decision was taken without the counter.
+        #: The error raised by the *most recent* backend call, or ``None`` when
+        #: that call succeeded. Cleared on every success, so a caller that reads
+        #: it can never attribute an old outage to a new decision.
         self.last_backend_error: Optional[str] = None
+        #: Errors raised during the public call currently in progress. Reset at
+        #: the start of every public method; see :attr:`current_backend_error`.
+        self._call_errors: List[str] = []
+        #: Historical record, kept deliberately separate from the two above:
+        #: how many backend failures have ever been seen, when the last one was,
+        #: and what it said. An operator investigating a past incident needs the
+        #: history; a decision needs only the present.
+        self.backend_failure_count = 0
+        self.last_backend_failure_at: Optional[float] = None
+        self.last_backend_failure_message: Optional[str] = None
 
     # -- compatibility accessors ------------------------------------------
     @property
@@ -614,16 +651,54 @@ class RequestThrottle:
         return f"client|{client}"
 
     # -- authentication ----------------------------------------------------
+    @property
+    def current_backend_error(self) -> Optional[str]:
+        """The backend error behind the decision currently being made, if any.
+
+        This is the only thing a caller may use to explain a refusal. It is
+        ``None`` for a refusal the *policy* produced, even if the backend has
+        failed at some earlier point in this process's life — that distinction
+        was the defect this property exists to remove: before it, a single
+        transient error made every later ordinary 429 report
+        ``RATE_LIMIT_BACKEND_UNAVAILABLE``.
+        """
+        return self._call_errors[0] if self._call_errors else None
+
+    def backend_health(self) -> Dict[str, Any]:
+        """Current-vs-historical backend state, without any key or username."""
+        return {
+            "current_error": self.current_backend_error,
+            "degraded_now": self.current_backend_error is not None,
+            "failure_count": self.backend_failure_count,
+            "last_failure_at": self.last_backend_failure_at,
+            "last_failure_message": self.last_backend_failure_message,
+            "failure_mode": self.failure_mode,
+        }
+
+    def _begin_call(self) -> None:
+        """Start a public operation: nothing has failed *for this call* yet."""
+        self._call_errors = []
+
     def _call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
         try:
-            return getattr(self.store, operation)(*args, **kwargs)
+            result = getattr(self.store, operation)(*args, **kwargs)
         except Exception as exc:  # the policy is below, not here
-            self.last_backend_error = f"{type(exc).__name__}: {exc}"
+            message = f"{type(exc).__name__}: {exc}"
+            # Current call, latest call, and history are three different facts.
+            self._call_errors.append(message)
+            self.last_backend_error = message
+            self.backend_failure_count += 1
+            self.last_backend_failure_at = time.time()
+            self.last_backend_failure_message = message
             if self.failure_mode == "fail_open":
                 return (True, 0) if operation == "hit" else False
             return (False, 60) if operation == "hit" else True
+        # A success clears the stale error; the counters above keep the history.
+        self.last_backend_error = None
+        return result
 
     def login_blocked(self, client: str, username: str) -> Tuple[bool, int]:
+        self._begin_call()
         per_account = self._call(
             "blocked", "login", self.login_key(client, username), self.auth_limit, self.auth_window
         )
@@ -637,6 +712,7 @@ class RequestThrottle:
         return bool(per_account), max(1, int(self.auth_window)) if per_account else 0
 
     def record_login_failure(self, client: str, username: str) -> Tuple[bool, int]:
+        self._begin_call()
         allowed, retry = self._call(
             "hit", "login", self.login_key(client, username), self.auth_limit, self.auth_window
         )
@@ -652,10 +728,12 @@ class RequestThrottle:
         # Only the per-account bucket is cleared. Clearing the per-client
         # aggregate would let an attacker who owns one valid account reset the
         # flood counter between credential-stuffing runs.
+        self._begin_call()
         self._call("reset", "login", self.login_key(client, username))
 
     # -- overall -----------------------------------------------------------
     def request_allowed(self, client: str) -> Tuple[bool, int]:
+        self._begin_call()
         allowed, retry = self.requests.hit(f"req|{client}")
         return allowed, retry
 
@@ -698,6 +776,7 @@ def describe_throttle_policy(throttle: Optional[RequestThrottle] = None) -> Dict
     }
     described["scope"] = described["backend"]["scope"]  # type: ignore[index]
     described["storage"] = described["backend"]["storage"]  # type: ignore[index]
+    described["backend_health"] = t.backend_health()
     described["bounded"] = {
         "max_keys_per_scope": t.max_keys,
         "eviction": "least-recently-touched bucket",

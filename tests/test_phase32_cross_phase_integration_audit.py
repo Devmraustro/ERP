@@ -61,6 +61,7 @@ from dz_erp.intake_ocr import (
     update_extracted_field_by_human,
     upload_and_process_supplier_document,
 )
+from dz_erp.security_audit import safe_restore_supported  # shared interpreter gate (R-07)
 from dz_erp.localization import load_official_odoo_chart
 from dz_erp.procurement_stock import (
     create_and_validate_supplier_invoice,
@@ -1117,16 +1118,22 @@ def test_p_out_of_band_line_edit_before_approval_is_caught_at_approval(env):
 # ---------------------------------------------------------------------------
 # Q. Backup / restore after posting (environment-gated)
 # ---------------------------------------------------------------------------
-_RESTORE_GATE_OK = sys.version_info >= (3, 11, 17) and sys.version_info < (3, 13)
+# The shared predicate (Phase 45, R-07). The previous hand-written copy
+# (">= (3, 11, 17) and < (3, 13)") wrongly accepted 3.12.0-3.12.9, on which
+# restore correctly refuses; it only passed CI because CI resolves the newest
+# 3.12. One predicate, used by the library and by every gated test, is what keeps
+# the matrix honest.
+_RESTORE_GATE_OK = safe_restore_supported()
 
 
 @pytest.mark.skipif(
     not _RESTORE_GATE_OK,
     reason=(
-        "restore_and_verify_backup refuses to run below Python 3.11.17 by design "
-        "(safe tar extraction); this audit host has "
+        "restore_and_verify_backup refuses to run below Python 3.11.17 or 3.12.10 by "
+        "design (safe tar extraction); this audit host has "
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}. "
-        "The path is exercised by CI on 3.11/3.12 and recorded as environment-blocked."
+        "The path is exercised by CI on both supported lines and is recorded as "
+        "environment-blocked, never as passing."
     ),
 )
 def test_q_backup_and_restore_after_posting_verify_the_ledger(env, tmp_path):

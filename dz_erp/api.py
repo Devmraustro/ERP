@@ -52,6 +52,13 @@ from .intake_ocr import (
     upload_and_process_supplier_document,
 )
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
+from .request_id import sanitize_request_id
+from .localization import (
+    TimbreRuleAdministrationError,
+    approve_timbre_rule_version,
+    create_timbre_rule_version,
+    list_timbre_rule_versions,
+)
 from .rate_limit import (
     RequestThrottle,
     describe_throttle_policy,
@@ -143,6 +150,32 @@ class InvoiceRevisionInput(BaseModel):
     amount_timbre_dzd: Optional[str] = None
     amount_ttc_dzd: Optional[str] = None
     lines: Optional[List[InvoiceLineInput]] = None
+
+
+class TimbreRuleVersionInput(BaseModel):
+    """A proposed stamp-duty rule version (finding R-05).
+
+    Every numeric field is required: this endpoint never defaults a rate, because
+    a default would be a tax value nobody chose. The values themselves must come
+    from an authorized configuration source and remain subject to the
+    expert-comptable review recorded in the release readiness matrix.
+    """
+
+    version_code: str
+    valid_from: str
+    valid_to: Optional[str] = None
+    min_amount_dzd: str
+    max_amount_dzd: Optional[str] = None
+    threshold_dzd: str
+    brackets: List[Dict[str, Any]]
+    reason: str
+
+
+class TimbreRuleApprovalInput(BaseModel):
+    """Approval of a draft rule by a *different* accountant or an administrator."""
+
+    reason: str
+    overlap_policy: str = "reject"
 
 
 class ApprovalDecisionInput(BaseModel):
@@ -265,7 +298,13 @@ def create_erp_fastapi_app(
     # caller passes to it explicitly.
     @app.middleware("http")
     async def _log_request(request: Request, call_next: Any) -> Any:
-        corr_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+        # A client may propose a correlation id, but only a bounded, printable
+        # ASCII token is adopted; anything else (over-long, empty, control or
+        # non-ASCII characters) is replaced by a server-side uuid4 and never
+        # echoed (finding R-04). See dz_erp/request_id.py.
+        corr_id, _supplied_id_accepted = sanitize_request_id(
+            request.headers.get("X-Request-Id")
+        )
         peer_ip = request.client.host if request.client else None
         client_ip = app.state.proxy_policy.resolve_client_ip(
             peer_ip, request.headers.get("X-Forwarded-For")
@@ -439,13 +478,20 @@ def create_erp_fastapi_app(
             # A refusal caused by an unavailable counter is a different fact from
             # a refusal caused by the limit, and an operator needs to tell them
             # apart: the first is a dependency failure, the second is the policy.
-            if getattr(throttle, "last_backend_error", None):
+            #
+            # Only the error behind *this* decision counts. Using a historical
+            # "last error" here made every ordinary 429 look like a backend
+            # outage for the rest of the process's life (finding R-01), which
+            # would have sent an operator chasing a dependency that had long
+            # recovered.
+            current_error = getattr(throttle, "current_backend_error", None)
+            if current_error:
                 logger.log(
                     "ERROR",
                     "RATE_LIMIT_BACKEND_UNAVAILABLE",
                     corr_id,
                     failure_mode=throttle.failure_mode,
-                    error_type=str(throttle.last_backend_error).split(":", 1)[0],
+                    error_type=str(current_error).split(":", 1)[0],
                     username=body.username,
                     client_ip=client_key,
                 )
@@ -1132,6 +1178,86 @@ def create_erp_fastapi_app(
         described["deployment_scope"] = format_rate_limit_scope(app.state.throttle)
         return {"company_id": auth.company_id, "rate_limit": described}
 
+    # ------------------------------------------------------------------
+    # Timbre rule administration (Phase 46, finding R-05). The service refuses
+    # the wrong role, the wrong tenant, self-approval, an overlapping window and
+    # an incomplete rule; these endpoints only translate that into HTTP and
+    # never widen the tenant scope (it comes from the verified credential).
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/tax/timbre-rules")
+    def api_list_timbre_rules(
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Every timbre rule version of this company, drafts included."""
+        try:
+            rules = list_timbre_rule_versions(db, auth.company_id, auth.user_id)
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "rules": rules}
+
+    @app.post("/api/v1/tax/timbre-rules", status_code=201)
+    def api_create_timbre_rule(
+        body: TimbreRuleVersionInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create a DRAFT rule version. It is not in force until approved."""
+        try:
+            created = create_timbre_rule_version(
+                db,
+                auth.company_id,
+                auth.user_id,
+                version_code=body.version_code,
+                valid_from=body.valid_from,
+                valid_to=body.valid_to,
+                min_amount_dzd=body.min_amount_dzd,
+                max_amount_dzd=body.max_amount_dzd,
+                threshold_dzd=body.threshold_dzd,
+                brackets=body.brackets,
+                reason=body.reason,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TimbreRuleAdministrationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return created
+
+    @app.post("/api/v1/tax/timbre-rules/{version_code}/approve")
+    def api_approve_timbre_rule(
+        version_code: str,
+        body: TimbreRuleApprovalInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Approve a DRAFT, making it ACTIVE for its window.
+
+        A conflict is 409: the request was well formed, but the state of the
+        configuration (an overlap, a rule an invoice already cites) refuses it.
+        """
+        try:
+            approved = approve_timbre_rule_version(
+                db,
+                auth.company_id,
+                auth.user_id,
+                version_code=version_code,
+                reason=body.reason,
+                overlap_policy=body.overlap_policy,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TimbreRuleAdministrationError as exc:
+            detail = str(exc)
+            status = 409 if detail.startswith(
+                ("TIMBRE_RULE_OVERLAP:", "TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE:",
+                 "TIMBRE_RULE_SUPERSEDE_IMPOSSIBLE:", "TIMBRE_RULE_NOT_A_DRAFT:")
+            ) else 422
+            raise HTTPException(status_code=status, detail=detail) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return approved
     @app.get("/api/v1/users")
     def api_list_users(
         limit: int = 500,

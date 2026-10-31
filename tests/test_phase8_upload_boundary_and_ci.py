@@ -1288,10 +1288,14 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # P32-F2 had no supported path for.
     # + the Phase 39 rate-limit policy endpoint (GET system/rate-limit-policy),
     # which reports the live throttling policy to administrators only.
+    # + the 3 Phase 46 timbre-rule administration endpoints (GET and POST
+    # tax/timbre-rules, POST tax/timbre-rules/{version_code}/approve), added to
+    # close finding R-05: without them the only way to adopt a new stamp-duty
+    # rule was raw SQL, which produced no actor, reason or audit event.
     # The count pin catches accidental surface changes; the desktop read
     # endpoints are authenticated like every other protected operation.
-    assert len(protected) == 30, (
-        f"expected 30 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert len(protected) == 33, (
+        f"expected 33 protected operations, got {len(protected)}: {sorted(protected)}"
     )
 
 

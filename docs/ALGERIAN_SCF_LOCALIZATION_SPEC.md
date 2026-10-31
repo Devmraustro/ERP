@@ -64,6 +64,15 @@ Implemented in both `dz_erp/localization.py` (`validate_algerian_identifiers`) a
    - $1.0\%$ for base $\le 30,000.00\text{ DZD}$ (minimum $5.00\text{ DZD}$).
    - $1.5\%$ for $30,000.00 < \text{base} \le 100,000.00\text{ DZD}$.
    - $2.0\%$ for $\text{base} > 100,000.00\text{ DZD}$ (capped at $10,000.00\text{ DZD}$).
+   - These are **seeded defaults**, not a legal determination: the values in
+     force on an invoice date come from the effective-dated `timbre_rules`
+     table, and the values above are what the shipped seed inserts for
+     `LF-2025-CASH-TIMBRE`. A new Finance Law is adopted through the audited
+     administration path (`POST /api/v1/tax/timbre-rules` then `…/approve`,
+     two-person approval, overlap refused by default) — see
+     `docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §3.1. Whether the
+     seeded brackets are the ones the law actually requires remains
+     `BLOCKED_EXTERNAL` pending an expert-comptable's review.
 
 ---
 

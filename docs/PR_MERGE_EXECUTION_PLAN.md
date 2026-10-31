@@ -92,9 +92,9 @@ These are gates, not suggestions. Each needs a named human, not an agent.
 | G2 | **Branch protection / required checks confirmed** | **unknown** — `403` reading protection with the available token, rulesets `[]` | repo admin |
 | G3 | **Explicit authorization to merge** | not given (this pass is review-only) | product/engineering owner |
 | G4 | **Draft state lifted** on `#4`–`#7` at their turn | four PRs are draft; a draft cannot merge | PR author / owner |
-| G5 | **Disposition of R-01** (stale `last_backend_error` mislabels refusals) | finding open | engineering owner |
-| G6 | **Disposition of R-05** (no audited path to add a timbre rule version) | finding open | engineering + accounting owner |
-| G7 | **R-06 documentation correction** (two docs still say the rule label is not persisted) | finding open | engineering |
+| G5 | **Disposition of R-01** (stale `last_backend_error` mislabels refusals) | **FIXED — closed**; `current_backend_error`/`backend_health()`, 17 tests in `tests/test_phase43_limiter_hardening.py` | engineering owner |
+| G6 | **Disposition of R-05** (no audited path to add a timbre rule version) | **FIXED — closed** (code `FIXED_AND_VERIFIED`); the tax *values* remain subject to the external expert-comptable sign-off, unchanged by this fix | engineering + accounting owner |
+| G7 | **R-06 documentation correction** (two docs still say the rule label is not persisted) | **FIXED — closed**; §7 of `ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` rewritten, `TECHNICAL_REPORT.md` and `RISK_REGISTER.md` corrected | engineering |
 
 Optional but cheap, recommended before merging #7: add the missing concurrent
 **writer** test for the shared sqlite limiter (R-02) and a bound on the

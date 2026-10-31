@@ -94,7 +94,8 @@ def _diagnose(stdout: str, stderr: str) -> str:
     last exception line is the part that identifies the cause.
     """
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-    return f"rc-detail out={stdout.strip()[:40]!r} err={lines[-1][:180] if lines else '<none>'!r}"
+    exc = next((line for line in reversed(lines) if "Error" in line or "error" in line), lines[-1] if lines else "<none>")
+    return f"out={stdout.strip()[:30]!r} err={exc[:240]}"
 
 
 def _run_in_processes(scripts: list[str], *, timeout: int = 180) -> list[tuple[str, str, int]]:
@@ -515,7 +516,12 @@ def test_concurrent_process_startup_does_not_race_the_schema_migrations(tmp_path
         bad = [s for s in summaries if s[2] != 0 or s[0].strip() != "OPENED"]
         if bad:
             failures.extend(_diagnose(out, err) for out, err, _code in bad)
-    assert failures == [], "concurrent start-up failed: " + " | ".join(failures[:4])
+    if failures:
+        # Raised rather than asserted comparison-style on purpose: pytest's
+        # rendering of ``assert failures == []`` puts the diagnosis into a diff
+        # that the CI job annotation truncates, which is how this failure was
+        # first reported as an unexplained ``+ ]``. The cause is the point.
+        raise AssertionError("STARTUPCAUSE " + failures[0][:300])
 
     # And the schema it converged on is the expected one, not a half-migrated mix.
     db = ERPDatabase(db_path)

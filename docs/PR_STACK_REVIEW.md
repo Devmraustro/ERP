@@ -973,3 +973,175 @@ intermittent failure is disclosed with its evidence rather than dropped from the
 record. A reviewer who wants the failure rate stated plainly: **1 failure in 2
 runs of the 3.11 job for this round, on a test this round did not touch, that
 passes 12/12 locally under load.**
+
+---
+
+## 11. Round 4 — F-R3-1 identified, and a second look at Round 3's own arithmetic (2026-10-31)
+
+Round 3 left one finding open on the honest ground that it had not been reproduced
+(§10.8–10.9). This round was authorised to investigate it and to re-review every
+production change Round 3 made. Both produced a defect, and both are fixed below
+with a test that fails without the fix.
+
+Entry state was re-verified rather than assumed: local `HEAD` and `origin` both at
+`0e090083eb4bb961801b895e3d74cd345208beaf`, worktree clean, `main` untouched at
+`4fc1364a`, PRs #3–#7 `MERGEABLE`/`CLEAN`, and 3/3 green check-runs on the head
+SHA. Nothing below depends on the state recorded at the end of Round 3.
+
+### 11.1 F-R3-1 — **cause identified, FIXED, and reproducible on demand**
+
+**The Round-3 conclusion was wrong in one specific way, and right in another.**
+Round 3 measured `PRAGMA journal_mode = WAL` under an *EXCLUSIVE* lock and saw it
+wait the full 30 s busy timeout; from that it concluded the switch respects
+`busy_timeout`. It does — but only for that lock state. A lock matrix settled it:
+
+| Peer holds | `PRAGMA journal_mode = WAL` returns | Elapsed |
+|---|---|---|
+| `EXCLUSIVE` | succeeds after the peer commits | 3.04 s (busy timeout honoured) |
+| **`RESERVED` (`BEGIN IMMEDIATE`)** | `sqlite3.OperationalError: database is locked` | **0.00 s** |
+| read transaction | succeeds | immediate |
+
+A `RESERVED` lock is precisely what this codebase's own write transactions hold
+(`BEGIN IMMEDIATE`), and the *instant* failure is the documented behaviour of the
+journal-mode change: it is a schema-level operation that must upgrade to
+`EXCLUSIVE` immediately and cannot enter the busy handler while a peer holds
+`RESERVED`. So the CI failure on `9d5d112a` — `STARTUPCAUSE ('',
+'sqlite3.OperationalError: database is locked')` surfacing *within milliseconds*
+rather than after 30 s — is exactly this, not a 30-second lock hold. Round 3 had
+been looking for a long lock that never existed.
+
+Why it was never reproduced by racing: the window is not created by starts
+racing each other, it is created by a start overlapping **any** peer that is inside
+a write transaction. 60 randomised concurrent-start trials produced 0 failures;
+holding `RESERVED` from a second process reproduces it deterministically, pre-fix,
+in 0.00 s — and, through `ERPDatabase`, on **both** a brand-new database and an
+existing one.
+
+**Consequence: availability only.** Proven rather than argued, using the
+`/tmp/probe_consequence.py` scenario (open under contention, then release, then
+inspect): the audit key file is byte-identical, the key version is unchanged,
+every audit event survives, and `verify_audit_chain` is valid. No split key, no
+lost event, no partial migration — the process simply cannot start while a peer
+holds the write lock, and succeeds once it releases.
+
+**Fix** (`dz_erp/database.py`), minimal and in one place:
+
+* `_current_journal_mode(conn)` reads the mode with a **read-form** pragma
+  (`PRAGMA journal_mode;`), which takes no schema lock — measured lock-free.
+* `_ensure_wal_journal(conn)` returns without issuing anything when the database
+  is **already WAL**. On a live deployment this is the overwhelmingly common
+  case, and it removes the contended statement entirely from it.
+* Otherwise it attempts the switch with a **bounded budget**
+  (`WAL_SWITCH_ATTEMPTS = 20`, `WAL_SWITCH_BACKOFF_SECONDS = 0.025`, ~0.5 s).
+  If a peer wins the switch first, that is convergence, not failure. If the budget
+  runs out, the **original** error is re-raised, so a genuinely single-writer
+  situation still fails loudly instead of being masked by a retry.
+
+This is deliberately *not* a retry loop used to paper over an unknown cause — the
+cause is named above, the loop is bounded at half a second, and the failure is
+still surfaced. Measured after the fix: rollback-journal database under a
+`RESERVED` peer fails in a bounded 0.48 s (loud, not silent); a WAL database opens
+in 4.04 s; convergence when the peer wins takes 0.16 s; and, with the corrected
+CI-condition probe, a fresh and an existing database behind a 2 s holder both open
+in ~2.05 s instead of failing immediately.
+
+**Regression test:** `tests/test_phase50_wal_startup_contention.py`, 9 tests —
+convergence when the database is already WAL, convergence when a peer wins the
+switch, a switch that succeeds on retry not being an error, the bounded budget
+re-raising the original error, and three subprocess end-to-end cases including a
+six-way concurrent first start. Reverting the fix makes
+`test_startup_converges_when_a_peer_creates_the_database` fail; the test was
+verified to catch the defect, not merely to pass.
+
+The phase49 test that flaked in CI was **not modified**. Its 7 tests pass, and the
+previously flaky case passed 5/5 repeats.
+
+### 11.2 F-R3-2 — Round 3's own variance split put binary floats in the money path
+
+Reviewing the Round-3 diff rather than trusting its tests found
+`CAST(... AS REAL)` in `_line_price_variance`: the receipt total was summed by
+SQLite in binary floating point, so 1,000 units at 1.000125 DZD summed to
+1000.1249999999999 and rounded to **1000.12**, while the GRN credited **1000.13**.
+At *identical* prices the posting then invented a 0.01 variance and left −0.01
+sitting on clearing — reproduced end-to-end before the fix.
+
+Fixed by summing the receipt lines in `Decimal` per line with `round_dzd`, and
+computing the invoice-side adjustment as `round_dzd(received_total * qty /
+received_qty)`. The fragile mutation of `je_lines[-1]["debit_dzd"]` was replaced
+by an explicit `carries_variance` decision, so the split no longer depends on the
+last appended line being the right one.
+
+After the fix: no variance at identical prices, `380` nets to 0.00, trial balance
+balanced. Two tests were added to `tests/test_phase47_price_variance_clearing.py`;
+restoring the float sum fails both, so they catch the regression rather than
+merely covering the code.
+
+### 11.3 F-R3-3 — a variance account outside the chart was posted to silently
+
+Found while asking the inverse of the LB-2 question: LB-2 blocks *choosing* the
+account, but nothing stopped an operator from configuring one **that does not
+exist**. Posting to `9999-NOT-IN-CHART` was accepted, the code appeared in
+`journal_entry_lines`, and the trial balance still balanced — so no report would
+ever have flagged it.
+
+Fixed by a fail-closed check at posting time: a configured
+`price_variance_account_code` must resolve to an account of this company, else
+`FinancialIntegrityError: PRICE_VARIANCE_ACCOUNT_UNKNOWN`. No account is
+selected, no default invented, and a cleared (NULL) code keeps the documented
+unallocated-residual behaviour. Two tests: the unknown code is refused with
+nothing written and the invoice left `Approved` (not half-posted), and a real
+chart account is still accepted.
+
+### 11.4 Round-3 review, item by item
+
+Reviewed as diff, not by reading the tests' names:
+
+| Area | Verdict |
+|---|---|
+| Idempotency / reversal side effects | Sound: `request_sha256` compared before any insert on both `REVERSE_INVOICE` paths; refusal is audited outside the rolled-back attempt |
+| Timbre cap declaration | Sound: `max_amount_dzd` cannot default to NULL through the administration path; no figure chosen |
+| Effective-dated rule handling | Sound: resolution is by effective date, posted invoices keep their recorded `timbre_rule_version`/`_source` |
+| Price-variance posting and reversal | **Two defects found** — F-R3-2 (float) and F-R3-3 (unknown account); both fixed. Reversal mirrors the original lines, and `original → reversal` links survive (`reversal_entry_id` observed on the original) |
+| Negative-amount validation | Sound: refused at validation, on edit and again at posting; zero still valid; credit notes unaffected |
+| Source evidence / approval | Sound: provenance columns retained through reversal |
+| Audit chain and transaction boundaries | Sound: posting and reversal each commit once, under one transaction, with the chain valid afterwards |
+| Tests exercise real paths | Yes — the invariants in §11.5 were driven through the public API on a real SQLite file, not through mocked helpers |
+
+### 11.5 Accounting and inventory invariants (independently exercised)
+
+| Scenario | Result |
+|---|---|
+| Exact match, variance account configured | 2 entries, all balanced, `31` 10,000 / `4456` 1,900 / `401` −11,900, no variance |
+| +10/unit within tolerance | `608` +100.00, `401` −12,019, `380` 0.00, balanced |
+| −10/unit within tolerance | `608` −100.00, `401` −11,781, `380` 0.00, balanced |
+| Within tolerance, no account configured | `380` +100.00 named and audited as unallocated, balanced |
+| Reversal of a variance invoice | 3 entries, all balanced, `31` +10,000 and `380` −10,000 both net to 0.00; original → reversal link present; timbre provenance retained |
+| Unknown configured account | refused, nothing posted, chain valid |
+
+Trial balance balanced in every case; `verify_audit_chain` valid throughout.
+
+### 11.6 Verification
+
+| Item | Value |
+|---|---|
+| Full suite | **20 failed, 1105 passed, 9 skipped** (baseline at `0e090083`: 20F/1092P/9S — +13 tests, the same 20 interpreter-gate failures) |
+| Failure list | **byte-identical** to the previous baseline (`diff` of the sorted `FAILED` ids is empty); all 20 are `requires Python 3.11.17` gates, none accounting |
+| Targeted suites | phase47 clearing **14 passed**, phase50 contention **9 passed**, phase38 migration matrix **24 passed** (F-R3-1 touches start-up, so the matrix was re-run), docs consistency **15 passed** |
+| `ruff check dz_erp tests tools` | clean |
+| Risk register | consistent at **47 rows** after adding P15/P16 |
+
+### 11.7 Disposition
+
+| Finding | Status |
+|---|---|
+| F-R3-1 start-up lock contention | **FIXED_AND_VERIFIED** — cause named, deterministically reproduced, bounded fix, regression test proven to fail without it |
+| F-R3-2 float in the variance split | **FIXED_AND_VERIFIED** |
+| F-R3-3 unknown variance account | **FIXED_AND_VERIFIED** |
+| LB-1 timbre cap | **BLOCKED_EXTERNAL** — unchanged |
+| LB-2 variance account / policy | **BLOCKED_EXTERNAL** — unchanged |
+| R-08 / R-09 audit-key publish residuals | **Open** — unchanged, untouched, still no regression test |
+| R-05 (no invented tax figures) | Honoured: no figure was chosen in this round |
+
+**Status: `CHANGES_REQUIRED` is cleared for code; `BLOCKED_EXTERNAL` remains for
+LB-1 and LB-2; `NOT_PRODUCTION_READY` still applies.** Nothing was merged,
+retargeted, rebased, squashed or deployed.

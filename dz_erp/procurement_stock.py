@@ -2272,24 +2272,36 @@ def _line_price_variance(
     zero = Decimal("0.00")
     if not line["product_id"] or not line["po_line_id"]:
         return line_ht, line_ht, zero
-    received = conn.execute(
+    # Read the receipt lines and add them up in Decimal. Casting in SQL
+    # (``CAST(... AS REAL)``) would reintroduce binary floating point into a
+    # monetary path the project deliberately keeps exact: 1000 units at
+    # 1.000125 sum to 1000.1249999999999 in float, which rounds to 1000.12
+    # instead of the 1000.13 the GRN credited — a phantom cent of variance and a
+    # residual left on the clearing account, at identical prices.
+    rows = conn.execute(
         """
-        SELECT COALESCE(SUM(CAST(grl.qty_done AS REAL) * CAST(grl.unit_cost_dzd AS REAL)), 0) AS v,
-               COALESCE(SUM(CAST(grl.qty_done AS REAL)), 0) AS q
+        SELECT grl.qty_done AS qty_done, grl.unit_cost_dzd AS unit_cost_dzd
         FROM goods_receipt_lines grl
         JOIN goods_receipts gr ON gr.id = grl.grn_id
         WHERE grl.po_line_id = ? AND grl.company_id = ? AND gr.company_id = ?
         """,
         (line["po_line_id"], company_id, company_id),
-    ).fetchone()
-    received_qty = Decimal(str(received["q"] or 0))
+    ).fetchall()
+    received_qty = zero
+    received_total = zero
+    for row in rows:
+        receipt_qty = round_qty(row["qty_done"])
+        receipt_cost = round_qty(row["unit_cost_dzd"])
+        # Per-line rounding, exactly as the GRN posted its own clearing credit.
+        received_total += round_dzd(receipt_qty * receipt_cost)
+        received_qty += receipt_qty
     if received_qty <= zero:
         return line_ht, line_ht, zero
-    # Receipt cost per unit, then the share of it attributable to the invoiced
-    # quantity. Quantising keeps the two halves exactly additive: the split can
-    # never introduce a rounding cent of its own.
-    unit_received = Decimal(str(received["v"])) / received_qty
-    received_value = round_dzd(unit_received * qty)
+    # The share of that receipt value attributable to the invoiced quantity.
+    # One exact multiplication, one division, one rounding: when the invoice
+    # covers the whole receipt the result is the receipt value itself, bit for
+    # bit, so the clearing account closes at zero.
+    received_value = round_dzd(received_total * qty / received_qty)
     invoice_value = round_dzd(line_ht)
     return received_value, invoice_value, (invoice_value - received_value)
 
@@ -2417,6 +2429,24 @@ def _post_supplier_invoice_in_transaction(
                 if prod and prod["is_storable"]:
                     debit_acct = prod["clearing_account_code"]  # 380 Achats stockés clearing account
                     variance_account = prod["price_variance_account_code"]
+                    if variance_account:
+                        # The variance account is the only account code an
+                        # operator supplies (the rest are chart constants), so
+                        # it is the only one that can name an account this
+                        # company does not have. Posting to it would leave the
+                        # ledger citing a non-existent account that no trial
+                        # balance check would catch — refuse instead.
+                        known = conn.execute(
+                            "SELECT 1 FROM accounts WHERE company_id = ? AND code = ?",
+                            (company_id, variance_account),
+                        ).fetchone()
+                        if not known:
+                            raise FinancialIntegrityError(
+                                f"PRICE_VARIANCE_ACCOUNT_UNKNOWN:{variance_account} is not an "
+                                f"account of company {company_id}; configure the product's "
+                                "price_variance_account_code to an account in this chart (or "
+                                "clear it to keep the difference on the clearing account)."
+                            )
                 elif prod:
                     debit_acct = prod["expense_account_code"]
 
@@ -2443,11 +2473,15 @@ def _post_supplier_invoice_in_transaction(
             received_value, invoice_value, variance = _line_price_variance(
                 conn, company_id, line, qty, line_ht
             )
+            # With no account to carry the difference the invoice keeps the
+            # historical posting (the full invoice value on the clearing
+            # account) and the residual is recorded, not hidden.
+            carries_variance = variance != 0 and bool(variance_account)
             je_lines.append(
                 {
                     "account_code": debit_acct,
                     "label": f"Bill {inv['supplier_invoice_no']} - {line['description']}",
-                    "debit_dzd": format_dzd(received_value if variance != 0 else line_ht),
+                    "debit_dzd": format_dzd(received_value if carries_variance else line_ht),
                     "credit_dzd": "0.00",
                     "g50_tag": "E3B91_base",
                 }
@@ -2478,10 +2512,10 @@ def _post_supplier_invoice_in_transaction(
                     price_variances.append(record)
                 else:
                     # No approved accounting policy: the invoice bears the full
-                    # invoice price on the clearing account exactly as before,
-                    # but the residual is named, quantified and audited rather
-                    # than left unexplained (see docs/REMAINING_BLOCKERS.md LB-2).
-                    je_lines[-1]["debit_dzd"] = format_dzd(line_ht)
+                    # invoice price on the clearing account exactly as before
+                    # (already reflected in the debit above), but the residual is
+                    # named, quantified and audited rather than left unexplained
+                    # (see docs/REMAINING_BLOCKERS.md LB-2).
                     unallocated_variances.append(record)
 
         tva_dec = round_dzd(inv["amount_tva_dzd"])

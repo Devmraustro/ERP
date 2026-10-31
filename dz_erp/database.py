@@ -894,6 +894,64 @@ def _resolve_audit_keyring(db_path: str, explicit: Optional[bytes]) -> tuple:
     return KeyRing.bootstrap("audit", _resolve_audit_secret(db_path, explicit)), ring_path
 
 
+
+#: `PRAGMA journal_mode = WAL` is the one start-up statement the busy handler
+#: cannot protect. Measured on this host (F-R3-1):
+#:
+#: * a peer holding **RESERVED** (which our own `BEGIN IMMEDIATE` migrations hold,
+#:   and which a peer still creating the schema holds) makes the switch fail in
+#:   **0.00 s** with `database is locked`, ignoring the 30 s `timeout=`;
+#: * a peer holding **EXCLUSIVE** makes it wait, and it then succeeds.
+#:
+#: That is the start-up failure observed once on CI. It is an availability
+#: failure, never an integrity one: the switch happens before any schema write,
+#: so a worker that loses the race cannot split audit keys or lose events — it
+#: simply cannot start.
+#:
+#: The switch is therefore (1) skipped entirely when the database is already in
+#: WAL — every start after the first, including every restart of a deployment —
+#: and (2) when a switch is genuinely needed, treated as *converged* if a peer
+#: wins the race, retrying only within this small bounded budget before raising
+#: the original error unchanged.
+WAL_SWITCH_ATTEMPTS = 20
+WAL_SWITCH_BACKOFF_SECONDS = 0.025
+
+
+def _current_journal_mode(conn: sqlite3.Connection) -> str:
+    """Read the journal mode without changing it (safe while a peer holds a lock)."""
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    return str(row[0]).lower() if row else ""
+
+
+def _ensure_wal_journal(conn: sqlite3.Connection) -> None:
+    """Put a writable connection on WAL, tolerating a peer that is doing the same.
+
+    See the module comment above :data:`WAL_SWITCH_ATTEMPTS` for why this is not
+    a blanket retry: the common case issues no switch at all, and the contended
+    case succeeds as soon as *any* participant has switched the database.
+    """
+    if _current_journal_mode(conn) == "wal":
+        return
+    last_error: Optional[sqlite3.OperationalError] = None
+    for attempt in range(WAL_SWITCH_ATTEMPTS):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            last_error = exc
+            # A peer may have switched the database while we were refused; that
+            # is the outcome we wanted, not a failure.
+            if _current_journal_mode(conn) == "wal":
+                return
+            if attempt + 1 < WAL_SWITCH_ATTEMPTS:
+                time.sleep(WAL_SWITCH_BACKOFF_SECONDS)
+    assert last_error is not None
+    raise last_error
+
+
 class ERPDatabase:
     """Thread-safe transactional database manager with audit hash-chaining."""
 
@@ -1057,7 +1115,7 @@ class ERPDatabase:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         if self.db_path != ":memory:" and not self._read_only:
-            conn.execute("PRAGMA journal_mode = WAL;")
+            _ensure_wal_journal(conn)
         return conn
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:

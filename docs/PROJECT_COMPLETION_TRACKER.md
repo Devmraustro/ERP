@@ -248,3 +248,23 @@ Nothing was merged, retargeted, closed, rebased or deployed.
 | Commits after the code commit | prose only; the tree's behaviour is identical to `9d5d112a` |
 | CI on the fresh runs | `41241542402`, `41242087857`, `41242848507` — **3/3 success each** |
 | F-R3-1 | intermittent, pre-existing, **not reproduced** (12/12 local runs under load, 15×8-process trials 0 failures); the `journal_mode = WAL` hypothesis was measured and disproved; disclosed in `docs/PR_STACK_REVIEW.md` §10.8–10.9 rather than patched speculatively |
+
+## S12. Round 4 — CI race identified, Round-3 self-review (2026-10-31)
+
+Supersedes the §S11 status line. Round 3 left F-R3-1 open for want of a
+reproduction; this round found the cause, and re-reviewing Round 3's own changes
+found two more defects. Detail and evidence: `docs/PR_STACK_REVIEW.md` §11.
+
+| Row | Finding | Disposition | Evidence |
+|---|---|---|---|
+| S12a | **F-R3-1** start-up `database is locked` under CI | **FIXED_AND_VERIFIED** | Cause: `PRAGMA journal_mode = WAL` fails **instantly** against a `RESERVED` peer (busy timeout is honoured only under `EXCLUSIVE`, which is what Round 3 measured — hence the wrong conclusion). Reproduced deterministically on fresh *and* existing databases; consequence proven **availability-only** (key byte-identical, events intact, chain valid). Fix: read-form mode check, no switch when already WAL, bounded 0.5 s budget, original error re-raised. 9 tests in `tests/test_phase50_wal_startup_contention.py`; 1 fails when the fix is reverted |
+| S12b | **F-R3-2** binary floats in Round 3's variance split | **FIXED_AND_VERIFIED** | `CAST(... AS REAL)` summed 1,000 × 1.000125 to 1000.1249999999999 → 1000.12 against the GRN's 1000.13, inventing a 0.01 variance *at identical prices*. Now summed in `Decimal` with `round_dzd`; `je_lines[-1]` mutation replaced by `carries_variance`. 2 tests, both fail on the old code |
+| S12c | **F-R3-3** variance account outside the chart posted silently | **FIXED_AND_VERIFIED** | Posting to `9999-NOT-IN-CHART` succeeded while the trial balance still balanced. Now `PRICE_VARIANCE_ACCOUNT_UNKNOWN`, fail-closed, no account chosen. 2 tests |
+| S12d | Round-3 re-review (idempotency, reversal, timbre rules, negative amounts, provenance, transaction boundaries) | **REVIEWED** | No further defects; see the item-by-item table in §11.4 |
+| S12e | Invariant sweep | **VERIFIED** | Exact match, ±tolerance, unconfigured residual and a reversed variance invoice: every journal entry balances, `380` reconciles, trial balance balanced, chain valid, provenance retained (§11.5) |
+| S12f | Verification | **DONE** | full suite **20F/1105P/9S**, failure list byte-identical to the baseline (all 20 are interpreter gates); `ruff` clean; risk register consistent at **47 rows**; docs consistency 15 passed; migration matrix 24 passed |
+
+**Status: code `READY_FOR_HUMAN_REVIEW`; `BLOCKED_EXTERNAL` for LB-1 and LB-2;
+`NOT_PRODUCTION_READY` overall.** The 20 failing tests are the same intentional
+Python 3.11.17 interpreter gates as every previous round, not regressions.
+`0 of 5` PRs carry a human review. Nothing merged, retargeted or deployed.

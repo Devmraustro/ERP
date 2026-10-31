@@ -231,3 +231,67 @@ loudly (`AuditKeyUnavailableError`) and never mints a replacement.
 Nothing in this file was cleared by the remediation. `NOT_PRODUCTION_READY` still
 applies for the external reasons above and for the deployment items that predate
 this round.
+
+## Round 4 (2026-10-31) — one finding closed by identifying it, two new ones fixed
+
+**Nothing in this file was cleared.** LB-1 and LB-2 still need the accountant of
+record, and this round chose no figure and no account code. What changed is that
+the intermittent start-up failure from Round 3 now has a **named cause and a
+regression test**, and re-reviewing Round 3's own changes found two defects in
+them — both fixed.
+
+### F-R3-1 — closed as engineering, with the cause shown
+
+Round 3 recorded this as unreproduced. It is reproducible, deterministically:
+
+* `PRAGMA journal_mode = WAL` fails **immediately** with `database is locked`
+  while a peer holds `RESERVED` (which is what this codebase's own
+  `BEGIN IMMEDIATE` transactions hold). It waits the busy timeout only under
+  `EXCLUSIVE` — the case Round 3 measured, which is why the earlier conclusion was
+  wrong.
+* The consequence was measured, not assumed: **availability only**. A contended
+  start-up fails to open the database; it never splits the audit key, loses an
+  audit event or leaves a half-applied migration. After the peer releases, the key
+  file is byte-identical, the chain is valid and the key version is unchanged.
+
+The fix is bounded and does not hide anything: no switch is issued when the
+database is already WAL, a switch lost to a peer counts as convergence, and the
+original error is re-raised when a 0.5 s budget runs out. Report the exact
+evidence in `docs/PR_STACK_REVIEW.md` §11.1.
+
+**What this does *not* claim:** that concurrent start-up is now free. A start-up
+that overlaps another process's write transaction may still have to wait, or fail
+loudly if the write lasts longer than the budget. That is SQLite behaving
+correctly, and the operational answer is to start one process at a time (or use
+one writer), not to widen a timeout.
+
+### F-R3-2 — Round 3's variance split used binary floats. Fixed.
+
+`CAST(... AS REAL)` summed receipt lines in floating point: 1,000 units at
+1.000125 DZD became 1000.1249999999999 → 1000.12 against the GRN's 1000.13, so a
+posting at *identical* prices invented a 0.01 variance and left −0.01 on `380`.
+Now summed per line in `Decimal` with `round_dzd`; two tests fail on the old code.
+
+### F-R3-3 — a variance account outside the chart was posted silently. Fixed.
+
+Choosing the account is still LB-2. Pointing the configuration at an account that
+does not exist in the company's chart is a different thing, and it was accepted:
+the ledger cited an unresolvable code and the trial balance still balanced. It now
+fails closed with `PRICE_VARIANCE_ACCOUNT_UNKNOWN` before any entry is written.
+No account was chosen, and a cleared configuration keeps the documented
+unallocated behaviour.
+
+### Still blocking, unchanged
+
+| Item | Status | Owner |
+|---|---|---|
+| **LB-1** — is the top stamp-duty band capped, and at what figure? | `BLOCKED_EXTERNAL` | Accountant of record |
+| **LB-2** — which SCF account carries a purchase price variance, and which policy? | `BLOCKED_EXTERNAL` | Accountant of record |
+| SCF mapping / journal-code sign-off (C1) | `BLOCKED_EXTERNAL` | Expert-Comptable (ONEC) |
+| Legal and fiscal review (C2, C6) | `BLOCKED_EXTERNAL` | Counsel / accountant |
+| Key custody beyond a readable file (S1, S3) | `BLOCKED_EXTERNAL` (budget) | Security officer |
+| **R-08 / R-09** audit-key publish residuals | **Open**, untouched | Engineering |
+| Human review of PRs #3–#7 | **0 of 5** | Reviewer |
+
+**Status: `BLOCKED_EXTERNAL` + `NOT_PRODUCTION_READY`.** Code-side
+`CHANGES_REQUIRED` is cleared; nothing was merged, retargeted or deployed.

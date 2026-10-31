@@ -20,8 +20,10 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 
-from dz_erp.database import ERPDatabase
+from dz_erp.database import ERPDatabase, FinancialIntegrityError
+from dz_erp.decimal_utils import round_dzd
 from dz_erp.procurement_stock import (
     create_and_validate_supplier_invoice,
     create_purchase_order,
@@ -87,8 +89,10 @@ def _buy(db: ERPDatabase, *, po_price="1000.00", receipt_qty="10", invoice_qty="
             db, 1, 2, po["po_id"], f"GRN-{key}", [{"po_line_id": line_id, "qty_done": qty}],
             idempotency_key=key,
         )
-    ht = round(Decimal(invoice_qty) * Decimal(invoice_price), 2)
-    tva = round(ht * Decimal("0.19"), 2)
+    # round_dzd is the project's HALF_UP policy; Python's round() is banker's
+    # rounding and disagrees exactly at half-cent boundaries like 1000.125.
+    ht = round_dzd(Decimal(invoice_qty) * Decimal(invoice_price))
+    tva = round_dzd(ht * Decimal("0.19"))
     inv = create_and_validate_supplier_invoice(
         db, company_id=1, user_id=1, supplier_id=100, supplier_invoice_no="FAC-PV",
         invoice_date="2026-02-14", po_id=po["po_id"], price_tolerance_dzd=tolerance,
@@ -294,3 +298,102 @@ def test_fr2_3_the_migration_adds_the_column_without_inventing_a_policy(tmp_path
         row = conn.execute("SELECT price_variance_account_code FROM products WHERE id = 1").fetchone()
     assert "price_variance_account_code" in cols
     assert row["price_variance_account_code"] is None
+
+
+def test_fr3_2_receipt_costs_are_summed_in_decimal_not_float(tmp_path: Path) -> None:
+    """A Round-3 regression: ``CAST(... AS REAL)`` invented a cent of variance.
+
+    1000 units at 1.000125 sum to 1000.1249999999999 in binary floating point,
+    which rounds to 1000.12 — while the GRN credited the clearing account with
+    the exact 1000.13. At *identical* receipt and invoice prices that produced a
+    phantom 0.01 variance and left -0.01 on account 380, the very defect the
+    variance posting exists to remove.
+    """
+    db = _db(tmp_path)
+    _configure_variance(db)
+    result = _buy(
+        db,
+        po_price="1.000125",
+        receipt_qty="1000",
+        invoice_qty="1000",
+        invoice_price="1.000125",
+        grn_splits=(("1000", "g1"),),
+    )
+    assert result["price_variances"] == [], result["price_variances"]
+    assert result["unallocated_price_variances"] == []
+    net = _net(db)
+    assert "380" not in net, f"clearing account still carries a residual: {net}"
+    assert "608" not in net, f"a variance was invented: {net}"
+    assert db.trial_balance(1)["balanced"] is True
+
+
+def test_fr3_2_a_real_variance_is_still_exact_at_awkward_prices(tmp_path: Path) -> None:
+    """The same awkward price, but invoiced higher: the split stays cent-exact."""
+    db = _db(tmp_path)
+    _configure_variance(db)
+    result = _buy(
+        db,
+        po_price="1.000125",
+        receipt_qty="1000",
+        invoice_qty="1000",
+        invoice_price="1.010125",
+        tolerance="15.00",
+        grn_splits=(("1000", "g1"),),
+    )
+    variance = result["price_variances"]
+    assert len(variance) == 1, variance
+    assert variance[0]["received_value_dzd"] == "1000.13"
+    assert variance[0]["invoice_value_dzd"] == "1010.13"
+    assert variance[0]["variance_dzd"] == "10.00"
+    net = _net(db)
+    assert "380" not in net, net
+    assert net["608"] == Decimal("10.00"), net
+    assert db.trial_balance(1)["balanced"] is True
+
+
+def test_fr3_3_an_account_outside_the_chart_is_refused_at_posting(tmp_path: Path) -> None:
+    """The variance account is operator-supplied, so it must exist in *their* chart.
+
+    Every other code on a supplier-invoice entry is a chart constant; this one
+    arrives from configuration, and posting to a code the company does not have
+    would leave the ledger citing an account no report can resolve — while the
+    trial balance still balances, so nothing else would notice.
+    """
+    db = _db(tmp_path)
+    _configure_variance(db, account="9999-NOT-IN-CHART")
+    with pytest.raises(FinancialIntegrityError, match="PRICE_VARIANCE_ACCOUNT_UNKNOWN"):
+        _buy(db, invoice_price="1010.000000", tolerance="15.00")
+
+    # The receipt's own stock entry legitimately exists; no *invoice* entry was
+    # written, and nothing cites the unknown account.
+    with db.transaction() as conn:
+        invoice_entries = conn.execute(
+            "SELECT COUNT(*) AS n FROM journal_entries"
+            " WHERE source_model = 'supplier_invoices'"
+        ).fetchone()["n"]
+        bogus = conn.execute(
+            "SELECT COUNT(*) AS n FROM journal_entry_lines WHERE account_code = ?",
+            ("9999-NOT-IN-CHART",),
+        ).fetchone()["n"]
+        state = conn.execute(
+            "SELECT workflow_state FROM supplier_invoices ORDER BY id DESC LIMIT 1"
+        ).fetchone()["workflow_state"]
+    assert invoice_entries == 0
+    assert bogus == 0
+    assert state == "Approved", state  # refused at posting, not half-posted
+    assert db.trial_balance(1)["balanced"] is True
+    assert db.verify_audit_chain(1)["valid"] is True
+
+
+def test_fr3_3_the_seeded_chart_account_is_accepted(tmp_path: Path) -> None:
+    """The guard refuses unknown codes without blocking a real chart account."""
+    db = _db(tmp_path)
+    with db.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM accounts WHERE company_id = 1 AND code = ?",
+            (VARIANCE_ACCOUNT,),
+        ).fetchone()["n"] == 1
+    _configure_variance(db)
+    result = _buy(db, invoice_price="1010.000000", tolerance="15.00")
+    assert result["price_variances"][0]["variance_account_code"] == VARIANCE_ACCOUNT
+    assert "380" not in _net(db)

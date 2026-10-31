@@ -99,3 +99,28 @@ weakens a guarantee that is claimed; both belong in a follow-up PR with its own
 test, not in a review pass.
 
 Nothing in this file was cleared by the remediation.
+
+---
+
+## Second review pass (2026-10-31) — two new blockers
+
+The second pass (`docs/PR_STACK_REVIEW.md` §9, `docs/PROJECT_COMPLETION_TRACKER.md`
+§S10) reproduced two defects that the round-1 package did not record. Neither is
+cleared by any amount of green CI, and neither is fixed here — the pass was
+authorized to review and document, not to change product code.
+
+| ID | Blocker | Blocked on | Evidence required to clear |
+|---|---|---|---|
+| **F-R2-1** (High) | The specification states the 2 % timbre band is capped at **10,000.00 DZD** (`docs/ALGERIAN_SCF_LOCALIZATION_SPEC.md:66`) while the code applies no ceiling: `_builtin_timbre_rule()` (`dz_erp/localization.py:550`) and the seeded `timbre_rules` row both leave `max_amount_dzd` unset. A 600,000.00 base declaring the documented cap is **refused** (`TIMBRE_MISMATCH: declared=10000.00 != expected=12000.00`) | **BLOCKED_EXTERNAL** — the accountant of record must state whether the ceiling exists in the rule text in force for the period. The figure must not be invented by the engineering side | The effective-dated timbre rule text, then either a one-line `max_amount_dzd` change with a 600,000.00-base test, or deletion of the parenthetical and a test pinning 600,000.00 → 12,000.00 |
+| **F-R2-2** (Medium) | Reverse-invoice idempotency replays on key alone: `reverse_posted_invoice()` (`dz_erp/procurement_stock.py:2514`) and `_create_reversal_request()` (`:2727`) skip the `request_sha256` comparison that `:2236` and `:3133` perform, so a different reason on the same key is reported as `idempotent_replay: True` instead of raising `IDEMPOTENCY_KEY_PAYLOAD_MISMATCH` | engineering — no external input needed | The two comparisons added, plus a phase-33 regression test: same key + same reason replays; same key + different reason raises |
+
+Two further items from the same pass stay open as non-blocking findings: **F-R2-3**
+(tolerance price differences leave a permanent balance on clearing account `380`;
+pre-existing, identical at base) and **F-R2-4** (negative amounts validate and
+post). **R-08 and R-09 remain open** — this pass confirmed the failure modes are
+contained and loud, but the directory `fsync` is still missing and no test pins
+the behaviour, so they close only with a fix plus tests.
+
+Everything recorded above under "Human review gate" still applies: **0 of 5 PRs**
+carry a human review, and `NOT_PRODUCTION_READY` stands for the external reasons
+in this file independently of the two blockers above.

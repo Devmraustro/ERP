@@ -595,3 +595,185 @@ Branch protection on `main` could not be read with this token
 (`403 Resource not accessible by integration`), so the plan must not assume
 protection rules are absent or present: the merging human should confirm required
 checks and review requirements in the repository settings before the first merge.
+
+---
+
+## 9. Second independent pass (2026-10-31) — evidence over reports
+
+This section is a **fresh** review of the same five PRs, run on
+`b679bc496b8053384ab40bcbd86c5db474140f42`. Nothing above was taken on trust:
+every claim below was re-derived by running code on this host. Where an earlier
+report and this pass disagree, **this section governs**. No PR was merged,
+retargeted, closed, rebased or force-pushed to produce it, and no product code
+was changed — findings are recorded, not patched, because the task authorizes
+review and documentation only.
+
+### 9.1 State and PR chain, re-verified
+
+| Item | Value (verified this pass) |
+|---|---|
+| Review head | `b679bc496b8053384ab40bcbd86c5db474140f42` (= remote head, clean worktree) |
+| `origin/main` | `4fc1364a9504fab1153ea44e753f354f00023428` |
+| Chain | `4fc1364a → 29645e5d (#3) → 99864bab (#4) → c466cea7 (#5) → e4e47b3b (#6) → b679bc49 (#7)` |
+| Bases | #3 → `main`; #4 → #3's branch; #5 → #4's; #6 → #5's; #7 → #6's (each one step, no gaps) |
+| Mergeability | all five `MERGEABLE` / `CLEAN` |
+| Reviews | 0 on every PR (no human approval yet — as expected) |
+| CI | 3/3 success on the exact head of every PR, and on `b679bc49` (`41229742863`) |
+
+The bases still form a strict chain, so §8.7's rule stands unchanged: merge with
+merge commits, **retarget each next PR to `main` immediately after each merge**,
+and stop if a base moves by itself.
+
+### 9.2 Accounting and G50, re-derived end to end
+
+New this pass: the full posting → declaration → reversal path was exercised with
+real posted entries rather than by reading code (PO → GRN → invoice → G50 →
+audited reversal → G50).
+
+| Invariant | Probe result |
+|---|---|
+| Line net `round_dzd(qty × pu × (100 − disc)/100)` | `1×100.00@0 %→100.00`, `@100 %→0.00`, `3×3.333→10.00`, `7×14.285714@33.33 %→66.67` |
+| Discount bounds | `100.01 %` → `-0.01` and `-0.01 %` → `100.01` are **refused** (not clamped) at creation |
+| Stock posting at GRN | `31` debit 10,000.00 / `380` credit 10,000.00 (`STJ/1/00001`) |
+| Invoice posting | `380` debit 10,000.00 (`E3B91_base`), `4456` debit 1,900.00 (`E3B91_balance`), `401` credit 11,900.00 |
+| Clearing nets to zero at equal prices | `380` net = **0.00**; stock `31` = 10,000.00; trial balance balanced |
+| G50 with a CASH timbre invoice | `E2 = 11.90`, `E3B91 = 190.00`, `E3B100 = 0.00`; `E3B110 = E3B90 + E3B91 + E3B92` ✅; payable ⇄ carry-forward mutually exclusive ✅ |
+| Timbre not double-counted | the invoice books timbre to `642`/`TIMBRE_PURCHASE`; `E2` counts it once. No double count observed |
+| Reversal (audited path) | credit note `AVOIR-FAC-2026-0001`, entry `RAVOIR/2026/00001`, dated **2026-10-31** (issue period), `1201.90/1201.90`, `reversal_of_invoice_id = 1` |
+| G50 after reversal | February unchanged; **October** shows `E2 = -11.90`, `E3B91 = -190.00` — the credit note nets in the period it is issued, not retroactively. Trial balance balanced, audit chain valid |
+
+The negative `E2` in October is arithmetically right for a credit note but is a
+*filing-format* question (whether the DGI accepts a negative droit de timbre box
+or expects it as a separate reduction line). That is a policy question, not a
+code defect: **BLOCKED_EXTERNAL**, owner the accountant of record, evidence
+required = the DGI G50 notice in force for the period.
+
+### 9.3 Findings
+
+Severity is about money, data or security impact — not diff size.
+
+| # | Severity | Finding | Evidence |
+|---|---|---|---|
+| **F-R2-1** | **High** | **Timbre cap: the spec asserts a 10,000.00 DZD ceiling that the code does not apply.** `docs/ALGERIAN_SCF_LOCALIZATION_SPEC.md:66` documents "2.0 % for base > 100,000.00 DZD (**capped at 10,000.00 DZD**)", but `_builtin_timbre_rule()` (`dz_erp/localization.py:550`) passes `max_amount_dzd=None`, and the seeded `timbre_rules` row (`localization.py:~395`) stores `max NULL`. The top bracket is therefore uncapped in code | `resolve_timbre_rule` → `max_amount_dzd: None`; base 500,000.00 → 10,000.00 accepted; **base 600,000.00 declaring the documented cap is refused** `TIMBRE_MISMATCH:declared=10000.00!=expected=12000.00_for_CASH` |
+| **F-R2-2** | **Medium** | **Reversal idempotency replays without comparing the request hash.** `reverse_posted_invoice()` (`dz_erp/procurement_stock.py:2514`) and `_create_reversal_request()` (`:2727`) both compute `req_hash` (`:2504`, `:2717`) and then, on a hit, return the cached response **without** `idem["request_sha256"] != req_hash`. The same key with a *different reason* is silently reported as a successful replay. Contrast the three sites that get this right: `:822` (RECEIVE_GOODS), `:2236` (POST_INVOICE), `:3133` (POST_REVERSAL) | Second call, same key, different reason → `{'idempotent_replay': True, 'reason': 'supplier dispute'}` — the *original* reason echoed, the new request silently dropped |
+| **F-R2-3** | **Medium** (pre-existing, not a stack regression) | **A within-tolerance price difference leaves a permanent balance on the stock-clearing account.** The GRN books `31 / 380` at receipt cost; the invoice books `380` at *invoice* price. When those differ and the difference is allowed by `price_tolerance_dzd`, nothing posts the variance, so `380` keeps a residual for ever | PO/receipt 1,000.00, invoice 1,010.00, tolerance 15.00 → `380` net **+100.00**; invoice 990.00 → **−100.00**. Trial balance stays balanced, so only a clearing-account review catches it. Verified **identical at base `4fc1364a`** |
+| **F-R2-4** | **Low** (pre-existing) | **Negative amounts are accepted through validation and posted.** There is no positivity rule for `amount_ht/tva/ttc`, `unit_price` or `qty`; only the debit = credit check applies | A `−1,000.00` HT / `−1,000.00` TTC / 0 % invoice validated, was approved and **posted** as `600` debit `−1000.00` / `401` credit `−1000.00` |
+| **F-R2-5** | **Low** (test) | **PR #6's row-count assertion is weaker than its own comment.** `tests/test_phase29_ocr_review_policy.py:394` asserts `len(rows) >= 10` while the comment describes 8 required header fields + qty + price + discount = 11, and the test actually produces **16** rows — six decisions could go missing and it would still pass | `assert 16 == 999` under a temporary probe bound |
+| **F-R2-6** | **Low** (cosmetic) | PR #5's `if raw_source_price is None or …` (`dz_erp/procurement_stock.py:219`) is unreachable: `to_decimal(str(None))` raises `ValueError`, which the surrounding `except` already catches. Dead condition, no behavioural effect | `ValueError` raised before the `None` test is reached |
+| **F-R2-7** | **Low** (coverage) | **`price_tolerance_dzd` has no test coverage at all** — `grep` finds zero occurrences of the parameter in `tests/`. The feature that permits F-R2-3's divergence is untested end to end | `grep -rn price_tolerance tests/*.py` → no matches |
+
+Notes on F-R2-1: this is **not** a claim about Algerian law. The defect is that
+the repository's own specification states a ceiling the repository's own code
+does not apply, on a money-affecting path, with no test above a 500,000.00 base.
+Fixing it either way is a one-line change, but *which* way is a decision, not a
+guess:
+
+- **If the ceiling is real** → set `max_amount_dzd` on both the built-in rule and
+  the seeded row, and add a regression test at base 600,000.00 asserting
+  `10,000.00` (F-R2-RT1).
+- **If it is not** → delete the parenthetical at
+  `docs/ALGERIAN_SCF_LOCALIZATION_SPEC.md:66` and say plainly that the top
+  bracket is uncapped, plus a test pinning 600,000.00 → 12,000.00 (F-R2-RT2).
+
+Until the accountant of record rules on it, this is **BLOCKED_EXTERNAL** with the
+evidence requirement "the effective-dated timbre rule text for the period" —
+not an invented figure.
+
+### 9.4 R-08 and R-09 — re-investigated, still open
+
+Both were re-tested behaviourally instead of re-read. Probes used
+`_resolve_audit_secret`, `_read_published_key` and `_publish_key_file` against a
+real DB with a real signed audit event.
+
+| Scenario | Observed behaviour | Verdict |
+|---|---|---|
+| Key file lost (R-08's crash window) with audit events on disk | `AuditKeyUnavailableError: The audit key file … is missing but … contains audit events` — **no replacement key is minted**; restoring the file makes `verify_audit_chain` valid again | Fail-closed as claimed: availability incident, not a silent integrity break |
+| Empty key file (R-09's killed writer) | `KeyMaterialUnavailable: Key file … is empty` in ~0.00 s; the empty file is left untouched, never adopted or overwritten | Fail-closed |
+| Reader racing a slow publisher | waits, then reads the complete 16-byte secret (`b'SLOWPUBLISHEDKEY'`) — never partial material | Matches the documented 50 × 20 ms retry |
+| Stray `.tmp` left by a crash mid-publish | ignored at start-up; the real key resolves normally | Harmless orphan |
+
+**Neither R-08 nor R-09 is closed by this pass**, and neither can be: the missing
+directory `fsync` after `os.link` is still absent from `_publish_key_file`, and no
+regression test pins any of the four behaviours above. Closing them requires a
+fix **plus** tests (F-R2-RT4), exactly as the task requires. What this pass does
+establish is that the *consequence* of R-08 is contained: the failure is loud and
+non-destructive, which is why both remain Low-severity residuals rather than
+blockers.
+
+### 9.5 Tenant isolation, authorization, logging, limits
+
+| Check | Result |
+|---|---|
+| List endpoints (`/invoices`, `/accounts`, `/products`, `/documents`, `/partners`, `/users`, `/tax/timbre-rules`) under tenant B | every row belongs to tenant B; no tenant-A id, no tenant-A `company_id` |
+| Cross-tenant direct ids: `/api/v1/invoices/1`, `/api/v1/documents/{id}/review-policy`, `/api/v1/documents/{id}/file` | `403` for tenant B |
+| Redaction | `password`, `token` → `[REDACTED]`; RIB → `[REDACTED_RIB]`; the raw RIB appears **nowhere** in the serialized record. Email and partner name are deliberately retained (not classified sensitive) |
+| Rate-limiter failure mode | an invalid mode falls back to `fail_closed`, not open; `fail_open` only by explicit opt-in |
+
+Correction to the earlier pass: the earlier `LEAK` flag on `/api/v1/partners` was
+a **false positive** of a substring heuristic — tenant B has its own partner also
+named `SPARTE`, `company_id: 2`. The corrected id/`company_id`-based check finds
+no leak. Rate limiting remains **process-local**, as recorded in §8.3; nothing in
+this pass upgrades that claim to distributed.
+
+### 9.6 Test integrity at this exact head
+
+`pytest tests -q` on `b679bc49` with CPython **3.11.2**: **20 failed, 1070 passed,
+9 skipped** in 287.66 s — the same 20 as at base `4fc1364a` and as in
+`41229742863`. One representative failure, verbatim:
+
+```
+assert 'failed SHA-256 verification' in 'Safe backup restore requires Python
+    3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types
+    and paths are rejected.'
+```
+
+Every one of the 20 is this single cause: the host interpreter lacks
+`tarfile.data_filter` (3.11.17+/3.12.10+). CI runs newer patch levels and is
+green. No test was skipped, weakened or deleted to reach this state, and none of
+the 20 is caused by the stack — the id list is identical at base.
+
+### 9.7 Required fixes, with the regression tests that must accompany them
+
+| ID | Fix | Regression test |
+|---|---|---|
+| F-R2-RT1/2 | Apply the timbre ceiling the spec states, **or** correct the spec (see 9.3) | `tests/test_phase27_scf_first_run.py`: base 600,000.00 CASH → timbre `10,000.00` accepted under the documented cap; a 12,000.00 declaration refused |
+| F-R2-RT3 | Add the `request_sha256` comparison at `procurement_stock.py:2514` and `:2727`, raising `IDEMPOTENCY_KEY_PAYLOAD_MISMATCH` like `:2236`/`:3133` | `tests/test_phase33_invoice_lifecycle.py`: replay with the same key **and** the same reason still returns `idempotent_replay: True`; the same key with a *different* reason raises. Template: `test_f5_first_reversal_succeeds_and_the_second_is_a_domain_conflict` |
+| F-R2-RT4 | Add the directory `fsync` after `os.link` in `_publish_key_file` | `tests/test_phase12_key_migration_and_backup.py`: missing key + existing events fails loudly and mints nothing; empty key is refused untouched; a slow publisher's reader never sees a partial key |
+| F-R2-RT5 | Either post the receipt-cost ↔ invoice-price variance, or document that `380` carries it | A tolerance-posted invoice (receipt 1,000.00, invoice 1,010.00) asserts the intended closing balance of `380` |
+| F-R2-RT6 | Reject negative `qty`/`unit_price`/`amount_*` at creation | A negative-amount invoice is refused at `create_and_validate_supplier_invoice`, never reaches `Validated` |
+
+Fixes F-R2-RT3 and F-R2-RT6 are contained, low-risk and independently
+reviewable. F-R2-RT1/2 and F-R2-RT5 need an accounting decision first; F-R2-RT4
+should land in its own PR with its own CI, per §8.4's reasoning.
+
+### 9.8 Verdict per PR, second pass
+
+| PR | Head | Independent verdict | Why |
+|---|---|---|---|
+| **#3** | `29645e5d` | **ACCEPT** | Fail-closed field review holds under the probes; approval cannot precede decisions; posting re-validates |
+| **#4** | `99864bab` | **ACCEPT** | Review values are bound to the posted payload; the mismatch refusal was reproduced (`DOCUMENT_INVOICE_MISMATCH`, five specific codes) |
+| **#5** | `c466cea7` | **ACCEPT with nit** | Price binding correct; F-R2-6 dead condition only |
+| **#6** | `e4e47b3b` | **ACCEPT with nit** | Discount decided, never clamped, line net derived; F-R2-5 assertion looser than its comment |
+| **#7** | `b679bc49` | **ACCEPT with findings** | Integrates the chain; carries F-R2-1 (High), F-R2-2 (Medium), F-R2-3 (Medium) |
+
+The per-PR code review passes. What fails independent acceptance is **not** any
+individual diff but the stack as a shipping candidate: a documented tax ceiling
+the code does not apply (F-R2-1), and an idempotency guard that reports a dropped
+request as success (F-R2-2).
+
+### 9.9 Status
+
+**CHANGES_REQUIRED.**
+
+Reason: one **High** money-affecting defect (F-R2-1) — code and specification
+disagree on a tax ceiling and no test covers bases above 500,000.00 — plus one
+**Medium** idempotency defect (F-R2-2) where a replayed reversal with a different
+payload is reported as a success. Both are small, isolated fixes with clear
+regression tests (§9.7); neither requires reopening the PR chain or rewriting a
+branch. F-R2-1's direction is **BLOCKED_EXTERNAL** until the accountant of record
+supplies the rule text in force, and R-08/R-09 stay open for the same reason:
+no fix and no test yet.
+
+Green CI on all five PRs is *not* evidence of production readiness, and nothing
+above should be read as such. Merging, retargeting and deploying remain with the
+human reviewer.

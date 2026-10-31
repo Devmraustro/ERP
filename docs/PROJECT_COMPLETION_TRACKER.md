@@ -176,3 +176,30 @@ determination. Those rows are untouched (`IMPLEMENTED_NOT_VERIFIED` /
 marked ready or deployed. Human review (0 of 5 PRs reviewed) is the gate that
 remains; `NOT_PRODUCTION_READY` still applies for the external reasons in
 `docs/REMAINING_BLOCKERS.md`.
+
+---
+
+## S10. Second review pass — accounting, recovery and idempotency (2026-10-31)
+
+Round 1 (§S9) produced `READY_FOR_HUMAN_REVIEW`. This pass re-ran the review
+from scratch on the current head and **supersedes the §S9 status line**: two
+money-affecting defects were reproduced that §S9 did not record. Full detail,
+repro output and required regression tests are in `docs/PR_STACK_REVIEW.md` §9.
+
+| Row | Work | Status | Evidence |
+|---|---|---|---|
+| S10a | State re-verified on the actual head | **DONE** | `b679bc496b8053384ab40bcbd86c5db474140f42` = remote head, clean tree (`§S9` recorded `07e65782`; the docs commit advanced it); all five PR heads 3/3 green, `MERGEABLE/CLEAN`, 0 reviews, bases still a strict one-step chain |
+| S10b | Accounting re-derived end to end (not by reading code) | **DONE** | PO→GRN→invoice: `31` +10,000.00 / `380` −10,000.00, then `380` +10,000.00 / `4456` +1,900.00 / `401` −11,900.00 → clearing nets **0.00**, balanced; G50 CASH timbre `E2 = 11.90`, `E3B91 = 190.00`, `E3B110` identity holds, payable/carry mutually exclusive; reversal posts `RAVOIR/2026/00001` dated in the issue period and nets in **October's** G50 |
+| S10c | New findings | **DONE** | **F-R2-1 High** — spec says the 2 % timbre band is capped at 10,000.00 (`docs/ALGERIAN_SCF_LOCALIZATION_SPEC.md:66`) but neither `_builtin_timbre_rule()` (`localization.py:550`) nor the seeded row sets `max_amount_dzd`; 600,000.00 base declaring the cap is **refused**. **F-R2-2 Medium** — `procurement_stock.py:2514`/`:2727` replay a `REVERSE_INVOICE` key without comparing `request_sha256` (contrast `:2236`/`:3133`): a different reason is silently reported as a successful replay. **F-R2-3 Medium** (pre-existing, identical at base) — a within-tolerance price difference leaves a permanent balance on `380` with no variance posting. **F-R2-4 Low** — negative amounts validate and post. **F-R2-5/6 Low** — PR #6's `>= 10` row bound vs 16 actual rows; PR #5's unreachable `None` branch |
+| S10d | R-08 / R-09 re-investigated behaviourally | **DONE, still open** | missing key + existing events → `AuditKeyUnavailableError`, **no key minted**, chain valid again once restored; empty key → `KeyMaterialUnavailable`, file untouched; slow publisher → full secret, never partial; stray `.tmp` ignored. The missing directory `fsync` is unchanged and no test pins these behaviours, so **neither closes without a fix + tests** |
+| S10e | Test integrity at this head | **DONE** | CPython 3.11.2: **20 failed / 1070 passed / 9 skipped** in 287.66 s, the same 20 as base and as CI; every failure is the interpreter gate ("requires Python 3.11.17+ or 3.12.10+ …"), not the stack. Nothing skipped, weakened or deleted |
+| S10f | Tenant / authz / logging / limits re-probed | **DONE** | every list endpoint scoped; cross-tenant direct ids → 403; `password`/`token`/RIB redacted, raw RIB absent from the serialized record; invalid limiter mode → `fail_closed`. The earlier `/partners` `LEAK` was a **false positive** (tenant B's own partner is also named `SPARTE`) |
+| S10g | Per-PR independent verdict | **DONE** | #3 ACCEPT · #4 ACCEPT · #5 ACCEPT with nit · #6 ACCEPT with nit · #7 ACCEPT with findings — the per-PR diffs pass; the **stack as a shipping candidate** does not (F-R2-1, F-R2-2) |
+
+**Status: `CHANGES_REQUIRED`.** F-R2-1 is **BLOCKED_EXTERNAL** as to *direction*
+(a documented tax ceiling the code does not apply — the accountant of record must
+supply the rule text in force; the figure must not be invented), with a one-line
+fix either way plus a regression test at a 600,000.00 base. F-R2-2 is a contained
+fix at two call sites with a clear test. Nothing was merged, retargeted, closed,
+rebased, force-pushed, marked ready or deployed to produce this pass, and no
+product code was modified.

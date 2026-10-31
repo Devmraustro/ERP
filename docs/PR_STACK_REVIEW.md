@@ -343,10 +343,13 @@ enforced at three points, in the same transaction that moves the record forward.
 
 ## 9. CI for the review-delivery commit
 
-The review documents are committed on `c23e2d65` as a documentation-only commit.
-The run it triggers is reported in the final response and in
-`docs/PR_MERGE_EXECUTION_PLAN.md` §5; it does not change the reviewed code head
-and must not be read as re-validation of the code.
+The review documents were committed on `c23e2d65` as commit `359b111`. Its CI
+run is **`41153210738`** (event `pull_request`, **`success` 3/3 jobs**: Linux
+3.11, Linux 3.12, Windows 3.12.10). It is a documentation-only change: it does
+not alter the reviewed code head `c23e2d65`, and the CI evidence cited in §3 for
+each PR stands on its own run. A later documentation-only commit that records
+this run ID is not separately tracked — a docs-only change cannot affect code
+evidence, and tracking it would recurse.
 
 ## 10. Verdict per PR
 

@@ -110,11 +110,11 @@ Two cases where a re-run is required:
 
 1. **The head changes** (any new commit pushed to a reviewed branch) — the §2 run
    is then stale evidence; re-run and re-read the job table before merging.
-2. **The review-delivery commit.** These documents are committed on top of
-   `c23e2d65`, which advances PR #7's head to a new SHA. That run is
-   documentation-only and its result is reported in the final response; it
-   **supersedes none of the code evidence**, but the reviewer must see its result
-   before merging #7 because it is, technically, the PR's new head.
+2. **The review-delivery commit.** These documents were committed on top of
+   `c23e2d65` as `359b111`, which advances PR #7's head to a new SHA. Its run
+   **`41153210738`** is `success` 3/3. It **supersedes none of the code
+   evidence** (documentation only), but the reviewer must confirm the PR's actual
+   head has a green run before merging #7, because that head is what merges.
 
 ## 6. What must never happen in this sequence
 

@@ -89,6 +89,32 @@ what still blocks release in `docs/REMAINING_BLOCKERS.md`.
 | V10 | Migration / backup / security docs / release gates | **DONE** | 24 migration tests; backup verified in CI only; 15-row matrix = 6 Verified + 9 Blocked; docs path scan: zero dangling references |
 | V11 | PR chain state, read-only | **DONE** | #3 non-draft → #7 draft; all CLEAN; every head 3/3 checks green; unchanged by this pass |
 
+## PR stack review (Phases 29–42, PRs #3–#7)
+
+Strict sequential review of the whole stack, performed from the remote and the
+CI API rather than from earlier reports. Full record:
+`docs/PR_STACK_REVIEW.md`; execution procedure:
+`docs/PR_MERGE_EXECUTION_PLAN.md`. Nothing was merged, closed, rebased,
+retargeted, marked ready or deployed.
+
+| # | Check | Status | Evidence |
+|---|---|---|---|
+| S1 | Remote state re-derived (`main`, every branch head, ancestry) | **DONE** | `main` `4fc1364a`; each PR head a strict descendant of the previous; no merge commits, no rewritten history |
+| S2 | Base/head relationships correct | **DONE** | API `base.sha` equals previous PR head for all five; pairwise `merge-base --is-ancestor` all YES |
+| S3 | CI on the exact head of every PR | **DONE** | #3 `40763416753`, #4 `40775473917`, #5 `40965006912`, #6 `41064213366`, #7 `41142731746` — all `success` 3/3; step-level only (artefact download blocked here) |
+| S4 | Per-PR regression evidence | **DONE** | isolated worktrees at every head: 695/698/708/719/960 passed; failure **set** `diff`-identical to #7 at all four (same 20 interpreter-floor tests) |
+| S5 | Full diff reviewed for each PR | **DONE** | 20 / 2 / 10 / 10 / 53 files inspected; architecture, authz, tenant scope, migrations, transaction boundaries, audit persistence, security |
+| S6 | Tests assert business behaviour | **DONE** | gates, refusals, audit rows, state transitions and money outcomes asserted; no test deleted or weakened (every removed `def test_` still exists at HEAD; changed assertions got stricter) |
+| S7 | Findings raised | **DONE** | R-01 (stale backend-error flag mislabels refusals), R-02 (no concurrent-writer test for the shared limiter), R-03 (`blocked()` takes a write lock), R-04 (unbounded `X-Request-Id`), R-05 (no audited tax-rule configuration path), R-06 (two docs claim the rule label is not persisted), R-07 (interpreter-gated tests are unverified locally), F-06a (trigger drop/recreate window) |
+| S8 | Merge order verified | **DONE** | #3 → #4 → #5 → #6 → #7; no mismatch |
+| S9 | Merge execution plan | **DONE** (unan executed) | per-PR base/head/CI/actions; the base-retargeting trap documented |
+| S10 | Human review on any PR | **BLOCKED** | 0 reviews on #3–#7 |
+| S11 | Branch protection / required checks | **BLOCKED (unknown)** | protection endpoint `403` for the available token; rulesets `[]` |
+| S12 | Authorization to merge | **BLOCKED** | not granted; this pass is review-only |
+
+Status of the stack: **reviewed, not merged, not release-ready.** No PR is
+production-ready and none may be merged without G1–G7 in the execution plan.
+
 ## Standing rules applied to every row
 
 * No test was weakened, skipped, deleted or had an assertion relaxed. The three

@@ -157,3 +157,22 @@ determination. Those rows are untouched (`IMPLEMENTED_NOT_VERIFIED` /
 | R-07 | `tests/test_phase48_restore_interpreter_matrix.py` (32 + 1 gated) |
 | start-up defects | `tests/test_phase49_audit_key_bootstrap_race.py` (7) + the migration-race test |
 | CI on the exact head | run 41196478922 (3/3 green), recorded in `docs/PR_STACK_REVIEW.md` §7.3 |
+
+---
+
+## S9. Final human review preparation (2026-10-31)
+
+| Row | Work | Status | Evidence |
+|---|---|---|---|
+| S9a | Re-derived the final state from GitHub, not from the remediation report | **DONE** | head `07e65782edc4d43b6b3952c699cb2d8d1f1769e4` = remote head, clean tree byte-identical, no commits after the reported state; CI 41198403599 (3/3) |
+| S9b | Security and data-integrity re-review with independent probes | **DONE** | audit-key atomic publish (ext4, `os.link`, 20 polls never saw an empty file; 96/96 starts on the no-hardlink fallback with one key per DB), 180/180 concurrent migrations, limiter `allowed=40/limit 40` with 180 rows and 0 violations, tax endpoints 403/401/SoD/tenant-isolation probes, `TIMBRE_RULE_*` audit events with a valid chain, historical duty unchanged after a new rule version |
+| S9c | Test integrity | **DONE** | 535 → 859 test functions collected, **0 removed**; 24 deleted lines in `tests/` all traced (6 signature wraps, 4 assertions replaced by stronger filtered ones, 1 count pin 26 → 33, comment edits); base **671P/20F/6S** vs head **1070P/20F/9S** with an **identical 20-failure list** |
+| S9d | PR stack verified | **DONE** | five heads, all green 3/3 on the exact head, all `MERGEABLE/CLEAN`, **0 reviews each**; ancestry linear, 0 merge commits |
+| S9e | Merge-mechanics trap verified | **DONE** | `delete_branch_on_merge=false` → GitHub will **not** auto-retarget; manual retarget is mandatory; merge commit (not squash) required |
+| S9f | Reviewer checklist per PR | **DONE** | `docs/PR_STACK_REVIEW.md` §8.5 |
+| S9g | Residual risks recorded | **DONE** | R-08 (no directory fsync after the key link — availability only, fails loud), R-09 (fallback publish window, retry-protected), F-06a improved, #5/#6 nits still open |
+
+**Status: `READY_FOR_HUMAN_REVIEW`.** Nothing merged, retargeted, closed, rebased,
+marked ready or deployed. Human review (0 of 5 PRs reviewed) is the gate that
+remains; `NOT_PRODUCTION_READY` still applies for the external reasons in
+`docs/REMAINING_BLOCKERS.md`.

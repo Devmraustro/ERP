@@ -75,3 +75,27 @@ otherwise mistake a code fix for an external one:
 
 Everything else in this document — container build, off-host backup, alerting,
 DR drill, concurrency at production scale, Law 18-07 retention — is unchanged.
+
+---
+
+## Human review gate (2026-10-31)
+
+The engineering work is complete and independently re-verified; what remains
+before any merge is **human review**, which no amount of green CI satisfies:
+
+* **0 reviews** exist on PRs #3–#7 (`gh pr list`), and #4–#7 are still drafts;
+* four of the five are blocked on nothing else — the per-PR checklist, the
+  high-risk paths and the exact review questions are in
+  `docs/PR_STACK_REVIEW.md` §8.5;
+* the merge itself is mechanically gated: `delete_branch_on_merge=false`, so each
+  merge must be followed by an explicit retarget of the next PR to `main`, and
+  squash/rebase merges must not be used (they would force a rebase).
+
+Two residuals found during this review are recorded and **not** fixed here, on
+purpose: R-08 (no directory fsync after the audit-key link — a crash could lose
+the key file, and start-up then fails loudly rather than minting a replacement)
+and R-09 (the no-hardlink publish window, protected by a reader retry). Neither
+weakens a guarantee that is claimed; both belong in a follow-up PR with its own
+test, not in a review pass.
+
+Nothing in this file was cleared by the remediation.

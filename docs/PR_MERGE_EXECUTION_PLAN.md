@@ -42,7 +42,7 @@ relationship. **No mismatch was found; nothing in Step 4 of the brief stops.**
 | Mergeable / state | MERGEABLE / CLEAN | MERGEABLE / CLEAN | MERGEABLE / CLEAN | MERGEABLE / CLEAN | MERGEABLE / CLEAN |
 | Reviews recorded | 0 | 0 | 0 | 0 | 0 |
 | Review findings | none blocking | none | none (nit) | none (nit) | none blocking; R-01, R-02, R-03, R-04, R-05, R-06, R-07 |
-| Safe to merge after the previous PR? | **Yes** (first) | **Yes**, after `#3` is in `main` **and** its base is retargeted (§3) | **Yes**, after `#4` | **Yes**, after `#5` | **Yes**, after `#6`, once R-01/R-05 are dispositioned |
+| Safe to merge after the previous PR? | **Yes** (first) | **Yes**, after `#3` is in `main` **and** its base is retargeted (§3) | **Yes**, after `#4` | **Yes**, after `#5` | **Yes**, after `#6`; R-01…R-07 are closed (§8.1) and human review is the remaining gate |
 
 ## 3. The one mechanical trap: base branches do not follow the merge
 
@@ -81,6 +81,33 @@ the reviewers explicitly decide the intermediate PRs carry no separate value.
 
 **Do not** delete the base branches to force GitHub's automatic retargeting: the
 branches are the review record and deletion is destructive.
+
+### 3.1 Why the manual step is mandatory in *this* repository (verified 2026-10-31)
+
+GitHub's automatic retargeting only fires when the merged PR's **head branch is
+deleted**. Verified facts:
+
+* `delete_branch_on_merge` is **`false`** (`gh api repos/Devmraustro/ERP`) — the
+  merge will not delete `phase29/ocr-failclosed`;
+* `allow_merge_commit`, `allow_squash_merge` and `allow_rebase_merge` are all
+  `true`, so the merge *strategy* is an operator choice, not a repository rule;
+* branch protection on `main` is **not readable** with the automation token
+  (`403 Resource not accessible by integration`) — do not assume either way;
+  confirm required checks/reviews in repository settings first.
+
+Consequences, stated plainly:
+
+1. **Retargeting is required after every merge**, not a convenience. If it is
+   skipped, the next PR merges into the previous *branch* and `main` never
+   receives the change — the exact failure mode §3 describes.
+2. **Use a merge commit, never a squash.** A squash rewrites each commit, so the
+   branches stacked above it no longer share history and would need a rebase —
+   and rebasing published history is forbidden by this task. Rebase-merge has
+   the same defect for the same reason.
+3. **Stop condition.** After a merge, if the next PR's base is not `main` and has
+   not been explicitly retargeted, stop and report. If GitHub has retargeted a PR
+   to anything other than `main`, stop: it means a base branch was deleted, which
+   this plan forbids.
 
 ## 4. Required actions before the first merge
 
@@ -163,6 +190,7 @@ left as written so the plan of record is not retro-edited.
 | (R-03) `blocked()` write lock | not a gate | **closed, bounded claim** | `read_probe()`; 0.794 ms read vs 2.331 ms write; contention reduced, **not** eliminated |
 | (R-04) `X-Request-Id` | not a gate | **closed** | `dz_erp/request_id.py` + 19 tests |
 | (R-07) interpreter gate | not a gate | **closed** (rule) / **BLOCKED_EXTERNAL** (host) | one predicate, matrix-parameterised tests, AST guard against a second copy |
+| **human review** | not a gate in §4, but a hard gate in practice | **OUTSTANDING** — 0 reviews on all five PRs | §8.4 checklist in `docs/PR_STACK_REVIEW.md` |
 
 ### 8.1 Ordering is unchanged
 

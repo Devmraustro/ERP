@@ -447,3 +447,151 @@ each one was the R-07 lesson repeating:
    `tests/test_phase49_audit_key_bootstrap_race.py`. That CI failure was **not**
    reproduced on this host (1 680 concurrent starts, zero failures), so the
    causal link is stated as the mechanism that matches, not as a reproduction.
+
+---
+
+## 8. Final human review preparation (independently re-verified, 2026-10-31)
+
+Everything below was re-derived from GitHub and from the checked-out tree in a
+fresh session — not carried over from the remediation report. Every claim names
+its command or run.
+
+### 8.1 State, exactly
+
+| Item | Verified value | How |
+|---|---|---|
+| `07e65782` full SHA | `07e65782edc4d43b6b3952c699cb2d8d1f1769e4` | `git rev-parse` |
+| Remote branch head | same SHA — **no commits exist after the reported state** | `git fetch --prune` + `git rev-parse origin/arena/7f12d627-erp` |
+| Working tree | **clean**; the tree is byte-identical to that commit (0 differing paths, 0 untracked) | `git status --porcelain`; `git read-tree <sha>` + `git diff` = empty |
+| `main` | `4fc1364a9504fab1153ea44e753f354f00023428` | `git rev-parse origin/main` |
+| Ancestry | `4fc1364a → 29645e5d → 99864bab → c466cea7 → e4e47b3b → 07e65782`, each an ancestor of the next, **0 merge commits** | `git merge-base --is-ancestor`, `git rev-list --merges --count` |
+| CI on the head | run **41198403599**, `event=pull_request`, `headSha=07e65782…`, **3/3 success** | `gh run view` |
+
+The session note "clean tree at `07e65782`" was reproduced from scratch: the
+sandbox's local ref pointed at `main` while the worktree already held the
+remediated content, so the ref was restored with `update-ref` + `read-tree`
+after proving by hash comparison that no file differed. No file was modified,
+reset, checked out or cleaned to achieve this.
+
+### 8.2 CI run 41198403599 — every job, every step
+
+| Job | Conclusion | Steps |
+|---|---|---|
+| Test, coverage and static checks (Python 3.11) | success | 14 executed / 0 failed; **staging acceptance ran**, risk-register validation ran |
+| Test, coverage and static checks (Python 3.12) | success | 14 executed; staging acceptance + risk-register steps are `if: 3.11`-only and therefore skipped **by design** |
+| Key rotation, backup and recovery on Windows | success | Python **3.12.10** (last Windows binary installer), key-rotation/migration/backup/logging tests + staging acceptance |
+
+Static check (ruff) and byte-compile pass in all three jobs. The Windows job is
+the only place a 3.12.10 interpreter with the strict tar preflight runs.
+Raw logs and artifacts are not retrievable from this sandbox (the signed blob
+URLs return `EOF`), so per-step evidence above is the API's step list; the
+authoritative pass/fail of individual tests is the job conclusion.
+
+### 8.3 Security and data-integrity re-review (independent probes)
+
+Each item below was re-run in this session against `07e65782`; the probe is a
+throwaway script, the *property* is what the committed tests also assert.
+
+| Area | What I did | Result |
+|---|---|---|
+| **Audit-key atomic publication** | Confirmed the target FS is **ext4** and that `os.link` works there, so the atomic path is the live one; published 20 keys while a reader polled every 0.5 ms | **Never observed an empty key file.** `_publish_key_file` returns the winner's bytes; permissions `0600`; no temporary left behind |
+| same, no-hardlink fallback | Forced `os.link` to raise in every worker (FAT/network-mount case), 12 rounds × 8 processes | 96/96 started; **exactly one key per database**, no split brain, no adapter error |
+| **Concurrent migration locking** | 15 rounds × 12 processes starting on one fresh DB | 180/180 started; **0** `already exists` / `database is locked` |
+| **Rate-limiter contention (multi-process)** | 6 processes × 30 auth failures on one shared SQLite file, limit 40 | `allowed = 40` exactly, **0 over-limit**, 180 rows stored (no lost increments), no errors, `current_error = None` |
+| **R-01 classification** | Induced a store `OSError`, then success, then ordinary refusals | outage → refused (fail-closed) with `current_error` set and `failure_count=1`; next success → `current_error is None` **and `failure_count` stays 1**; ordinary refusals → `current_error` still `None` |
+| **R-03 read path** | Another process held `BEGIN IMMEDIATE` for 4 s | `blocked()` returned in **1.4 ms**; `hit()` waited **4 043 ms**. Read sees committed state; contention reduced, **not** eliminated (process `RLock` still taken) |
+| **Tax endpoints: authz** | Clerk / accountant / other-tenant accountant / admin against all three routes | clerk **403** on create, approve **and** list; unauthenticated **401**; all three routes `Depends(_authenticate)` |
+| **Tax endpoints: SoD** | Author approves own draft | **403** (`TIMBRE_RULE_SOD_VIOLATION`) — a draft stays `DRAFT` and governs nothing |
+| **Tenant isolation** | Tenant-2 accountant approves tenant-1's version; tenant-2 listing | **403**; tenant 2 has zero rules. Deliberate: a missing version and another tenant's version are **indistinguishable** (403, not 404), so the endpoint does not leak cross-tenant existence |
+| **Audit persistence** | After create + approve | `TIMBRE_RULE_VERSION_CREATED` (actor 1) and `TIMBRE_RULE_VERSION_APPROVED` (actor 2) present, **chain valid**, written in the same transaction as the change |
+| **Historical stability** | Added `LF-2027` with different brackets, re-resolved 2026 and 2027 | 2026 still `LF-2025`, duty unchanged (`100.00`); 2027 → `LF-2027` (`600.00`). Rewrite/delete of a cited rule refused; ledger append-only; posting refuses a rule changed after validation (`test_phase40`, 22 tests) |
+| **Tenant scoping in SQL** | Read every new statement in `localization.py` | Every `SELECT`/`UPDATE`/`INSERT` filters `company_id`; the role check happens **inside** the transaction (`_timbre_admin_user`), so a direct service caller is refused exactly like an HTTP client |
+| **Request-id / log privacy** | 11 hostile ids through the real ASGI stack | Valid ids adopted and echoed; over-long, whitespace, `<script>`, quotes, backslash, `;`, `%`, ANSI escape — all replaced by a uuid4, **none appears in any log record**, every logged `correlation_id` is valid, and the log context carries only `method/path/status_code/duration_ms/client_ip` (no query string, headers or body) |
+| **Backup/restore on supported interpreters** | Ran the suite on this host; inspected the interpreter | This host is CPython **3.11.2**, which lacks `tarfile.data_filter` **entirely** — the round trip is not merely gated, it is impossible here. Faking `version_info` does not help: the second guard refuses an interpreter with no data filter. The round trip therefore executes **only** on CI's 3.11/3.12, and the matrix test **fails (not skips) under `CI`** on an unsupported interpreter, so a green CI job is positive evidence that it ran |
+
+### 8.4 Residual risks found in this review
+
+These are **not** blockers and none was fixed here, because a review pass must
+not introduce unverified code changes this close to authorization.
+
+| # | Observation | Impact | Recommendation |
+|---|---|---|---|
+| **R-08** | `_publish_key_file` fsyncs the key file but not its **directory** after `os.link` | A machine crash in the microseconds between `link` and the next directory sync could lose the key file while audit events signed with it persist. Start-up then **fails loudly** (`AuditKeyUnavailableError`) instead of minting a replacement — an availability incident, never a silent integrity break | Add `os.open(dirname, O_RDONLY)` + `os.fsync` after the link. Low risk, but needs its own test; do it in a follow-up, not here |
+| **R-09** | The no-hardlink fallback still creates the key file with `O_CREAT|O_EXCL` **before** writing its 44 bytes; readers are protected by `_read_published_key`'s 50 × 20 ms retry, not by atomicity | A reader racing a very slow first write on such a filesystem waits up to ~1 s, then fails with an actionable message. Never adopts partial material | Documented in the code; acceptable where `os.link` is unavailable |
+| F-06a (informational) | The migrations drop and recreate `trg_ocr_field_preserve_raw` | Previously a window where another connection saw no trigger; now inside one `BEGIN IMMEDIATE`, so the recreated trigger becomes visible atomically with the rest of the migration | None needed; note the improvement |
+| #5 nit | `if raw_source_price is None or …` at `dz_erp/procurement_stock.py:219` is unreachable (harmless dead condition) | None | Cosmetic; leave or fix separately |
+| #6 nit | `assert len(rows) >= 10` at `tests/test_phase29_ocr_review_policy.py:394` did not grow to 11 with the discount row, although its comment now describes 11 | The count no longer pins the new element; the per-field assertions in the same test do | Reviewer may accept or ask for 11 |
+
+### 8.5 Reviewer checklist, per PR
+
+Merge order is `#3 → #4 → #5 → #6 → #7`; each PR must be green **on its own head**
+(the five SHAs are verified green in §8.6).
+
+**#3 — OCR fail-closed + field-level review** (`main` ← `29645e5d`, 20 files, +2972/−133)
+- Read first: `dz_erp/review_policy.py` (new, 467 lines) — the decision model; `dz_erp/intake_ocr.py` (+582) — extraction, duplicate suppression, confidence provenance.
+- High risk: **whether `NeedsReview` can ever be skipped**. Check the fail-closed path from OCR uncertainty to an unpostable invoice, and that a duplicate extraction row cannot authorize an unreviewed value (`test_phase29_ocr_review_policy.py`).
+- High risk: `dz_erp/database.py` (+100) schema additions and their migration; `dz_erp/security_audit.py` (+71) — new audited events.
+- Ask: does any new column default to a value that could be read as "reviewed"?
+
+**#4 — bind approval to reviewed source values** (`29645e5d` ← `99864bab`, 2 files, +185/−2)
+- Read: `dz_erp/procurement_stock.py` (approval guard) and the 32-line test addition. Small, surgical: prove the approval compares *reviewed* values, not extracted ones.
+- High risk: a `NULL`/absent reviewed value must refuse, not pass.
+
+**#5 — unit price consistency** (`99864bab` ← `c466cea7`, 10 files, +716/−38)
+- Read: `dz_erp/review_policy.py`, `dz_erp/procurement_stock.py` (+203), `dz_erp/intake_ocr.py`.
+- High risk: **money comparison** — exact `Decimal` equality against `supplier_invoice_lines.unit_price_dzd` with 2-decimal DZD; no tolerance, no float.
+- Open nit F-06/#5 above (dead condition).
+
+**#6 — discount + derived line net** (`c466cea7` ← `e4e47b3b`, 10 files, +908/−42)
+- Read: same three modules; bounds `0 ≤ discount ≤ 100` **refused, never clamped**; line net re-derived from decided qty/price/discount.
+- High risk: a clamp anywhere would silently change a monetary amount.
+- Open nit: the `>= 10` count assertion (§8.4).
+
+**#7 — phases 32–42 + this remediation** (`e4e47b3b` ← `07e65782`, 62 files, +18515/−315)
+This is the PR that needs the most attention. Suggested reading order:
+1. `dz_erp/rate_limit.py` (new, 816) — **R-01/R-03**; `_begin_call`/`current_backend_error`/`backend_health`, `SqliteRateLimitStore.read_probe` path, fail-closed default.
+2. `dz_erp/request_id.py` (new, 78) — **R-04**; the accept/replace rule and why rejected values are never echoed.
+3. `dz_erp/localization.py` (+991) — **R-05**; DRAFT→approve, SoD, overlap policy, `supersede` refusal on cited rules. Read `_timbre_admin_user` and every `company_id` predicate.
+4. `dz_erp/api.py` (+332) — the three tax routes; 403/422/409 mapping; **403-not-404** for a missing version is deliberate (no cross-tenant leakage).
+5. `dz_erp/database.py` (+425) — `BEGIN IMMEDIATE` around the migration sequence; **atomic audit-key publish**; `timbre_rules` review columns + append-only ledger.
+6. `dz_erp/security_audit.py` (+52) — `safe_restore_supported` (R-07) and the restore gate; the interpreter floor is **not** removed.
+7. `dz_erp/procurement_stock.py` (+1623) — the largest change: invoice lifecycle, provenance capture, reversal inherit.
+- High risk: any new `UPDATE`/`DELETE` reachable on `timbre_rules` or `supplier_invoices.timbre_*`; any place a refusal became an allow.
+- Ask specifically: **does anything in this PR weaken a rate limit, bypass the review state, or let a single person both author and activate a tax rule?** (Verified by me as "no" — see §8.3 — but this is the question the reviewer should independently answer.)
+
+### 8.6 Per-PR CI and review state
+
+| PR | Head SHA | CI on that exact head | Reviews | Findings open | Draft? |
+|---|---|---|---|---|---|
+| #3 | `29645e5d` | 3/3 success | 0 | none | **no — ready for merge** |
+| #4 | `99864bab` | 3/3 success | 0 | none | yes |
+| #5 | `c466cea7` | 3/3 success | 0 | nit (dead condition) | yes |
+| #6 | `e4e47b3b` | 3/3 success | 0 | nit (count assertion) | yes |
+| #7 | `07e65782` | 3/3 success (run 41198403599) | 0 | R-01…R-07 **closed**; R-08/R-09 recorded as residuals | yes |
+
+All five are `MERGEABLE / CLEAN`. **Zero human reviews exist on any PR** — that
+is the outstanding gate, and it cannot be satisfied by CI.
+
+### 8.7 The retargeting requirement, and why it is not optional here
+
+GitHub retargets a stacked PR's base **only when the base branch is deleted after
+the merge** ([GitHub changelog, 2020-05-19](https://github.blog/changelog/2020-05-19-pull-request-retargeting/);
+[changing a PR's base branch](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/changing-the-base-branch-of-a-pull-request)).
+Two facts make the manual step mandatory in *this* repository:
+
+1. `delete_branch_on_merge` is **`false`** (verified: `gh api repos/Devmraustro/ERP`), so merging `#3` will **not** delete `phase29/ocr-failclosed`;
+2. that branch is `#4`'s base, so `#4` keeps pointing at it, and merging `#4` while it is based on that branch would land its commits **in the branch, not in `main`**.
+
+Therefore the verified procedure is **§3 option A**: merge → retarget the next PR
+to `main` → confirm the base shows `main` → merge. **Stop immediately** if, after
+a merge, the next PR's base has *not* changed and it is not explicitly retargeted;
+and stop if GitHub has auto-retargeted a PR to something other than `main`
+(it would mean a base was deleted, which this plan forbids). Also note the
+repository allows squash, merge and rebase merges: **use merge commits**. A squash
+rewrites every commit in the PR, which would force a rebase of the branches above
+it — and rebasing published history is forbidden by this task.
+
+Branch protection on `main` could not be read with this token
+(`403 Resource not accessible by integration`), so the plan must not assume
+protection rules are absent or present: the merging human should confirm required
+checks and review requirements in the repository settings before the first merge.

@@ -28,6 +28,8 @@ asserted to raise rather than degrade to an unsafe extraction.
 from __future__ import annotations
 
 import ast
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -268,6 +270,17 @@ def test_a_real_backup_restore_round_trip_is_verified_on_this_interpreter(
     failure mode R-07 is about, so the keys are asserted explicitly.
     """
     if not HOST_IS_SUPPORTED:
+        # A skip is honest on a developer's host (this sandbox runs 3.11.2, where
+        # restore correctly refuses). On CI it would be a silent hole: the job
+        # would be green while the requirement's central path never executed.
+        # CI is *supposed* to run on a supported interpreter, so there it fails.
+        if os.environ.get("CI"):
+            pytest.fail(
+                "CI is running the safe-restore round trip on an interpreter that "
+                f"cannot perform it ({sys.version_info.major}.{sys.version_info.minor}."
+                f"{sys.version_info.micro}). The gate is deliberate and must not be "
+                "disabled; fix the matrix instead of skipping the evidence."
+            )
         pytest.skip(
             "safe restore is refused on this interpreter by design; the fail-closed "
             "behaviour is asserted above and the round trip is exercised by CI on "

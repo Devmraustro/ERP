@@ -145,3 +145,15 @@ production-ready and none may be merged without G1–G7 in the execution plan.
 build, a deployment, multi-replica rate limiting, and every legal/tax
 determination. Those rows are untouched (`IMPLEMENTED_NOT_VERIFIED` /
 `BLOCKED_EXTERNAL`) and are listed in `docs/REMAINING_BLOCKERS.md`.
+
+### S8 evidence index
+
+| Claim | Where it is reproducible |
+|---|---|
+| R-01/R-02/R-03 | `tests/test_phase43_limiter_hardening.py` (17) |
+| R-04 | `tests/test_phase47_request_id_boundary.py` (19) |
+| R-05 | `tests/test_phase46_timbre_rule_administration.py` (35) |
+| R-06 | `docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §7 + docs-consistency suite |
+| R-07 | `tests/test_phase48_restore_interpreter_matrix.py` (32 + 1 gated) |
+| start-up defects | `tests/test_phase49_audit_key_bootstrap_race.py` (7) + the migration-race test |
+| CI on the exact head | run 41196478922 (3/3 green), recorded in `docs/PR_STACK_REVIEW.md` §7.3 |

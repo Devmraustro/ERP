@@ -414,3 +414,34 @@ have appeared as an intermittent production start-up failure.
 * the restore round trip is verified on CI's 3.11/3.12, not on this sandbox's
   3.11.2;
 * no container image was built here, and nothing was deployed.
+
+### 7.3 Exact evidence
+
+| Item | Value |
+|---|---|
+| Branch | `arena/7f12d627-erp` (the existing work branch; no other branch touched) |
+| Base | `4fc1364a` (`main`); stack `#3` … `#7` unchanged, all still **draft**, none merged or retargeted |
+| Remediation commit | `d4131c6` — R-01, R-03, R-04, R-05, R-06, R-07 rule, and the migration-race fix |
+| Evidence commit | `0a46cc9` — restore round trip asserted against the real report contract; closure docs |
+| Flake-or-defect commits | `a092996`, `848afee` — repeat the start-up race, report the failing child's cause |
+| Defect fix | `1873f0ec` — atomic audit-key publish (+ `tests/test_phase49`) |
+| CI (green, 3/3) | run **41196478922** on `1873f0ec` — https://github.com/Devmraustro/ERP/actions/runs/41196478922 |
+| CI (red, superseded) | run **41194325402** on `d4131c6` — 3.11 failed on the Phase 48 round trip, which is how the guessed report keys were caught; run **41194981129** on `0a46cc9` — 3.11 failed once on the start-up race, which is what led to `1873f0ec` |
+| Local suite (CPython 3.11.2) | **1070 passed, 20 failed, 9 skipped**; the 20 failures are the identical interpreter-floor restore set as the pre-remediation baseline (3.11.2 < 3.11.17) |
+| New tests | phase43 **17**, phase46 **35**, phase47 **19**, phase48 **32 + 1 environment-gated**, phase49 **7** — **110 passed, 1 skipped** together |
+| Static checks | `ruff check dz_erp tests tools` → clean; `tools/risk_register_counts.py` → consistent (40 rows); docs-consistency suite **15 passed** |
+
+Two failures during this work were reported rather than smoothed over, because
+each one was the R-07 lesson repeating:
+
+1. the Phase 48 round trip asserted *guessed* report keys and passed locally only
+   by skipping; CI 3.11 — where the path really runs — failed it. It is now
+   asserted against the report's actual contract, and **on CI an unsupported
+   interpreter fails the test instead of skipping it**, so a green CI job proves
+   the round trip executed rather than that it was quietly dropped;
+2. the R-02 start-up test failed once on CI and never locally. It was traced to
+   a real non-atomic step (`_resolve_audit_secret` published an empty key file
+   before writing its material) rather than dismissed as a flake — see
+   `tests/test_phase49_audit_key_bootstrap_race.py`. That CI failure was **not**
+   reproduced on this host (1 680 concurrent starts, zero failures), so the
+   causal link is stated as the mechanism that matches, not as a reproduction.

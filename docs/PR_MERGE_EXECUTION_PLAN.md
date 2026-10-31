@@ -181,3 +181,14 @@ closed, rebased, marked ready or deployed, and no branch was force-pushed.
    does not imply the tax values are legally qualified.
 3. The external gates in `docs/REMAINING_BLOCKERS.md` remain exactly as listed;
    none of them was closed by this remediation.
+
+### 8.3 Where the evidence lives
+
+* per-finding disposition: `docs/PR_STACK_REVIEW.md` §7
+* exact commit SHAs, CI run URLs and test counts: `docs/PR_STACK_REVIEW.md` §7.3
+* the start-up defects the concurrency work uncovered:
+  `tests/test_phase49_audit_key_bootstrap_race.py` and
+  `tests/test_phase43_limiter_hardening.py::test_concurrent_process_startup_does_not_race_the_schema_migrations`
+
+Executing any row of this plan still requires an explicit merge authorization
+from the repository owner. Nothing has been executed.

@@ -142,6 +142,23 @@ deliberate Phase 35 addition, and every affected path is green in CI.
 | Tax values not legally qualified | Cannot be presented as compliant | `BLOCKED_EXTERNAL` |
 | Law 18-07 determinations absent | Cannot claim compliance | `BLOCKED_EXTERNAL` |
 
+### 4.1 Findings closed after this report (Phase 45)
+
+R-01 … R-07 from the independent review are remediated on
+`arena/7f12d627-erp`; see `docs/PR_STACK_REVIEW.md` §7 for the per-finding
+disposition and exact SHAs. Two things found during that work belong beside the
+limitations above rather than hidden in a review:
+
+* concurrent start-up of several workers could fail intermittently because the
+  audit key file was published empty before its material was written; the
+  publish is now atomic (`os.link` of a fsynced temporary file) and a reader can
+  only ever observe a complete file;
+* concurrent start-up also raced the schema migrations (an autocommitted
+  check-then-DDL sequence); the sequence now runs in one `BEGIN IMMEDIATE`.
+
+Neither was in the review's findings. Both are start-up defects that only appear
+with more than one worker, which is why the R-02 concurrency work surfaced them.
+
 ## 5. Reproducing this report
 
 ```bash

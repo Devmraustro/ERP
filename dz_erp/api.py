@@ -17,6 +17,7 @@ record bound to the presented credential.
 
 import os
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .auth import (
@@ -50,8 +52,22 @@ from .intake_ocr import (
     upload_and_process_supplier_document,
 )
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
+from .request_id import sanitize_request_id
+from .localization import (
+    TimbreRuleAdministrationError,
+    approve_timbre_rule_version,
+    create_timbre_rule_version,
+    list_timbre_rule_versions,
+)
+from .rate_limit import (
+    RequestThrottle,
+    describe_throttle_policy,
+    format_rate_limit_scope,
+    store_from_env,
+)
 from .procurement_stock import (
     create_and_validate_supplier_invoice,
+    revalidate_supplier_invoice,
     create_reversal_request,
     decide_invoice_approval,
     decide_reversal_approval,
@@ -116,6 +132,55 @@ class CreateInvoiceRequest(BaseModel):
     lines: List[InvoiceLineInput]
 
 
+class InvoiceRevisionInput(BaseModel):
+    """A correction to an unvalidated draft (Phase 33 / P32-F2).
+
+    Every field is optional: only what is supplied is replaced, and the whole
+    payload is then re-validated from scratch (identifier checks, duplicate
+    detection ignoring this invoice, line arithmetic, TVA rates, discount
+    bounds, 3-way match, header reconciliation, timbre, TTC and the linked
+    document's review state).
+    """
+
+    supplier_invoice_no: Optional[str] = None
+    invoice_date: Optional[str] = None
+    payment_method: Optional[str] = None
+    amount_ht_dzd: Optional[str] = None
+    amount_tva_dzd: Optional[str] = None
+    amount_timbre_dzd: Optional[str] = None
+    amount_ttc_dzd: Optional[str] = None
+    lines: Optional[List[InvoiceLineInput]] = None
+
+
+class TimbreRuleVersionInput(BaseModel):
+    """A proposed stamp-duty rule version (finding R-05).
+
+    Every numeric field is required: this endpoint never defaults a rate, because
+    a default would be a tax value nobody chose. The values themselves must come
+    from an authorized configuration source and remain subject to the
+    expert-comptable review recorded in the release readiness matrix.
+    """
+
+    version_code: str
+    valid_from: str
+    valid_to: Optional[str] = None
+    min_amount_dzd: str
+    #: A decimal ceiling, or "none" to declare the rule deliberately uncapped.
+    #: Omitting it is refused (TIMBRE_RULE_CAP_NOT_DECLARED): a missing value
+    #: must never silently mean "no ceiling".
+    max_amount_dzd: Optional[str] = None
+    threshold_dzd: str
+    brackets: List[Dict[str, Any]]
+    reason: str
+
+
+class TimbreRuleApprovalInput(BaseModel):
+    """Approval of a draft rule by a *different* accountant or an administrator."""
+
+    reason: str
+    overlap_policy: str = "reject"
+
+
 class ApprovalDecisionInput(BaseModel):
     approve: bool
     reason: str = ""
@@ -150,6 +215,11 @@ class FieldDecisionInput(BaseModel):
     expected_value: Optional[str] = None
     note: Optional[str] = None
     line_index: Optional[int] = None
+    # Phase 34: when several extraction rows claim the same field, name the one
+    # the reviewer treats as authoritative. Omitting it falls back to the row
+    # whose value matches ``expected_value``; either way the decision covers
+    # every row of the group or the field stays blocked.
+    selected_row_id: Optional[int] = None
 
 
 class UserCreateInput(BaseModel):
@@ -176,6 +246,7 @@ def create_erp_fastapi_app(
     token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
     trusted_proxies: Optional[TrustedProxyPolicy] = None,
     docs_enabled: bool = False,
+    throttle: Optional[RequestThrottle] = None,
 ) -> FastAPI:
     # Secure default: docs disabled unless explicitly enabled for local development
     docs_url = "/docs" if docs_enabled else None
@@ -209,6 +280,80 @@ def create_erp_fastapi_app(
     # explicitly configured, X-Forwarded-For is ignored and the direct peer
     # address is used.  See dz_erp/net.py.
     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
+    # Failed-authentication and (optionally) per-client request throttling.
+    # See dz_erp/rate_limit.py: fail-closed, audited, bounded, and either
+    # in-process (default) or shared through the application database when
+    # ERP_RATE_LIMIT_BACKEND=sqlite.  A fresh instance per application keeps
+    # counters from leaking between independently-created apps in one process
+    # (tests, or a desktop client that hosts the app alongside an embedded
+    # server); the environment still supplies the policy.
+    app.state.throttle = (
+        throttle if throttle is not None else RequestThrottle(store=store_from_env(db))
+    )
+
+    # ------------------------------------------------------------------
+    # Request logging and the optional per-client ceiling
+    # ------------------------------------------------------------------
+    # Every request gets a correlation id, echoed as X-Request-Id so a user can
+    # quote it and an operator can find the line.  Only the method, the *path*
+    # (never the query string, never headers, never a body) and the outcome are
+    # recorded: the structured logger redacts anything secret-bearing that a
+    # caller passes to it explicitly.
+    @app.middleware("http")
+    async def _log_request(request: Request, call_next: Any) -> Any:
+        # A client may propose a correlation id, but only a bounded, printable
+        # ASCII token is adopted; anything else (over-long, empty, control or
+        # non-ASCII characters) is replaced by a server-side uuid4 and never
+        # echoed (finding R-04). See dz_erp/request_id.py.
+        corr_id, _supplied_id_accepted = sanitize_request_id(
+            request.headers.get("X-Request-Id")
+        )
+        peer_ip = request.client.host if request.client else None
+        client_ip = app.state.proxy_policy.resolve_client_ip(
+            peer_ip, request.headers.get("X-Forwarded-For")
+        )
+        allowed, retry_after = app.state.throttle.request_allowed(client_ip or peer_ip or "unknown")
+        if not allowed:
+            logger.log(
+                "WARNING",
+                "SECURITY_RATE_LIMITED",
+                corr_id,
+                method=request.method,
+                path=request.url.path,
+                client_ip=client_ip,
+                retry_after_seconds=retry_after,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Try again later."},
+                headers={"Retry-After": str(retry_after), "X-Request-Id": corr_id},
+            )
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.log(
+                "ERROR",
+                "HTTP_REQUEST_FAILED",
+                corr_id,
+                method=request.method,
+                path=request.url.path,
+                duration_ms=round((time.monotonic() - started) * 1000, 2),
+            )
+            raise
+        duration_ms = round((time.monotonic() - started) * 1000, 2)
+        response.headers["X-Request-Id"] = corr_id
+        logger.log(
+            "INFO",
+            "HTTP_REQUEST",
+            corr_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            client_ip=client_ip,
+        )
+        return response
 
     def _authenticate(
         request: Request,
@@ -325,6 +470,47 @@ def create_erp_fastapi_app(
         # actually arrived through a configured trusted proxy.
         peer_ip = request.client.host if request.client else None
         client_ip = app.state.proxy_policy.resolve_client_ip(peer_ip, x_forwarded_for)
+        # Throttle before verifying the password: a wrong guess costs the server
+        # a password hash, so an unbounded endpoint is both a credential-stuffing
+        # and a denial-of-service lever.  The key is (client, account) so one
+        # locked-out account cannot deny service to everyone else.
+        throttle = app.state.throttle
+        client_key = client_ip or (peer_ip or "unknown")
+        blocked, retry_after = throttle.login_blocked(client_key, body.username)
+        if blocked:
+            # A refusal caused by an unavailable counter is a different fact from
+            # a refusal caused by the limit, and an operator needs to tell them
+            # apart: the first is a dependency failure, the second is the policy.
+            #
+            # Only the error behind *this* decision counts. Using a historical
+            # "last error" here made every ordinary 429 look like a backend
+            # outage for the rest of the process's life (finding R-01), which
+            # would have sent an operator chasing a dependency that had long
+            # recovered.
+            current_error = getattr(throttle, "current_backend_error", None)
+            if current_error:
+                logger.log(
+                    "ERROR",
+                    "RATE_LIMIT_BACKEND_UNAVAILABLE",
+                    corr_id,
+                    failure_mode=throttle.failure_mode,
+                    error_type=str(current_error).split(":", 1)[0],
+                    username=body.username,
+                    client_ip=client_key,
+                )
+            logger.log(
+                "WARNING",
+                "SECURITY_AUTH_RATE_LIMITED",
+                corr_id,
+                username=body.username,
+                client_ip=client_key,
+                retry_after_seconds=retry_after,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed authentication attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
         try:
             result = app.state.auth_manager.issue_token(
                 body.username,
@@ -333,7 +519,18 @@ def create_erp_fastapi_app(
                 user_agent=user_agent,
             )
         except AuthError as exc:
-            logger.log("WARNING", "AUTH_LOGIN_REJECTED", corr_id, code=exc.code, username=body.username)
+            # Count the failure *after* the decision, so a throttled attempt is
+            # recorded but cannot consume another slot.
+            _allowed, retry_after = throttle.record_login_failure(client_key, body.username)
+            logger.log(
+                "WARNING",
+                "AUTH_LOGIN_REJECTED",
+                corr_id,
+                code=exc.code,
+                username=body.username,
+                client_ip=client_key,
+                retry_after_seconds=retry_after,
+            )
             raise HTTPException(
                 status_code=exc.status_code,
                 detail=exc.detail,
@@ -341,6 +538,8 @@ def create_erp_fastapi_app(
             ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # A legitimate user who mistyped a few times is not left locked out.
+        throttle.record_login_success(client_key, body.username)
         logger.log("INFO", "AUTH_TOKEN_ISSUED", corr_id, username=result["user"]["username"])
         return result
 
@@ -526,6 +725,7 @@ def create_erp_fastapi_app(
                 expected_value=body.expected_value,
                 note=body.note,
                 line_index=body.line_index,
+                selected_row_id=body.selected_row_id,
             )
         except (AuthorizationError, TenantIsolationError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -585,6 +785,42 @@ def create_erp_fastapi_app(
         except (AuthorizationError, TenantIsolationError) as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (ValueError, FinancialIntegrityError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/v1/invoices/{invoice_id}/revalidate")
+    def api_revalidate_invoice(
+        invoice_id: int,
+        body: InvoiceRevisionInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Correct and re-validate a NeedsReview/DuplicateRejected draft (Phase 33).
+
+        The invoice keeps its identity; the corrected payload is validated from
+        scratch, its digest is recomputed (so no earlier validation result can
+        authorize posting) and every approval based on the previous payload is
+        invalidated. Approved/posted records are refused — the reversal credit
+        note is the accounting remedy for those.
+        """
+        try:
+            return revalidate_supplier_invoice(
+                db=db,
+                company_id=auth.company_id,
+                user_id=auth.user_id,
+                invoice_id=invoice_id,
+                supplier_invoice_no=body.supplier_invoice_no,
+                invoice_date=body.invoice_date,
+                payment_method=body.payment_method,
+                amount_ht_dzd=body.amount_ht_dzd,
+                amount_tva_dzd=body.amount_tva_dzd,
+                amount_timbre_dzd=body.amount_timbre_dzd,
+                amount_ttc_dzd=body.amount_ttc_dzd,
+                lines=None if body.lines is None else [line.model_dump() for line in body.lines],
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FinancialIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/v1/invoices/{invoice_id}")
@@ -928,6 +1164,103 @@ def create_erp_fastapi_app(
     # never leak whether a foreign user id exists.
     # ------------------------------------------------------------------
 
+    @app.get("/api/v1/system/rate-limit-policy")
+    def api_rate_limit_policy(
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """The active throttling policy and what it actually bounds.
+
+        Administrators only. The description never contains a key, a username,
+        a credential or a per-account counter: it reports the limits, the store,
+        and the honest scope of the control, so a deployment review can verify
+        what the running process is doing rather than what a document says.
+        """
+        if auth.role != "admin":
+            raise HTTPException(status_code=403, detail="Administrator role required")
+        described = describe_throttle_policy(app.state.throttle)
+        described["deployment_scope"] = format_rate_limit_scope(app.state.throttle)
+        return {"company_id": auth.company_id, "rate_limit": described}
+
+    # ------------------------------------------------------------------
+    # Timbre rule administration (Phase 46, finding R-05). The service refuses
+    # the wrong role, the wrong tenant, self-approval, an overlapping window and
+    # an incomplete rule; these endpoints only translate that into HTTP and
+    # never widen the tenant scope (it comes from the verified credential).
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/tax/timbre-rules")
+    def api_list_timbre_rules(
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Every timbre rule version of this company, drafts included."""
+        try:
+            rules = list_timbre_rule_versions(db, auth.company_id, auth.user_id)
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, "rules": rules}
+
+    @app.post("/api/v1/tax/timbre-rules", status_code=201)
+    def api_create_timbre_rule(
+        body: TimbreRuleVersionInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create a DRAFT rule version. It is not in force until approved."""
+        try:
+            created = create_timbre_rule_version(
+                db,
+                auth.company_id,
+                auth.user_id,
+                version_code=body.version_code,
+                valid_from=body.valid_from,
+                valid_to=body.valid_to,
+                min_amount_dzd=body.min_amount_dzd,
+                max_amount_dzd=body.max_amount_dzd,
+                threshold_dzd=body.threshold_dzd,
+                brackets=body.brackets,
+                reason=body.reason,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TimbreRuleAdministrationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return created
+
+    @app.post("/api/v1/tax/timbre-rules/{version_code}/approve")
+    def api_approve_timbre_rule(
+        version_code: str,
+        body: TimbreRuleApprovalInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Approve a DRAFT, making it ACTIVE for its window.
+
+        A conflict is 409: the request was well formed, but the state of the
+        configuration (an overlap, a rule an invoice already cites) refuses it.
+        """
+        try:
+            approved = approve_timbre_rule_version(
+                db,
+                auth.company_id,
+                auth.user_id,
+                version_code=version_code,
+                reason=body.reason,
+                overlap_policy=body.overlap_policy,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TimbreRuleAdministrationError as exc:
+            detail = str(exc)
+            status = 409 if detail.startswith(
+                ("TIMBRE_RULE_OVERLAP:", "TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE:",
+                 "TIMBRE_RULE_SUPERSEDE_IMPOSSIBLE:", "TIMBRE_RULE_NOT_A_DRAFT:")
+            ) else 422
+            raise HTTPException(status_code=status, detail=detail) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return approved
     @app.get("/api/v1/users")
     def api_list_users(
         limit: int = 500,

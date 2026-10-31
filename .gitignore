@@ -25,3 +25,7 @@ build/
 *.keys.json
 *.rotation.jsonl
 *.rotation.lock
+
+# Operator environment for the container reference stack (see ops/erp.env.example).
+# Never commit real paths, secrets or key declarations.
+ops/erp.env

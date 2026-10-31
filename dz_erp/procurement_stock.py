@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,8 +11,31 @@ from typing import Any, Dict, List, Optional, Tuple
 from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
 from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
 from .intake_ocr import DOCUMENT_LINKABLE_STATES, levenshtein_distance, normalize_invoice_ref
-from .localization import calculate_droit_de_timbre, validate_algerian_identifiers
+from .localization import (
+    assert_timbre_rule_unchanged,
+    calculate_droit_de_timbre,
+    inherit_timbre_provenance,
+    persist_invoice_timbre_provenance,
+    record_timbre_rule_version,
+    resolve_timbre_rule,
+    resolve_vat_rates,
+    validate_algerian_identifiers,
+)
 from .review_policy import evaluate_document_review_policy
+
+
+# Phase 33 (P32-F2): the only invoice states a correction may start from. A
+# posted or approved record is never rewritten — that is what the reversal
+# credit note is for — and a rejected invoice is terminal by design.
+# ``Validated`` is included so that re-validation is idempotent and a draft
+# corrected before submission keeps its identity instead of needing a new
+# invoice; nothing downstream has been approved or posted at that point.
+REVISABLE_INVOICE_STATES = ("NeedsReview", "DuplicateRejected", "Validated")
+
+# States that do not represent a live claim on a source document. A rejected
+# attempt is still stored (its refusal is evidence) but it neither owns the
+# document nor is it treated as a competing invoice.
+NON_LIVE_INVOICE_STATES = ("Rejected", "DuplicateRejected")
 
 
 def compute_invoice_payload_hash(
@@ -186,13 +210,21 @@ def _source_invoice_mismatches(
                 # divergence was already flagged above, which blocks
                 # regardless.
                 raw_source_price = price_eval["value"]
+                # A decided-but-absent reading is its own case. It used to be
+                # unreachable: ``str(None)`` raised inside the parser below, so
+                # a missing price was reported as "unparseable" — a different
+                # and less accurate refusal. The None test therefore comes
+                # first, and the parse only sees real strings (F-R2-6).
+                if raw_source_price is None:
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISSING")
+                    continue
                 try:
                     source_price = round_qty(to_decimal(str(raw_source_price)))
                     invoice_price = round_qty(to_decimal(str(invoice_line["unit_price_dzd"])))
                 except (ValueError, TypeError, ArithmeticError):
                     mismatches.append(f"LINE_{index}_PRICE_SOURCE_UNPARSEABLE")
                     continue
-                if raw_source_price is None or source_price != invoice_price:
+                if source_price != invoice_price:
                     mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISMATCH")
                 # The decided discount is the third binding: exact 2-decimal
                 # equality with the invoice line's first-class discount
@@ -200,13 +232,16 @@ def _source_invoice_mismatches(
                 # an unparseable or missing reading is refused, not treated
                 # as zero.
                 raw_source_discount = discount_eval["value"]
+                if raw_source_discount is None:
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISSING")
+                    continue
                 try:
                     source_discount = round_dzd(to_decimal(str(raw_source_discount)))
                     invoice_discount = round_dzd(to_decimal(str(invoice_line["discount_pct"])))
                 except (ValueError, TypeError, ArithmeticError):
                     mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_UNPARSEABLE")
                     continue
-                if raw_source_discount is None or source_discount != invoice_discount:
+                if source_discount != invoice_discount:
                     mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISMATCH")
                 # Line-net comparison, only where the representations are
                 # semantically equivalent: both sides mean the same
@@ -237,6 +272,396 @@ def _source_invoice_mismatches(
     return mismatches
 
 
+class _RefusedAttempt(FinancialIntegrityError):
+    """A refusal whose audit record must outlive the rollback of the attempt.
+
+    ``db.transaction()`` rolls back everything written inside the failed
+    attempt, including an audit event appended there. A refusal is itself
+    evidence an auditor needs — who tried, against which invoice, and why it
+    was refused — so the event is carried on the exception and written by the
+    public function in its own transaction after the rollback.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        action_type: str,
+        target_model: str,
+        target_id: str,
+        after_state: Dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.audit_action_type = action_type
+        self.audit_target_model = target_model
+        self.audit_target_id = target_id
+        self.audit_after_state = after_state
+
+
+def _record_refused_attempt(db: ERPDatabase, company_id: int, user_id: int, refusal: _RefusedAttempt) -> None:
+    """Commit the audit record of a refused write (never the write itself)."""
+    with db.transaction() as conn:
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type=refusal.audit_action_type,
+            target_model=refusal.audit_target_model,
+            target_id=refusal.audit_target_id,
+            after_state=refusal.audit_after_state,
+        )
+
+
+def _assert_document_linkable(conn: Any, company_id: int, document_id: str) -> None:
+    """A draft may cite a source document only while that document is in review."""
+    linked_doc = conn.execute(
+        "SELECT workflow_state FROM source_documents WHERE id = ? AND company_id = ?",
+        (document_id, company_id),
+    ).fetchone()
+    if not linked_doc:
+        raise TenantIsolationError("Source document does not belong to target company.")
+    if linked_doc["workflow_state"] not in DOCUMENT_LINKABLE_STATES:
+        raise FinancialIntegrityError(
+            f"DOCUMENT_LINK_STATE_REFUSED: document {document_id} is in state "
+            f"'{linked_doc['workflow_state']}'; a draft invoice may only cite a "
+            f"document in one of {DOCUMENT_LINKABLE_STATES}."
+        )
+
+
+def _live_document_owner(
+    conn: Any, company_id: int, document_id: str, *, exclude_invoice_id: Optional[int] = None
+) -> Any:
+    """The invoice that currently owns a source document, or ``None``."""
+    placeholders = ",".join("?" for _ in NON_LIVE_INVOICE_STATES)
+    return conn.execute(
+        f"""
+        SELECT id, workflow_state, supplier_invoice_no FROM supplier_invoices
+        WHERE company_id = ? AND document_id = ?
+          AND workflow_state NOT IN ({placeholders})
+          AND (? IS NULL OR id != ?)
+        ORDER BY id
+        LIMIT 1
+        """,
+        (company_id, document_id, *NON_LIVE_INVOICE_STATES, exclude_invoice_id, exclude_invoice_id),
+    ).fetchone()
+
+
+def _refresh_document_state(
+    conn: Any, company_id: int, document_id: Optional[str], workflow_state: str, *, invoice_id: int
+) -> bool:
+    """Drive a source document's state from the invoice that owns it.
+
+    Phase 33 (P32-F3): the evidence row follows its *owner*. When another live
+    invoice already cites the document, this call leaves the document alone
+    instead of overwriting the state that invoice relies on.
+    """
+    if not document_id:
+        return False
+    owner = _live_document_owner(conn, company_id, document_id)
+    if owner is not None and int(owner["id"]) != int(invoice_id):
+        return False
+    conn.execute(
+        "UPDATE source_documents SET workflow_state = ? WHERE id = ? AND company_id = ?",
+        (workflow_state, document_id, company_id),
+    )
+    return True
+
+
+def _source_review_fingerprint(conn: Any, company_id: int, document_id: Optional[str]) -> Optional[str]:
+    """Digest of the review evidence an approval request is bound to.
+
+    Phase 33 (P32-F4): an approval must decide the same invoice payload against
+    the *same* reviewed evidence. The digest covers the document identity and
+    every decision row (id, field, decided value, reviewer, timestamp) — not the
+    document's workflow state, which legitimately moves with the invoice
+    between submission and approval.
+    """
+    if not document_id:
+        return None
+    doc = conn.execute(
+        "SELECT id FROM source_documents WHERE id = ? AND company_id = ?",
+        (document_id, company_id),
+    ).fetchone()
+    if doc is None:
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, field_name, line_index, decision, reviewed_value, reviewed_by_id, reviewed_at
+        FROM ocr_field_reviews
+        WHERE company_id = ? AND document_id = ?
+        ORDER BY id
+        """,
+        (company_id, document_id),
+    ).fetchall()
+    canonical = {
+        "document_id": doc["id"],
+        "decisions": [
+            [
+                int(r["id"]),
+                r["field_name"],
+                r["line_index"],
+                r["decision"],
+                r["reviewed_value"],
+                int(r["reviewed_by_id"]),
+                r["reviewed_at"],
+            ]
+            for r in rows
+        ],
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _invalidate_approval_requests(
+    conn: Any,
+    company_id: int,
+    invoice_id: int,
+    *,
+    reason: str,
+    actor_user_id: int,
+    now_iso: str,
+    target_model: str = "supplier_invoices",
+    include_approved: bool = True,
+) -> List[int]:
+    """Explicitly invalidate the approvals a modified payload can no longer rely on."""
+    states = ("PENDING", "APPROVED") if include_approved else ("PENDING",)
+    placeholders = ",".join("?" for _ in states)
+    rows = conn.execute(
+        f"""
+        SELECT id FROM approval_requests
+        WHERE company_id = ? AND target_model = ? AND target_id = ?
+          AND decision IN ({placeholders})
+        ORDER BY id
+        """,
+        (company_id, target_model, invoice_id, *states),
+    ).fetchall()
+    request_ids = [int(r["id"]) for r in rows]
+    if request_ids:
+        marks = ",".join("?" for _ in request_ids)
+        conn.execute(
+            f"""
+            UPDATE approval_requests
+            SET decision = 'INVALIDATED', decided_by_id = ?, decided_at = ?, reason = ?
+            WHERE id IN ({marks})
+            """,
+            (actor_user_id, now_iso, reason, *request_ids),
+        )
+    return request_ids
+
+
+def _duplicate_invoice_errors(
+    conn: Any,
+    *,
+    company_id: int,
+    supplier_id: int,
+    fiscal_year: int,
+    norm_ref: str,
+    ttc_dec: Decimal,
+    exclude_invoice_id: Optional[int] = None,
+) -> Tuple[List[str], bool]:
+    """Exact and fuzzy duplicate detection, scoped to the tenant.
+
+    ``exclude_invoice_id`` lets a *re-validation* of an existing invoice ignore
+    itself, so correcting a draft is never mistaken for re-creating it.
+    """
+    existing_invs = conn.execute(
+        """
+        SELECT id, supplier_invoice_no, normalized_invoice_no, amount_ttc_dzd, workflow_state
+        FROM supplier_invoices
+        WHERE company_id = ? AND supplier_id = ? AND fiscal_year = ?
+          AND workflow_state NOT IN ('Rejected', 'DuplicateRejected')
+          AND invoice_type = 'IN_INVOICE'
+          AND (? IS NULL OR id != ?)
+        """,
+        (company_id, supplier_id, fiscal_year, exclude_invoice_id, exclude_invoice_id),
+    ).fetchall()
+
+    errors: List[str] = []
+    is_exact_dup = False
+    for ex in existing_invs:
+        if ex["normalized_invoice_no"] == norm_ref:
+            is_exact_dup = True
+            errors.append(f"EXACT_DUPLICATE_INVOICE_REF_OF_ID_{ex['id']}")
+            break
+        dist = levenshtein_distance(ex["normalized_invoice_no"], norm_ref)
+        if dist <= 2 and abs(to_decimal(ex["amount_ttc_dzd"]) - ttc_dec) <= Decimal("1.00"):
+            errors.append(f"FUZZY_DUPLICATE_SUSPECTED:existing='{ex['supplier_invoice_no']}',dist={dist}")
+    return errors, is_exact_dup
+
+
+def _validate_invoice_lines(
+    conn: Any,
+    *,
+    company_id: int,
+    lines: List[Dict[str, Any]],
+    price_tolerance_dzd: str,
+    vat_rates: Any = None,
+) -> Tuple[List[str], List[Dict[str, Any]], Decimal, Decimal]:
+    """Per-line arithmetic, Algerian TVA rates, discount bounds and 3-way match.
+
+    ``vat_rates`` is the effective-dated rate set resolved for the invoice date
+    (see :func:`dz_erp.localization.resolve_vat_rates`). Omitting it keeps the
+    historical built-in whitelist; callers holding the invoice date must pass
+    the resolved set so a configured, reviewed rate table governs validation.
+    """
+    errors: List[str] = []
+    prepared: List[Dict[str, Any]] = []
+    sum_line_ht = Decimal("0.00")
+    sum_line_tva = Decimal("0.00")
+    allowed_rates = (
+        tuple(vat_rates.rates) if vat_rates is not None
+        else (Decimal("0.0"), Decimal("9.0"), Decimal("19.0"))
+    )
+
+    for idx, line in enumerate(lines):
+        qty = round_qty(line["qty"])
+        pu = round_qty(line["unit_price_dzd"])
+        disc = to_decimal(line.get("discount_pct", "0.00"))
+        rate = to_decimal(line.get("tax_rate", "19.0"))
+        if rate not in allowed_rates:
+            errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
+        # Documented business rule (Phase 31): a discount is a percentage in
+        # [0, 100] inclusive. A negative or >100 discount is refused as a
+        # validation error — never clamped into range — so the invoice stays in
+        # NeedsReview and cannot be submitted.
+        if disc < Decimal("0.00") or disc > Decimal("100.00"):
+            errors.append(f"LINE_{idx + 1}_DISCOUNT_OUT_OF_RANGE:{disc}")
+        if qty <= Decimal("0.000000"):
+            errors.append(f"LINE_{idx + 1}_QTY_NONPOSITIVE:{qty}")
+        # F-R2-4: the same policy that refuses a non-positive quantity refuses a
+        # non-positive unit price. A negative price is not how this system models
+        # a credit note — a reversal is an IN_REFUND document with positive
+        # amounts (see reverse_posted_invoice) — so a negative price can only
+        # produce a negative-valued payable line that no workflow expects.
+        if pu <= Decimal("0.000000"):
+            errors.append(f"LINE_{idx + 1}_PRICE_NONPOSITIVE:{pu}")
+
+        expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
+        declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
+        if declared_line_ht != expected_line_ht:
+            errors.append(
+                f"LINE_{idx + 1}_HT_MATH_MISMATCH:declared={declared_line_ht:.2f}!=expected={expected_line_ht:.2f}"
+            )
+
+        line_tva = round_dzd(declared_line_ht * (rate / Decimal("100.00")))
+        line_ttc = round_dzd(declared_line_ht + line_tva)
+        sum_line_ht = round_dzd(sum_line_ht + declared_line_ht)
+        sum_line_tva = round_dzd(sum_line_tva + line_tva)
+
+        po_line_id = line.get("po_line_id")
+        if po_line_id is not None:
+            po_line = conn.execute(
+                "SELECT * FROM purchase_order_lines WHERE id = ? AND company_id = ?",
+                (po_line_id, company_id),
+            ).fetchone()
+            if not po_line:
+                errors.append(f"LINE_{idx + 1}_PO_LINE_NOT_FOUND:{po_line_id}")
+            else:
+                rem_receivable_to_bill = round_qty(
+                    to_decimal(po_line["qty_received"]) - to_decimal(po_line["qty_invoiced"])
+                )
+                if qty > rem_receivable_to_bill:
+                    errors.append(
+                        f"THREE_WAY_MATCH_QTY_MISMATCH:line={idx + 1},billed={qty:.6f}>unbilled_received={rem_receivable_to_bill:.6f}"
+                    )
+                po_pu = round_qty(po_line["unit_price_dzd"])
+                if abs(pu - po_pu) > to_decimal(price_tolerance_dzd):
+                    errors.append(
+                        f"THREE_WAY_MATCH_PRICE_MISMATCH:line={idx + 1},invoice_pu={pu:.6f}!=po_pu={po_pu:.6f}"
+                    )
+
+        prepared.append(
+            {
+                "po_line_id": po_line_id,
+                "product_id": line.get("product_id"),
+                "description": line.get("description", f"Line {idx + 1}"),
+                "qty": f"{qty:.6f}",
+                "unit_price_dzd": f"{pu:.6f}",
+                "discount_pct": format_dzd(disc),
+                "tax_rate": f"{rate:.1f}",
+                "line_ht_dzd": format_dzd(declared_line_ht),
+                "line_tva_dzd": format_dzd(line_tva),
+                "line_ttc_dzd": format_dzd(line_ttc),
+            }
+        )
+    return errors, prepared, sum_line_ht, sum_line_tva
+
+
+def _validate_invoice_totals(
+    *,
+    ht_dec: Decimal,
+    tva_dec: Decimal,
+    timbre_dec: Decimal,
+    ttc_dec: Decimal,
+    payment_method: str,
+    sum_line_ht: Decimal,
+    sum_line_tva: Decimal,
+    timbre_rule: Any = None,
+) -> List[str]:
+    """Header HT/TVA/TTC reconciliation and the Algerian timbre rule.
+
+    ``timbre_rule`` is the effective-dated rule resolved for this invoice's
+    date (see :func:`dz_erp.localization.resolve_timbre_rule`). When it is
+    omitted the compiled-in constants are used, which is the historical
+    behaviour; callers that have the invoice date must pass it so a configured
+    rule version governs the calculation instead of a constant.
+    """
+    errors: List[str] = []
+    # F-R2-4: zero is legitimate (exempt, fully discounted); a negative total is
+    # not. A credit note carries positive amounts, so a negative header can only
+    # come from a malformed payload — and it would post a negative payable.
+    for label, value in (
+        ("HT", ht_dec),
+        ("TVA", tva_dec),
+        ("TIMBRE", timbre_dec),
+        ("TTC", ttc_dec),
+    ):
+        if value < Decimal("0.00"):
+            errors.append(f"HEADER_AMOUNT_NEGATIVE:{label}={value:.2f}")
+    if sum_line_ht != ht_dec:
+        errors.append(f"HEADER_HT_MISMATCH:sum_lines={sum_line_ht:.2f}!=header_ht={ht_dec:.2f}")
+    if sum_line_tva != tva_dec:
+        errors.append(f"HEADER_TVA_MISMATCH:sum_tva={sum_line_tva:.2f}!=header_tva={tva_dec:.2f}")
+    rule_kwargs = timbre_rule.as_kwargs() if timbre_rule is not None else {}
+    expected_timbre = calculate_droit_de_timbre(
+        ht_dec + tva_dec, payment_method=payment_method, **rule_kwargs
+    )
+    if timbre_dec != expected_timbre:
+        errors.append(
+            f"TIMBRE_MISMATCH:declared={timbre_dec:.2f}!=expected={expected_timbre:.2f}_for_{payment_method}"
+        )
+    expected_ttc = round_dzd(ht_dec + tva_dec + timbre_dec)
+    if ttc_dec != expected_ttc:
+        errors.append(f"TOTAL_TTC_MISMATCH:declared={ttc_dec:.2f}!=expected={expected_ttc:.2f}")
+    return errors
+
+
+def _insert_invoice_lines(conn: Any, company_id: int, invoice_id: int, prepared_lines: List[Dict[str, Any]]) -> None:
+    for pl in prepared_lines:
+        conn.execute(
+            """
+            INSERT INTO supplier_invoice_lines (
+                company_id, invoice_id, po_line_id, product_id, description,
+                qty, unit_price_dzd, discount_pct, tax_rate,
+                line_ht_dzd, line_tva_dzd, line_ttc_dzd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                company_id,
+                invoice_id,
+                pl["po_line_id"],
+                pl["product_id"],
+                pl["description"],
+                pl["qty"],
+                pl["unit_price_dzd"],
+                pl["discount_pct"],
+                pl["tax_rate"],
+                pl["line_ht_dzd"],
+                pl["line_tva_dzd"],
+                pl["line_ttc_dzd"],
+            ),
+        )
+
+
 def _document_review_gate(
     conn: Any,
     db: ERPDatabase,
@@ -245,6 +670,7 @@ def _document_review_gate(
     actor_user_id: int,
     *,
     action: str,
+    audit: bool = True,
 ) -> Optional[FinancialIntegrityError]:
     """Phase 29 fail-closed gate: the linked document's field review must hold.
 
@@ -309,24 +735,31 @@ def _document_review_gate(
             )
         return None
     blocking = evaluation["blocking"]
-    db.append_audit_event(
-        conn=conn,
-        company_id=company_id,
-        actor_user_id=actor_user_id,
-        action_type=f"INVOICE_{action}_BLOCKED_UNREVIEWED",
-        target_model="supplier_invoices",
-        target_id=str(invoice["id"]),
-        after_state={
-            "document_id": document_id,
-            "document_state": doc["workflow_state"],
-            "blocking": blocking[:20],
-            "blocking_truncated": len(blocking) > 20,
-        },
-    )
-    return FinancialIntegrityError(
+    audit_state = {
+        "document_id": document_id,
+        "document_state": doc["workflow_state"],
+        "blocking": blocking[:20],
+        "blocking_truncated": len(blocking) > 20,
+    }
+    if audit:
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            action_type=f"INVOICE_{action}_BLOCKED_UNREVIEWED",
+            target_model="supplier_invoices",
+            target_id=str(invoice["id"]),
+            after_state=audit_state,
+        )
+    # Returned rather than raised: the caller decides, so that a caller which
+    # must roll its transaction back can record the refusal durably afterwards.
+    denial = FinancialIntegrityError(
         "DOCUMENT_REVIEW_UNSATISFIED: invoice cannot proceed while its source document "
         "has undecided, flagged or stale field reviews — " + "; ".join(blocking[:20])
     )
+    denial.audit_action_type = f"INVOICE_{action}_BLOCKED_UNREVIEWED"
+    denial.audit_after_state = audit_state
+    return denial
 
 
 def create_purchase_order(
@@ -667,7 +1100,62 @@ def create_and_validate_supplier_invoice(
     price_tolerance_dzd: str = "0.00",
     branch_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Create a supplier invoice draft and run deterministic validation + 3-way matching."""
+    """Create a supplier invoice draft and run deterministic validation + 3-way matching.
+
+    Phase 33 (P32-F3): a refused attempt is evidence, not a side effect. A
+    second invoice citing a source document that a live invoice already owns is
+    refused outright (one paper, one invoice) and, in every case, a rejected
+    attempt no longer writes the document's ``workflow_state`` — the original
+    invoice and the evidence it relies on are left exactly as they were. The
+    refusal's audit record is committed in its own transaction, after the
+    attempt's rollback, so it survives; the attempted actor, company, document,
+    invoice reference and reason are all recorded.
+    """
+    try:
+        return _create_and_validate_supplier_invoice(
+            db=db,
+            company_id=company_id,
+            user_id=user_id,
+            supplier_id=supplier_id,
+            supplier_invoice_no=supplier_invoice_no,
+            invoice_date=invoice_date,
+            lines=lines,
+            amount_ht_dzd=amount_ht_dzd,
+            amount_tva_dzd=amount_tva_dzd,
+            amount_ttc_dzd=amount_ttc_dzd,
+            amount_timbre_dzd=amount_timbre_dzd,
+            payment_method=payment_method,
+            po_id=po_id,
+            grn_id=grn_id,
+            document_id=document_id,
+            price_tolerance_dzd=price_tolerance_dzd,
+            branch_id=branch_id,
+        )
+    except _RefusedAttempt as refusal:
+        _record_refused_attempt(db, company_id, user_id, refusal)
+        raise
+
+
+def _create_and_validate_supplier_invoice(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    supplier_id: int,
+    supplier_invoice_no: str,
+    invoice_date: str,
+    lines: List[Dict[str, Any]],
+    amount_ht_dzd: Any,
+    amount_tva_dzd: Any,
+    amount_ttc_dzd: Any,
+    amount_timbre_dzd: Any = "0.00",
+    payment_method: str = "BANK_TRANSFER",
+    po_id: Optional[int] = None,
+    grn_id: Optional[int] = None,
+    document_id: Optional[str] = None,
+    price_tolerance_dzd: str = "0.00",
+    branch_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """The creating transaction (see the public wrapper for the refusal contract)."""
     now_iso = datetime.now(timezone.utc).isoformat()
     norm_ref = normalize_invoice_ref(supplier_invoice_no)
     fiscal_year = int(invoice_date[:4])
@@ -701,21 +1189,33 @@ def create_and_validate_supplier_invoice(
             raise TenantIsolationError("Supplier does not belong to target company.")
 
         # Phase 29: a draft may cite a source document only while that document
-        # is still in review. Linking a document that already backs an approval
-        # used to overwrite its workflow_state here, desynchronising the
-        # evidence from the approval that relied on it.
+        # is still in review. Phase 33: one paper backs at most one live invoice
+        # — citing a document another invoice already owns would let a second
+        # invoice ride the same evidence (and, before this fix, overwrite the
+        # state that invoice relies on).
         if document_id:
-            linked_doc = conn.execute(
-                "SELECT workflow_state FROM source_documents WHERE id = ? AND company_id = ?",
-                (document_id, company_id),
-            ).fetchone()
-            if not linked_doc:
-                raise TenantIsolationError("Source document does not belong to target company.")
-            if linked_doc["workflow_state"] not in DOCUMENT_LINKABLE_STATES:
-                raise FinancialIntegrityError(
-                    f"DOCUMENT_LINK_STATE_REFUSED: document {document_id} is in state "
-                    f"'{linked_doc['workflow_state']}'; a draft invoice may only cite a "
-                    f"document in one of {DOCUMENT_LINKABLE_STATES}."
+            _assert_document_linkable(conn, company_id, document_id)
+            owner = _live_document_owner(conn, company_id, document_id)
+            if owner is not None:
+                raise _RefusedAttempt(
+                    f"DOCUMENT_ALREADY_INVOICED: source document {document_id} is already cited by "
+                    f"invoice {owner['id']} ('{owner['supplier_invoice_no']}', state "
+                    f"'{owner['workflow_state']}'). One paper backs one invoice: correct that "
+                    f"invoice with POST /api/v1/invoices/{{id}}/revalidate instead of creating a "
+                    f"second one.",
+                    action_type="DUPLICATE_DOCUMENT_INVOICE_ATTEMPT_REFUSED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={
+                        "company_id": company_id,
+                        "document_id": document_id,
+                        "existing_invoice_id": int(owner["id"]),
+                        "existing_invoice_state": owner["workflow_state"],
+                        "attempted_supplier_invoice_no": supplier_invoice_no,
+                        "attempted_supplier_id": supplier_id,
+                        "attempted_amount_ttc_dzd": format_dzd(ttc_dec),
+                        "refusal_reason": "DOCUMENT_ALREADY_INVOICED",
+                    },
                 )
 
         # 1. Validate Algerian supplier identifiers if domestic REEL supplier
@@ -729,111 +1229,41 @@ def create_and_validate_supplier_invoice(
                 validation_errors.extend(id_errs)
 
         # 2. Check exact normalized duplicate & fuzzy near-duplicate
-        existing_invs = conn.execute(
-            """
-            SELECT id, supplier_invoice_no, normalized_invoice_no, amount_ttc_dzd, workflow_state
-            FROM supplier_invoices
-            WHERE company_id = ? AND supplier_id = ? AND fiscal_year = ?
-              AND workflow_state NOT IN ('Rejected', 'DuplicateRejected')
-              AND invoice_type = 'IN_INVOICE'
-            """,
-            (company_id, supplier_id, fiscal_year),
-        ).fetchall()
-
-        is_exact_dup = False
-        for ex in existing_invs:
-            if ex["normalized_invoice_no"] == norm_ref:
-                is_exact_dup = True
-                validation_errors.append(f"EXACT_DUPLICATE_INVOICE_REF_OF_ID_{ex['id']}")
-                break
-            dist = levenshtein_distance(ex["normalized_invoice_no"], norm_ref)
-            if dist <= 2 and abs(to_decimal(ex["amount_ttc_dzd"]) - ttc_dec) <= Decimal("1.00"):
-                validation_errors.append(
-                    f"FUZZY_DUPLICATE_SUSPECTED:existing='{ex['supplier_invoice_no']}',dist={dist}"
-                )
+        duplicate_errors, is_exact_dup = _duplicate_invoice_errors(
+            conn,
+            company_id=company_id,
+            supplier_id=supplier_id,
+            fiscal_year=fiscal_year,
+            norm_ref=norm_ref,
+            ttc_dec=ttc_dec,
+        )
+        validation_errors.extend(duplicate_errors)
 
         # 3. Validate line arithmetic, tax rates, Timbre, and 3-way match against PO/Receipt
-        sum_line_ht = Decimal("0.00")
-        sum_line_tva = Decimal("0.00")
-        prepared_lines: List[Dict[str, Any]] = []
-
-        for idx, line in enumerate(lines):
-            qty = round_qty(line["qty"])
-            pu = round_qty(line["unit_price_dzd"])
-            disc = to_decimal(line.get("discount_pct", "0.00"))
-            rate = to_decimal(line.get("tax_rate", "19.0"))
-            if rate not in (Decimal("0.0"), Decimal("9.0"), Decimal("19.0")):
-                validation_errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
-            # Documented business rule (Phase 31): a discount is a percentage
-            # in [0, 100] inclusive. A negative or >100 discount is refused as
-            # a validation error — never clamped into range — so the invoice
-            # stays in NeedsReview and cannot be submitted.
-            if disc < Decimal("0.00") or disc > Decimal("100.00"):
-                validation_errors.append(f"LINE_{idx + 1}_DISCOUNT_OUT_OF_RANGE:{disc}")
-
-            expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
-            declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
-            if declared_line_ht != expected_line_ht:
-                validation_errors.append(
-                    f"LINE_{idx + 1}_HT_MATH_MISMATCH:declared={declared_line_ht:.2f}!=expected={expected_line_ht:.2f}"
-                )
-
-            line_tva = round_dzd(declared_line_ht * (rate / Decimal("100.00")))
-            line_ttc = round_dzd(declared_line_ht + line_tva)
-            sum_line_ht = round_dzd(sum_line_ht + declared_line_ht)
-            sum_line_tva = round_dzd(sum_line_tva + line_tva)
-
-            po_line_id = line.get("po_line_id")
-            if po_line_id is not None:
-                po_line = conn.execute(
-                    "SELECT * FROM purchase_order_lines WHERE id = ? AND company_id = ?",
-                    (po_line_id, company_id),
-                ).fetchone()
-                if not po_line:
-                    validation_errors.append(f"LINE_{idx + 1}_PO_LINE_NOT_FOUND:{po_line_id}")
-                else:
-                    rem_receivable_to_bill = round_qty(
-                        to_decimal(po_line["qty_received"]) - to_decimal(po_line["qty_invoiced"])
-                    )
-                    if qty > rem_receivable_to_bill:
-                        validation_errors.append(
-                            f"THREE_WAY_MATCH_QTY_MISMATCH:line={idx + 1},billed={qty:.6f}>unbilled_received={rem_receivable_to_bill:.6f}"
-                        )
-                    po_pu = round_qty(po_line["unit_price_dzd"])
-                    if abs(pu - po_pu) > to_decimal(price_tolerance_dzd):
-                        validation_errors.append(
-                            f"THREE_WAY_MATCH_PRICE_MISMATCH:line={idx + 1},invoice_pu={pu:.6f}!=po_pu={po_pu:.6f}"
-                        )
-
-            prepared_lines.append(
-                {
-                    "po_line_id": po_line_id,
-                    "product_id": line.get("product_id"),
-                    "description": line.get("description", f"Line {idx + 1}"),
-                    "qty": f"{qty:.6f}",
-                    "unit_price_dzd": f"{pu:.6f}",
-                    "discount_pct": format_dzd(disc),
-                    "tax_rate": f"{rate:.1f}",
-                    "line_ht_dzd": format_dzd(declared_line_ht),
-                    "line_tva_dzd": format_dzd(line_tva),
-                    "line_ttc_dzd": format_dzd(line_ttc),
-                }
+        line_errors, prepared_lines, sum_line_ht, sum_line_tva = _validate_invoice_lines(
+            conn,
+            company_id=company_id,
+            lines=lines,
+            price_tolerance_dzd=price_tolerance_dzd,
+            vat_rates=resolve_vat_rates(conn, company_id, invoice_date),
+        )
+        validation_errors.extend(line_errors)
+        # Effective-dated configuration: the rule in force on the invoice date
+        # governs the stamp duty, not whatever constants the code was built with.
+        # A configured-but-not-applicable rule raises rather than guessing.
+        timbre_rule = resolve_timbre_rule(conn, company_id, invoice_date)
+        validation_errors.extend(
+            _validate_invoice_totals(
+                ht_dec=ht_dec,
+                tva_dec=tva_dec,
+                timbre_dec=timbre_dec,
+                ttc_dec=ttc_dec,
+                payment_method=payment_method,
+                sum_line_ht=sum_line_ht,
+                sum_line_tva=sum_line_tva,
+                timbre_rule=timbre_rule,
             )
-
-        if sum_line_ht != ht_dec:
-            validation_errors.append(f"HEADER_HT_MISMATCH:sum_lines={sum_line_ht:.2f}!=header_ht={ht_dec:.2f}")
-        if sum_line_tva != tva_dec:
-            validation_errors.append(f"HEADER_TVA_MISMATCH:sum_tva={sum_line_tva:.2f}!=header_tva={tva_dec:.2f}")
-
-        expected_timbre = calculate_droit_de_timbre(ht_dec + tva_dec, payment_method=payment_method)
-        if timbre_dec != expected_timbre:
-            validation_errors.append(
-                f"TIMBRE_MISMATCH:declared={timbre_dec:.2f}!=expected={expected_timbre:.2f}_for_{payment_method}"
-            )
-
-        expected_ttc = round_dzd(ht_dec + tva_dec + timbre_dec)
-        if ttc_dec != expected_ttc:
-            validation_errors.append(f"TOTAL_TTC_MISMATCH:declared={ttc_dec:.2f}!=expected={expected_ttc:.2f}")
+        )
 
         if is_exact_dup:
             wf_state = "DuplicateRejected"
@@ -878,36 +1308,26 @@ def create_and_validate_supplier_invoice(
         )
         inv_id = int(cur.lastrowid)
 
-        for pl in prepared_lines:
-            conn.execute(
-                """
-                INSERT INTO supplier_invoice_lines (
-                    company_id, invoice_id, po_line_id, product_id, description,
-                    qty, unit_price_dzd, discount_pct, tax_rate,
-                    line_ht_dzd, line_tva_dzd, line_ttc_dzd
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    company_id,
-                    inv_id,
-                    pl["po_line_id"],
-                    pl["product_id"],
-                    pl["description"],
-                    pl["qty"],
-                    pl["unit_price_dzd"],
-                    pl["discount_pct"],
-                    pl["tax_rate"],
-                    pl["line_ht_dzd"],
-                    pl["line_tva_dzd"],
-                    pl["line_ttc_dzd"],
-                ),
-            )
+        _insert_invoice_lines(conn, company_id, inv_id, prepared_lines)
 
-        if document_id:
-            conn.execute(
-                "UPDATE source_documents SET workflow_state = ? WHERE id = ? AND company_id = ?",
-                (wf_state, document_id, company_id),
-            )
+        # Phase 40 (F-04): record which stamp-duty rule this invoice was
+        # validated against, and the inputs the amount was computed from, so the
+        # calculation can be replayed after the configuration has moved on.
+        persist_invoice_timbre_provenance(
+            conn,
+            company_id=company_id,
+            invoice_id=inv_id,
+            rule=timbre_rule,
+            base_amount=ht_dec + tva_dec,
+            payment_method=payment_method,
+            computed_amount=timbre_dec,
+            now_iso=now_iso,
+            stage="validation",
+        )
+
+        # Phase 33 (P32-F3): a refused attempt never writes the document state.
+        if document_id and wf_state != "DuplicateRejected":
+            _refresh_document_state(conn, company_id, document_id, wf_state, invoice_id=inv_id)
 
         db.append_audit_event(
             conn=conn,
@@ -922,11 +1342,348 @@ def create_and_validate_supplier_invoice(
                 "payload_sha256": payload_hash,
             },
         )
+        if wf_state == "DuplicateRejected":
+            # The attempt is recorded as its own refusal, independent of the
+            # document it cited and of the invoice it duplicates.
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=user_id,
+                action_type="DUPLICATE_INVOICE_ATTEMPT_RECORDED",
+                target_model="supplier_invoices",
+                target_id=str(inv_id),
+                after_state={
+                    "company_id": company_id,
+                    "document_id": document_id,
+                    "attempted_supplier_invoice_no": supplier_invoice_no,
+                    "attempted_supplier_id": supplier_id,
+                    "attempted_amount_ttc_dzd": format_dzd(ttc_dec),
+                    "validation_errors": validation_errors,
+                    "document_state_touched": False,
+                    "refusal_reason": "EXACT_DUPLICATE_INVOICE_REF",
+                },
+            )
         return {
             "invoice_id": inv_id,
             "workflow_state": wf_state,
             "validation_errors": validation_errors,
             "payload_sha256": payload_hash,
+        }
+
+
+def revalidate_supplier_invoice(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    invoice_id: int,
+    *,
+    lines: Optional[List[Dict[str, Any]]] = None,
+    supplier_invoice_no: Optional[str] = None,
+    invoice_date: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    amount_ht_dzd: Any = None,
+    amount_tva_dzd: Any = None,
+    amount_timbre_dzd: Any = None,
+    amount_ttc_dzd: Any = None,
+    price_tolerance_dzd: str = "0.00",
+) -> Dict[str, Any]:
+    """Correct and re-validate a rejected-or-unvalidated draft in place (P32-F2).
+
+    The lifecycle this establishes, on the *same* invoice identity:
+
+    ``NeedsReview | DuplicateRejected`` --(correct + re-validate)-->
+    ``Validated | NeedsReview | DuplicateRejected``
+
+    Every prerequisite is re-run from the corrected payload, exactly as
+    creation runs it: Algerian identifier checks, tenant-scoped duplicate
+    detection (ignoring this invoice itself, so a correction is never mistaken
+    for a re-creation), per-line arithmetic/TVA/discount bounds/3-way match,
+    header HT/TVA reconciliation, the timbre rule, the TTC total, and the
+    document's link state. The payload hash is recomputed, so a previously
+    rejected validation result can never authorize posting: an approval can
+    only ever be granted against the hash that was validated *and* approved.
+
+    Illegal transitions are refused rather than ignored. ``PendingApproval``,
+    ``Approved`` and ``Posted`` are not correctable here — an approved or posted
+    record is never rewritten (the reversal credit note is the accounting
+    remedy); ``Rejected`` is terminal. Each attempt appends its own audit event
+    carrying the previous validation result, so the history of failed validation
+    attempts is preserved rather than overwritten.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db.transaction() as conn:
+        _check_user_and_tenant(conn, company_id, user_id, ("clerk", "accountant", "admin"))
+        inv = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ?",
+            (invoice_id, company_id),
+        ).fetchone()
+        if not inv:
+            raise TenantIsolationError("Invoice not found in target company.")
+
+        previous_state = inv["workflow_state"]
+        if previous_state not in REVISABLE_INVOICE_STATES:
+            raise FinancialIntegrityError(
+                f"INVOICE_REVALIDATION_STATE_REFUSED: invoice {invoice_id} is in state "
+                f"'{previous_state}'; only {REVISABLE_INVOICE_STATES} may be corrected and "
+                "re-validated. An approved or posted record is never rewritten — use a reversal "
+                "credit note — and a rejected invoice is terminal."
+            )
+        if inv["invoice_type"] != "IN_INVOICE":
+            raise FinancialIntegrityError(
+                "INVOICE_REVALIDATION_NOT_APPLICABLE: a credit note follows the reversal "
+                "workflow, not invoice re-validation."
+            )
+
+        sup = conn.execute(
+            "SELECT * FROM partners WHERE id = ? AND company_id = ?",
+            (inv["supplier_id"], company_id),
+        ).fetchone()
+        if not sup:
+            raise TenantIsolationError("Supplier does not belong to target company.")
+
+        new_no = supplier_invoice_no if supplier_invoice_no is not None else inv["supplier_invoice_no"]
+        new_date = invoice_date if invoice_date is not None else inv["invoice_date"]
+        new_method = (
+            payment_method if payment_method is not None else inv["payment_method"]
+        ).upper()
+        if new_method not in ("CASH", "BANK_TRANSFER", "CHEQUE"):
+            raise ValueError(f"UNSUPPORTED_PAYMENT_METHOD:{new_method}")
+        norm_ref = normalize_invoice_ref(new_no)
+        fiscal_year = int(new_date[:4])
+
+        if lines is None:
+            # No new line set supplied: re-validate the stored lines as they are.
+            stored_lines = conn.execute(
+                "SELECT * FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ? ORDER BY id",
+                (company_id, invoice_id),
+            ).fetchall()
+            lines = [
+                {
+                    "po_line_id": row["po_line_id"],
+                    "product_id": row["product_id"],
+                    "description": row["description"],
+                    "qty": row["qty"],
+                    "unit_price_dzd": row["unit_price_dzd"],
+                    "discount_pct": row["discount_pct"],
+                    "tax_rate": row["tax_rate"],
+                    "line_ht_dzd": row["line_ht_dzd"],
+                }
+                for row in stored_lines
+            ]
+        if not lines:
+            raise FinancialIntegrityError(
+                "INVOICE_HAS_NO_LINES: an invoice without lines cannot be validated."
+            )
+
+        ht_dec = round_dzd(amount_ht_dzd if amount_ht_dzd is not None else inv["amount_ht_dzd"])
+        tva_dec = round_dzd(amount_tva_dzd if amount_tva_dzd is not None else inv["amount_tva_dzd"])
+        timbre_dec = round_dzd(
+            amount_timbre_dzd if amount_timbre_dzd is not None else inv["amount_timbre_dzd"]
+        )
+        ttc_dec = round_dzd(amount_ttc_dzd if amount_ttc_dzd is not None else inv["amount_ttc_dzd"])
+
+        payload_hash = compute_invoice_payload_hash(
+            supplier_id=inv["supplier_id"],
+            supplier_invoice_no=new_no,
+            invoice_date=new_date,
+            payment_method=new_method,
+            amount_ht_dzd=format_dzd(ht_dec),
+            amount_tva_dzd=format_dzd(tva_dec),
+            amount_timbre_dzd=format_dzd(timbre_dec),
+            amount_ttc_dzd=format_dzd(ttc_dec),
+            lines=lines,
+        )
+
+        validation_errors: List[str] = []
+        if sup["country_code"] == "DZ" and sup["tax_regime"] == "REEL":
+            if not sup["nif"]:
+                validation_errors.append("SUPPLIER_MISSING_NIF")
+            else:
+                validation_errors.extend(
+                    validate_algerian_identifiers(
+                        nif=sup["nif"], nis=sup["nis"], ai=sup["ai"], rc=sup["rc"]
+                    )
+                )
+
+        duplicate_errors, is_exact_dup = _duplicate_invoice_errors(
+            conn,
+            company_id=company_id,
+            supplier_id=inv["supplier_id"],
+            fiscal_year=fiscal_year,
+            norm_ref=norm_ref,
+            ttc_dec=ttc_dec,
+            exclude_invoice_id=invoice_id,
+        )
+        validation_errors.extend(duplicate_errors)
+
+        line_errors, prepared_lines, sum_line_ht, sum_line_tva = _validate_invoice_lines(
+            conn,
+            company_id=company_id,
+            lines=lines,
+            price_tolerance_dzd=price_tolerance_dzd,
+            vat_rates=resolve_vat_rates(conn, company_id, inv["invoice_date"]),
+        )
+        validation_errors.extend(line_errors)
+        timbre_rule = resolve_timbre_rule(conn, company_id, inv["invoice_date"])
+        validation_errors.extend(
+            _validate_invoice_totals(
+                ht_dec=ht_dec,
+                tva_dec=tva_dec,
+                timbre_dec=timbre_dec,
+                ttc_dec=ttc_dec,
+                payment_method=new_method,
+                sum_line_ht=sum_line_ht,
+                sum_line_tva=sum_line_tva,
+                timbre_rule=timbre_rule,
+            )
+        )
+
+        if inv["document_id"]:
+            _assert_document_linkable(conn, company_id, inv["document_id"])
+
+        if is_exact_dup:
+            wf_state = "DuplicateRejected"
+        elif validation_errors:
+            wf_state = "NeedsReview"
+        else:
+            wf_state = "Validated"
+
+        # The line set is replaced, not patched: a correction is a new validated
+        # payload, and any stale line-level state must not survive it. The state
+        # guard above guarantees the invoice never posted, so no journal entry
+        # can be affected.
+        conn.execute(
+            "DELETE FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ?",
+            (company_id, invoice_id),
+        )
+        _insert_invoice_lines(conn, company_id, invoice_id, prepared_lines)
+
+        conn.execute(
+            """
+            UPDATE supplier_invoices
+            SET supplier_invoice_no = ?, normalized_invoice_no = ?, fiscal_year = ?,
+                invoice_date = ?, payment_method = ?,
+                amount_ht_dzd = ?, amount_tva_dzd = ?, amount_timbre_dzd = ?, amount_ttc_dzd = ?,
+                workflow_state = ?, validation_errors_json = ?, payload_sha256 = ?,
+                approved_payload_sha256 = NULL
+            WHERE id = ? AND company_id = ?
+            """,
+            (
+                new_no,
+                norm_ref,
+                fiscal_year,
+                new_date,
+                new_method,
+                format_dzd(ht_dec),
+                format_dzd(tva_dec),
+                format_dzd(timbre_dec),
+                format_dzd(ttc_dec),
+                wf_state,
+                json.dumps(validation_errors),
+                payload_hash,
+                invoice_id,
+                company_id,
+            ),
+        )
+
+        # The corrected invoice's own calculation is the one that matters now.
+        persist_invoice_timbre_provenance(
+            conn,
+            company_id=company_id,
+            invoice_id=invoice_id,
+            rule=timbre_rule,
+            base_amount=ht_dec + tva_dec,
+            payment_method=new_method,
+            computed_amount=timbre_dec,
+            now_iso=now_iso,
+            stage="revalidation",
+        )
+
+        invalidated = _invalidate_approval_requests(
+            conn,
+            company_id,
+            invoice_id,
+            reason="PAYLOAD_REVALIDATED",
+            actor_user_id=user_id,
+            now_iso=now_iso,
+        )
+        if inv["document_id"]:
+            _refresh_document_state(
+                conn, company_id, inv["document_id"], wf_state, invoice_id=invoice_id
+            )
+
+        previous_errors = json.loads(inv["validation_errors_json"] or "[]")
+        revision_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM audit_events
+                WHERE company_id = ? AND action_type = 'INVOICE_REVALIDATED' AND target_id = ?
+                """,
+                (company_id, str(invoice_id)),
+            ).fetchone()["n"]
+        ) + 1
+
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type="INVOICE_REVISED",
+            target_model="supplier_invoices",
+            target_id=str(invoice_id),
+            before_state={
+                "supplier_invoice_no": inv["supplier_invoice_no"],
+                "invoice_date": inv["invoice_date"],
+                "payment_method": inv["payment_method"],
+                "amount_ht_dzd": inv["amount_ht_dzd"],
+                "amount_tva_dzd": inv["amount_tva_dzd"],
+                "amount_timbre_dzd": inv["amount_timbre_dzd"],
+                "amount_ttc_dzd": inv["amount_ttc_dzd"],
+                "payload_sha256": inv["payload_sha256"],
+                "workflow_state": previous_state,
+            },
+            after_state={
+                "supplier_invoice_no": new_no,
+                "invoice_date": new_date,
+                "payment_method": new_method,
+                "amount_ht_dzd": format_dzd(ht_dec),
+                "amount_tva_dzd": format_dzd(tva_dec),
+                "amount_timbre_dzd": format_dzd(timbre_dec),
+                "amount_ttc_dzd": format_dzd(ttc_dec),
+                "payload_sha256": payload_hash,
+                "line_count": len(prepared_lines),
+            },
+        )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type="INVOICE_REVALIDATED",
+            target_model="supplier_invoices",
+            target_id=str(invoice_id),
+            before_state={
+                "workflow_state": previous_state,
+                "validation_errors": previous_errors,
+                "payload_sha256": inv["payload_sha256"],
+                "validation_attempt": revision_count - 1,
+            },
+            after_state={
+                "workflow_state": wf_state,
+                "validation_errors": validation_errors,
+                "payload_sha256": payload_hash,
+                "validation_attempt": revision_count,
+                "invalidated_approval_request_ids": invalidated,
+                "document_id": inv["document_id"],
+            },
+        )
+        return {
+            "invoice_id": invoice_id,
+            "previous_state": previous_state,
+            "workflow_state": wf_state,
+            "validation_errors": validation_errors,
+            "payload_sha256": payload_hash,
+            "revised": payload_hash != inv["payload_sha256"],
+            "validation_attempt": revision_count,
+            "invalidated_approval_request_ids": invalidated,
         }
 
 
@@ -939,8 +1696,11 @@ def submit_invoice_for_approval(
     """Transition a Validated invoice to PendingApproval.
 
     Phase 29: refused while the linked document's field review is not
-    satisfied (see :func:`_document_review_gate`). The refusal is audited and
-    committed before the error is raised, hence the denial-variable structure.
+    satisfied (see :func:`_document_review_gate`). Phase 33 (P32-F4): the
+    request is bound to the exact payload hash *and* to a digest of the review
+    evidence it was raised against, so a later modification cannot be approved
+    by an earlier decision. The refusal is audited and committed before the
+    error is raised, hence the denial-variable structure.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     denial: Optional[Exception] = None
@@ -962,25 +1722,42 @@ def submit_invoice_for_approval(
             conn, db, company_id, inv, user_id, action="SUBMIT"
         )
         if denial is None:
+            fingerprint = _source_review_fingerprint(conn, company_id, inv["document_id"])
+            # A previous request for an older payload (or older evidence) is
+            # superseded, never left pending alongside the new one.
+            superseded = _invalidate_approval_requests(
+                conn,
+                company_id,
+                invoice_id,
+                reason="SUPERSEDED_BY_NEW_SUBMISSION",
+                actor_user_id=user_id,
+                now_iso=now_iso,
+                include_approved=False,
+            )
             cur = conn.execute(
                 """
                 INSERT INTO approval_requests (
                     company_id, target_model, target_id, payload_sha256,
-                    requested_by_id, requested_at, decision
-                ) VALUES (?, 'supplier_invoices', ?, ?, ?, ?, 'PENDING')
+                    source_review_fingerprint, requested_by_id, requested_at, decision
+                ) VALUES (?, 'supplier_invoices', ?, ?, ?, ?, ?, 'PENDING')
                 """,
-                (company_id, invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
+                (
+                    company_id,
+                    invoice_id,
+                    inv["payload_sha256"],
+                    fingerprint,
+                    inv["created_by_id"],
+                    now_iso,
+                ),
             )
             req_id = int(cur.lastrowid)
             conn.execute(
                 "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
                 (invoice_id,),
             )
-            if inv["document_id"]:
-                conn.execute(
-                    "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
-                    (inv["document_id"],),
-                )
+            _refresh_document_state(
+                conn, company_id, inv["document_id"], "PendingApproval", invoice_id=invoice_id
+            )
 
             db.append_audit_event(
                 conn=conn,
@@ -989,12 +1766,20 @@ def submit_invoice_for_approval(
                 action_type="APPROVAL_REQUESTED",
                 target_model="supplier_invoices",
                 target_id=str(invoice_id),
-                after_state={"approval_request_id": req_id, "workflow_state": "PendingApproval"},
+                after_state={
+                    "approval_request_id": req_id,
+                    "workflow_state": "PendingApproval",
+                    "payload_sha256": inv["payload_sha256"],
+                    "source_review_fingerprint": fingerprint,
+                    "superseded_request_ids": superseded,
+                },
             )
             result = {
                 "invoice_id": invoice_id,
                 "approval_request_id": req_id,
                 "workflow_state": "PendingApproval",
+                "payload_sha256": inv["payload_sha256"],
+                "superseded_request_ids": superseded,
             }
     if denial is not None:
         raise denial
@@ -1017,6 +1802,14 @@ def decide_invoice_approval(
     transaction, so a document that was satisfied at submit time but disturbed
     since cannot ride an approval through. Rejection (the safe direction) is
     never gated. The refusal is audited and committed before it is raised.
+
+    Phase 33 (P32-F4): the pending request must still describe *this* invoice
+    payload and the same review evidence. A request raised against an older
+    payload (an invoice modified after submission) or older evidence is
+    invalidated and the approval is refused; the invoice returns to
+    ``NeedsReview`` so the corrected payload can be re-validated and submitted
+    again rather than being stranded. An obsolete request can therefore never
+    authorize a modified invoice.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     denial: Optional[Exception] = None
@@ -1037,6 +1830,7 @@ def decide_invoice_approval(
             raise AuthorizationError(
                 "SEGREGATION_OF_DUTIES_VIOLATION: Invoice creator cannot approve their own invoice."
             )
+
         if approve:
             denial = _document_review_gate(
                 conn, db, company_id, inv, approver_user_id, action="APPROVAL"
@@ -1052,6 +1846,68 @@ def decide_invoice_approval(
         ).fetchone()
         if not req:
             raise FinancialIntegrityError("No pending approval request found.")
+
+        if approve and denial is None:
+            stale_reasons: List[str] = []
+            if req["payload_sha256"] != inv["payload_sha256"]:
+                stale_reasons.append("PAYLOAD_HASH_CHANGED_SINCE_REQUEST")
+            bound_fingerprint = (
+                req["source_review_fingerprint"] if "source_review_fingerprint" in req.keys() else None
+            )
+            if bound_fingerprint is not None:
+                current_fingerprint = _source_review_fingerprint(conn, company_id, inv["document_id"])
+                if current_fingerprint != bound_fingerprint:
+                    stale_reasons.append("SOURCE_REVIEW_CHANGED_SINCE_REQUEST")
+            if stale_reasons:
+                conn.execute(
+                    """
+                    UPDATE approval_requests
+                    SET decision = 'INVALIDATED', decided_by_id = ?, decided_at = ?, reason = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        approver_user_id,
+                        now_iso,
+                        "STALE_APPROVAL_REQUEST:" + ",".join(stale_reasons),
+                        req["id"],
+                    ),
+                )
+                # Recovery, not a dead end: the payload can be re-validated and
+                # submitted again (P32-F2), so a stale request never strands the
+                # invoice in PendingApproval with no legal exit.
+                conn.execute(
+                    """
+                    UPDATE supplier_invoices
+                    SET workflow_state = 'NeedsReview', approved_payload_sha256 = NULL
+                    WHERE id = ?
+                    """,
+                    (invoice_id,),
+                )
+                _refresh_document_state(
+                    conn, company_id, inv["document_id"], "NeedsReview", invoice_id=invoice_id
+                )
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=company_id,
+                    actor_user_id=approver_user_id,
+                    action_type="APPROVAL_REQUEST_STALE_REFUSED",
+                    target_model="supplier_invoices",
+                    target_id=str(invoice_id),
+                    after_state={
+                        "approval_request_id": int(req["id"]),
+                        "stale_reasons": stale_reasons,
+                        "request_payload_sha256": req["payload_sha256"],
+                        "current_payload_sha256": inv["payload_sha256"],
+                        "workflow_state": "NeedsReview",
+                    },
+                )
+                denial = FinancialIntegrityError(
+                    "APPROVAL_REQUEST_STALE: the approval request was raised against a different "
+                    "invoice payload or different review evidence — "
+                    + "; ".join(stale_reasons)
+                    + ". The request has been invalidated and the invoice returned to NeedsReview; "
+                    "re-validate and submit it again."
+                )
 
         if denial is None:
             decision_str = "APPROVED" if approve else "REJECTED"
@@ -1114,9 +1970,33 @@ def modify_draft_invoice_line(
     user_id: int,
     invoice_id: int,
     line_id: int,
-    new_unit_price_dzd: Any,
+    new_unit_price_dzd: Any = None,
+    *,
+    new_qty: Any = None,
+    new_discount_pct: Any = None,
 ) -> Dict[str, Any]:
-    """Modify a draft/approved (unposted) invoice line, recomputing payload_sha256 and invalidating prior approvals."""
+    """Correct an unposted invoice line and invalidate every approval it voids.
+
+    Quantity, unit price and discount are each independently correctable; the
+    line's net, its TVA, the header totals and the timbre are re-derived from
+    the corrected values with the same exact-Decimal rules validation uses, and
+    the payload digest is recomputed.
+
+    Phase 33 (P32-F4): a financial modification invalidates the approval basis
+    *explicitly*. Every pending or approved request for this invoice becomes
+    ``INVALIDATED`` (with the reason and the acting user recorded), the approved
+    payload digest is cleared, the invoice returns to ``NeedsReview`` and the
+    source document follows it — the invoice state and the evidence state can no
+    longer disagree, and no orphaned ``PENDING`` request is left behind. A
+    fresh approval therefore requires a fresh submission of the corrected
+    payload. ``approved_by_id`` / ``approved_at`` are retained as historical
+    attribution; the operative digest is cleared.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if new_unit_price_dzd is None and new_qty is None and new_discount_pct is None:
+        raise ValueError(
+            "Nothing to modify: supply at least one of new_unit_price_dzd, new_qty, new_discount_pct."
+        )
     with db.transaction() as conn:
         _check_user_and_tenant(conn, company_id, user_id, ("clerk", "accountant", "admin"))
         inv = conn.execute(
@@ -1129,19 +2009,28 @@ def modify_draft_invoice_line(
             raise FinancialIntegrityError("Posted invoice cannot be edited; use a reversal credit note.")
 
         line = conn.execute(
-            "SELECT * FROM supplier_invoice_lines WHERE id = ? AND invoice_id = ?",
-            (line_id, invoice_id),
+            "SELECT * FROM supplier_invoice_lines WHERE id = ? AND invoice_id = ? AND company_id = ?",
+            (line_id, invoice_id, company_id),
         ).fetchone()
         if not line:
             raise ValueError("Invoice line not found.")
 
-        qty = round_qty(line["qty"])
-        pu = round_qty(new_unit_price_dzd)
+        qty = round_qty(line["qty"] if new_qty is None else new_qty)
+        pu = round_qty(line["unit_price_dzd"] if new_unit_price_dzd is None else new_unit_price_dzd)
+        disc = to_decimal(line["discount_pct"] if new_discount_pct is None else new_discount_pct)
+        rate = to_decimal(line["tax_rate"])
+        if qty <= Decimal("0.000000"):
+            raise FinancialIntegrityError(f"LINE_QTY_NONPOSITIVE:{qty}")
+        if pu <= Decimal("0.000000"):
+            # F-R2-4: a correction may not introduce the amount the validation
+            # gate refuses.
+            raise FinancialIntegrityError(f"LINE_PRICE_NONPOSITIVE:{pu}")
+        if disc < Decimal("0.00") or disc > Decimal("100.00"):
+            raise FinancialIntegrityError(f"LINE_DISCOUNT_OUT_OF_RANGE:{disc}")
+
         # The line's persisted discount is part of the net-amount formula; a
         # price edit must re-derive the line amount from it, not silently drop
         # the discount the line (and the payload hash) carries.
-        disc = to_decimal(line["discount_pct"])
-        rate = to_decimal(line["tax_rate"])
         new_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
         new_tva = round_dzd(new_ht * (rate / Decimal("100.00")))
         new_ttc = round_dzd(new_ht + new_tva)
@@ -1149,19 +2038,36 @@ def modify_draft_invoice_line(
         conn.execute(
             """
             UPDATE supplier_invoice_lines
-            SET unit_price_dzd = ?, line_ht_dzd = ?, line_tva_dzd = ?, line_ttc_dzd = ?
-            WHERE id = ?
+            SET qty = ?, unit_price_dzd = ?, discount_pct = ?,
+                line_ht_dzd = ?, line_tva_dzd = ?, line_ttc_dzd = ?
+            WHERE id = ? AND company_id = ?
             """,
-            (f"{pu:.6f}", format_dzd(new_ht), format_dzd(new_tva), format_dzd(new_ttc), line_id),
+            (
+                f"{qty:.6f}",
+                f"{pu:.6f}",
+                format_dzd(disc),
+                format_dzd(new_ht),
+                format_dzd(new_tva),
+                format_dzd(new_ttc),
+                line_id,
+                company_id,
+            ),
         )
 
         all_lines = [
             dict(r)
-            for r in conn.execute("SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)).fetchall()
+            for r in conn.execute(
+                "SELECT * FROM supplier_invoice_lines WHERE company_id = ? AND invoice_id = ? ORDER BY id",
+                (company_id, invoice_id),
+            ).fetchall()
         ]
         tot_ht = sum((to_decimal(r["line_ht_dzd"]) for r in all_lines), Decimal("0.00"))
         tot_tva = sum((to_decimal(r["line_tva_dzd"]) for r in all_lines), Decimal("0.00"))
-        timbre = calculate_droit_de_timbre(tot_ht + tot_tva, payment_method=inv["payment_method"])
+        timbre = calculate_droit_de_timbre(
+            tot_ht + tot_tva,
+            payment_method=inv["payment_method"],
+            **resolve_timbre_rule(conn, company_id, inv["invoice_date"]).as_kwargs(),
+        )
         tot_ttc = round_dzd(tot_ht + tot_tva + timbre)
 
         new_hash = compute_invoice_payload_hash(
@@ -1176,23 +2082,46 @@ def modify_draft_invoice_line(
             lines=all_lines,
         )
 
-        # Invalidate any existing approvals if payload hash changed
-        conn.execute(
-            """
-            UPDATE approval_requests
-            SET decision = 'INVALIDATED', reason = 'PAYLOAD_MODIFIED_AFTER_APPROVAL'
-            WHERE company_id = ? AND target_model = 'supplier_invoices' AND target_id = ? AND decision = 'APPROVED'
-            """,
-            (company_id, invoice_id),
+        invalidated = _invalidate_approval_requests(
+            conn,
+            company_id,
+            invoice_id,
+            reason="PAYLOAD_MODIFIED_AFTER_SUBMISSION",
+            actor_user_id=user_id,
+            now_iso=now_iso,
         )
         conn.execute(
             """
             UPDATE supplier_invoices
             SET amount_ht_dzd = ?, amount_tva_dzd = ?, amount_timbre_dzd = ?, amount_ttc_dzd = ?,
-                payload_sha256 = ?, workflow_state = 'NeedsReview'
-            WHERE id = ?
+                payload_sha256 = ?, approved_payload_sha256 = NULL, workflow_state = 'NeedsReview'
+            WHERE id = ? AND company_id = ?
             """,
-            (format_dzd(tot_ht), format_dzd(tot_tva), format_dzd(timbre), format_dzd(tot_ttc), new_hash, invoice_id),
+            (
+                format_dzd(tot_ht),
+                format_dzd(tot_tva),
+                format_dzd(timbre),
+                format_dzd(tot_ttc),
+                new_hash,
+                invoice_id,
+                company_id,
+            ),
+        )
+        # The stamp duty was recomputed above from the rule in force for this
+        # invoice date, so the recorded provenance moves with the amount.
+        persist_invoice_timbre_provenance(
+            conn,
+            company_id=company_id,
+            invoice_id=invoice_id,
+            rule=resolve_timbre_rule(conn, company_id, inv["invoice_date"]),
+            base_amount=tot_ht + tot_tva,
+            payment_method=inv["payment_method"],
+            computed_amount=timbre,
+            now_iso=now_iso,
+            stage="draft_modification",
+        )
+        document_synced = _refresh_document_state(
+            conn, company_id, inv["document_id"], "NeedsReview", invoice_id=invoice_id
         )
         db.append_audit_event(
             conn=conn,
@@ -1201,14 +2130,40 @@ def modify_draft_invoice_line(
             action_type="INVOICE_DRAFT_MODIFIED_APPROVAL_INVALIDATED",
             target_model="supplier_invoices",
             target_id=str(invoice_id),
-            before_state={"payload_sha256": inv["payload_sha256"], "workflow_state": inv["workflow_state"]},
-            after_state={"payload_sha256": new_hash, "workflow_state": "NeedsReview"},
+            before_state={
+                "payload_sha256": inv["payload_sha256"],
+                "workflow_state": inv["workflow_state"],
+                "approved_payload_sha256": inv["approved_payload_sha256"],
+                "line": {
+                    "id": int(line["id"]),
+                    "qty": line["qty"],
+                    "unit_price_dzd": line["unit_price_dzd"],
+                    "discount_pct": line["discount_pct"],
+                    "line_ht_dzd": line["line_ht_dzd"],
+                },
+            },
+            after_state={
+                "payload_sha256": new_hash,
+                "workflow_state": "NeedsReview",
+                "approved_payload_sha256": None,
+                "line": {
+                    "id": int(line["id"]),
+                    "qty": f"{qty:.6f}",
+                    "unit_price_dzd": f"{pu:.6f}",
+                    "discount_pct": format_dzd(disc),
+                    "line_ht_dzd": format_dzd(new_ht),
+                },
+                "invalidated_approval_request_ids": invalidated,
+                "source_document_state_synced": document_synced,
+            },
         )
         return {
             "invoice_id": invoice_id,
             "payload_sha256": new_hash,
             "workflow_state": "NeedsReview",
             "approval_invalidated": inv["workflow_state"] in ("PendingApproval", "Approved"),
+            "invalidated_approval_request_ids": invalidated,
+            "source_document_state_synced": document_synced,
         }
 
 
@@ -1225,7 +2180,129 @@ def post_supplier_invoice(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     req_hash = hashlib.sha256(f"{company_id}:{invoice_id}:POST".encode("utf-8")).hexdigest()
+    try:
+        return _post_supplier_invoice_in_transaction(
+            db, company_id, accountant_user_id, invoice_id, idempotency_key, req_hash, now_iso
+        )
+    except _RefusedAttempt as refusal:
+        _refuse_posting_and_recover(db, company_id, accountant_user_id, invoice_id, refusal, now_iso)
+        raise refusal from None
 
+
+def _refuse_posting_and_recover(
+    db: ERPDatabase,
+    company_id: int,
+    user_id: int,
+    invoice_id: int,
+    refusal: _RefusedAttempt,
+    now_iso: str,
+) -> None:
+    """Record a posting refusal durably and leave the invoice repairable.
+
+    A review that turns invalid between approval and posting must not strand the
+    invoice: once it is ``Approved`` the source document refuses field decisions
+    (``FIELD_REVIEW_CLOSED``), so refusing the posting alone would leave the
+    invoice permanently unpostable with nobody able to resolve the evidence.
+    The refused attempt is therefore followed, in one transaction, by the same
+    recoverable transition Phase 33 defined for a stale approval: the approval
+    basis is invalidated with a reason and an actor, the approved digest is
+    cleared, and the invoice and its document both return to ``NeedsReview``.
+    Nothing is posted and the ledger is untouched; the repaired invoice has to
+    be re-validated, re-submitted and re-approved by the normal workflow.
+    """
+    with db.transaction() as conn:
+        inv = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ? AND company_id = ?",
+            (invoice_id, company_id),
+        ).fetchone()
+        if inv is not None and inv["workflow_state"] == "Approved":
+            _invalidate_approval_requests(
+                conn,
+                company_id,
+                invoice_id,
+                reason="SOURCE_REVIEW_INVALID_AT_POSTING",
+                actor_user_id=user_id,
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE supplier_invoices
+                SET workflow_state = 'NeedsReview', approved_payload_sha256 = NULL
+                WHERE id = ? AND company_id = ?
+                """,
+                (invoice_id, company_id),
+            )
+            _refresh_document_state(
+                conn, company_id, inv["document_id"], "NeedsReview", invoice_id=invoice_id
+            )
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type=refusal.audit_action_type,
+            target_model=refusal.audit_target_model,
+            target_id=refusal.audit_target_id,
+            after_state={**refusal.audit_after_state, "invoice_returned_to": "NeedsReview"},
+        )
+
+
+def _line_price_variance(
+    conn: Any,
+    company_id: int,
+    line: Any,
+    qty: Any,
+    line_ht: Any,
+) -> tuple[Any, Any, Any]:
+    """Receipt value, invoice value and their difference for one storable line.
+
+    The GRN credits the clearing account at the *receipt* cost recorded on
+    ``goods_receipt_lines``; the invoice debits the same account at the
+    *invoice* price. When those differ, the gap does not belong on the clearing
+    account — it is a purchase price variance. This returns:
+
+    * ``received_value`` — what the matched receipts put on the clearing account;
+    * ``invoice_value`` — what the invoice charges for the same quantity;
+    * ``variance`` — ``invoice_value - received_value`` (positive = invoiced
+      above receipt).
+
+    A line with no receipt history, or a non-storable line, has no receipt cost
+    to compare against and returns a zero variance, leaving the historical
+    treatment untouched.
+    """
+    zero = Decimal("0.00")
+    if not line["product_id"] or not line["po_line_id"]:
+        return line_ht, line_ht, zero
+    received = conn.execute(
+        """
+        SELECT COALESCE(SUM(CAST(grl.qty_done AS REAL) * CAST(grl.unit_cost_dzd AS REAL)), 0) AS v,
+               COALESCE(SUM(CAST(grl.qty_done AS REAL)), 0) AS q
+        FROM goods_receipt_lines grl
+        JOIN goods_receipts gr ON gr.id = grl.grn_id
+        WHERE grl.po_line_id = ? AND grl.company_id = ? AND gr.company_id = ?
+        """,
+        (line["po_line_id"], company_id, company_id),
+    ).fetchone()
+    received_qty = Decimal(str(received["q"] or 0))
+    if received_qty <= zero:
+        return line_ht, line_ht, zero
+    # Receipt cost per unit, then the share of it attributable to the invoiced
+    # quantity. Quantising keeps the two halves exactly additive: the split can
+    # never introduce a rounding cent of its own.
+    unit_received = Decimal(str(received["v"])) / received_qty
+    received_value = round_dzd(unit_received * qty)
+    invoice_value = round_dzd(line_ht)
+    return received_value, invoice_value, (invoice_value - received_value)
+
+
+def _post_supplier_invoice_in_transaction(
+    db: ERPDatabase,
+    company_id: int,
+    accountant_user_id: int,
+    invoice_id: int,
+    idempotency_key: str,
+    req_hash: str,
+    now_iso: str,
+) -> Dict[str, Any]:
     with db.transaction() as conn:
         _check_user_and_tenant(conn, company_id, accountant_user_id, ("accountant", "admin"))
 
@@ -1261,18 +2338,85 @@ def post_supplier_invoice(
                 "APPROVAL_PAYLOAD_HASH_MISMATCH: Invoice was modified after approval; re-validation and approval required."
             )
 
+        # Phase 40 (F-04): the stamp duty was validated against a specific rule
+        # version. If the operator installed a different one in the meantime, the
+        # amount in the approval is no longer the amount the current law would
+        # produce, and posting it silently would move money under a rule nobody
+        # approved. Refuse and make the operator re-validate.
+        posting_rule = resolve_timbre_rule(conn, company_id, inv["invoice_date"])
+        assert_timbre_rule_unchanged(inv, posting_rule)
+        if not inv["timbre_rule_version"]:
+            # Legacy invoice (validated before provenance existed). Record the
+            # rule that governs *this posting* — a fact about now, not a claim
+            # about the past, and the snapshot says stage="posting".
+            persist_invoice_timbre_provenance(
+                conn,
+                company_id=company_id,
+                invoice_id=invoice_id,
+                rule=posting_rule,
+                base_amount=to_decimal(inv["amount_ht_dzd"]) + to_decimal(inv["amount_tva_dzd"]),
+                payment_method=inv["payment_method"],
+                computed_amount=to_decimal(inv["amount_timbre_dzd"]),
+                now_iso=now_iso,
+                stage="posting",
+            )
+        else:
+            record_timbre_rule_version(
+                conn,
+                company_id=company_id,
+                rule=posting_rule,
+                now_iso=now_iso,
+                invoice_id=invoice_id,
+            )
+
+        # Phase 34 defence in depth: the review gate is re-run at posting, in the
+        # same IMMEDIATE transaction that writes the journal entry. An extraction
+        # row that appeared (or a decision that went stale) between approval and
+        # posting cannot therefore reach the ledger — posting enforces the same
+        # fail-closed rule as submission and approval, not a weaker one. The
+        # denial is raised *after* the transaction commits its audit event, so
+        # the refusal is durable evidence (commit-then-refuse).
+        post_gate_denial = _document_review_gate(
+            conn, db, company_id, inv, accountant_user_id, action="POSTING", audit=False
+        )
+        if post_gate_denial is not None:
+            # Leave the transaction by rolling it back, then record the refusal
+            # in its own transaction: nothing of the posting attempt survives,
+            # but the refusal does.
+            raise _RefusedAttempt(
+                str(post_gate_denial),
+                action_type=post_gate_denial.audit_action_type,
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state=post_gate_denial.audit_after_state,
+            )
+
         lines = conn.execute("SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?", (invoice_id,)).fetchall()
         je_lines: List[Dict[str, Any]] = []
+        # F-R2-3: receipt-cost vs invoice-price differences, and whether an
+        # approved account exists to carry them.
+        price_variances: List[Dict[str, Any]] = []
+        unallocated_variances: List[Dict[str, Any]] = []
 
         # Re-verify 3-way match at posting time under transaction lock and update qty_invoiced
         for line in lines:
             qty = round_qty(line["qty"])
             line_ht = round_dzd(line["line_ht_dzd"])
+            if qty <= Decimal("0.000000") or line_ht < Decimal("0.00"):
+                # F-R2-4: the gates above refuse this; posting re-checks rather
+                # than trusting the stored row, because a negative amount here
+                # would book a negative payable and a negative net line whose
+                # debit/credit totals still balance.
+                raise FinancialIntegrityError(
+                    f"LINE_AMOUNT_NONPOSITIVE:qty={qty},line_ht={line_ht}"
+                )
             debit_acct = "600"
+            variance_account: Optional[str] = None
             if line["product_id"]:
                 prod = conn.execute("SELECT * FROM products WHERE id = ?", (line["product_id"],)).fetchone()
                 if prod and prod["is_storable"]:
                     debit_acct = prod["clearing_account_code"]  # 380 Achats stockés clearing account
+                    variance_account = prod["price_variance_account_code"]
                 elif prod:
                     debit_acct = prod["expense_account_code"]
 
@@ -1293,15 +2437,52 @@ def post_supplier_invoice(
                     (f"{new_invoiced:.6f}", po_line["id"]),
                 )
 
+            # Split the debit between what the stock was actually received at
+            # (the clearing account, so the GRN credit nets out) and the
+            # difference caused by a price change between receipt and invoice.
+            received_value, invoice_value, variance = _line_price_variance(
+                conn, company_id, line, qty, line_ht
+            )
             je_lines.append(
                 {
                     "account_code": debit_acct,
                     "label": f"Bill {inv['supplier_invoice_no']} - {line['description']}",
-                    "debit_dzd": format_dzd(line_ht),
+                    "debit_dzd": format_dzd(received_value if variance != 0 else line_ht),
                     "credit_dzd": "0.00",
                     "g50_tag": "E3B91_base",
                 }
             )
+            if variance != 0:
+                record = {
+                    "line_id": int(line["id"]),
+                    "product_id": line["product_id"],
+                    "qty": f"{qty:.6f}",
+                    "received_value_dzd": format_dzd(received_value),
+                    "invoice_value_dzd": format_dzd(invoice_value),
+                    "variance_dzd": format_dzd(variance),
+                    "variance_account_code": variance_account,
+                }
+                if variance_account:
+                    # Positive variance = invoiced above receipt (extra cost);
+                    # negative = invoiced below (a gain). Book it on the side
+                    # that keeps the entry balanced, never both.
+                    je_lines.append(
+                        {
+                            "account_code": variance_account,
+                            "label": f"Écart de prix {inv['supplier_invoice_no']} - {line['description']}",
+                            "debit_dzd": format_dzd(variance) if variance > 0 else "0.00",
+                            "credit_dzd": format_dzd(-variance) if variance < 0 else "0.00",
+                            "g50_tag": None,
+                        }
+                    )
+                    price_variances.append(record)
+                else:
+                    # No approved accounting policy: the invoice bears the full
+                    # invoice price on the clearing account exactly as before,
+                    # but the residual is named, quantified and audited rather
+                    # than left unexplained (see docs/REMAINING_BLOCKERS.md LB-2).
+                    je_lines[-1]["debit_dzd"] = format_dzd(line_ht)
+                    unallocated_variances.append(record)
 
         tva_dec = round_dzd(inv["amount_tva_dzd"])
         if tva_dec > Decimal("0.00"):
@@ -1410,7 +2591,9 @@ def post_supplier_invoice(
             (accountant_user_id, now_iso, je_id, invoice_id),
         )
         if inv["document_id"]:
-            conn.execute("UPDATE source_documents SET workflow_state = 'Posted' WHERE id = ?", (inv["document_id"],))
+            _refresh_document_state(
+                conn, company_id, inv["document_id"], "Posted", invoice_id=invoice_id
+            )
 
         result = {
             "invoice_id": invoice_id,
@@ -1419,8 +2602,33 @@ def post_supplier_invoice(
             "entry_number": entry_no,
             "total_debit_dzd": format_dzd(total_debit),
             "total_credit_dzd": format_dzd(total_credit),
+            "price_variances": price_variances,
+            "unallocated_price_variances": unallocated_variances,
             "idempotent_replay": False,
         }
+        if unallocated_variances:
+            # The residual is real and stays on the clearing account because no
+            # approved account exists to carry it. Naming it here means it is
+            # never an unexplained balance: an auditor can match the amount to
+            # a policy decision (docs/REMAINING_BLOCKERS.md LB-2).
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=accountant_user_id,
+                action_type="PRICE_VARIANCE_UNALLOCATED",
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state={
+                    "invoice_id": invoice_id,
+                    "reason": "NO_PRICE_VARIANCE_ACCOUNT_CONFIGURED",
+                    "note": (
+                        "Receipt cost and invoice price differ; the difference remains on the "
+                        "clearing account because no variance account is configured for the "
+                        "product. Configure products.price_variance_account_code to book it."
+                    ),
+                    "lines": unallocated_variances,
+                },
+            )
         conn.execute(
             """
             INSERT INTO idempotency_records (company_id, idempotency_key, operation, request_sha256, status, response_json, created_at)
@@ -1459,6 +2667,12 @@ def reverse_posted_invoice(
             (company_id, idempotency_key),
         ).fetchone()
         if idem:
+            # The key identifies the operation, not the request: a replay must
+            # also carry the fingerprint recorded with it. A different reason is
+            # a different reversal request, so it is refused rather than being
+            # answered with someone else's cached success.
+            if idem["request_sha256"] != req_hash:
+                raise FinancialIntegrityError("IDEMPOTENCY_KEY_PAYLOAD_MISMATCH")
             cached = json.loads(idem["response_json"])
             cached["idempotent_replay"] = True
             return cached
@@ -1572,6 +2786,14 @@ def reverse_posted_invoice(
             ),
         )
         cn_id = int(ic.lastrowid)
+        # The credit note reverses a specific calculation: it cites the same rule
+        # identity as the invoice it reverses, never whatever is configured now.
+        inherit_timbre_provenance(
+            conn,
+            company_id=company_id,
+            source_invoice_id=original_invoice_id,
+            target_invoice_id=cn_id,
+        )
 
         # Decrement po_line.qty_invoiced so a replacement bill can be matched
         orig_lines = conn.execute(
@@ -1624,9 +2846,36 @@ def create_reversal_request(
     idempotency_key: str,
 ) -> Dict[str, Any]:
     """Create a Credit Note (Facture d'Avoir) reversal request in NeedsReview state.
-    
+
     The reversal must go through approval workflow before posting.
+
+    Phase 33 (P32-F5): reversing an invoice twice would double-credit the
+    payable, and the only thing preventing it used to be the
+    ``UNIQUE(company_id, entry_number)`` constraint — which leaked as an
+    unhandled ``sqlite3.IntegrityError`` (HTTP 500). The conflict is now a
+    domain refusal: an existing live credit note for the invoice is detected
+    *before* any insert, the refusal is audited with its actor and reason, and
+    the residual constraint violation (a concurrent attempt that slipped past
+    the check) is mapped to the same stable error instead of escaping.
     """
+    try:
+        return _create_reversal_request(
+            db, company_id, accountant_user_id, original_invoice_id, reason, idempotency_key
+        )
+    except _RefusedAttempt as refusal:
+        _record_refused_attempt(db, company_id, accountant_user_id, refusal)
+        raise
+
+
+def _create_reversal_request(
+    db: ERPDatabase,
+    company_id: int,
+    accountant_user_id: int,
+    original_invoice_id: int,
+    reason: str,
+    idempotency_key: str,
+) -> Dict[str, Any]:
+    """The creating transaction (see the public wrapper for the refusal contract)."""
     now_iso = datetime.now(timezone.utc).isoformat()
     req_hash = hashlib.sha256(f"{company_id}:{original_invoice_id}:REVERSE:{reason}".encode("utf-8")).hexdigest()
 
@@ -1637,6 +2886,28 @@ def create_reversal_request(
             (company_id, idempotency_key),
         ).fetchone()
         if idem:
+            # The key identifies the operation, not the request: a replay must
+            # also carry the fingerprint recorded with it. A different reason is
+            # a different reversal request, so it is refused rather than being
+            # answered with someone else's cached success. The refusal is
+            # audited by the public wrapper after the attempt is rolled back.
+            if idem["request_sha256"] != req_hash:
+                raise _RefusedAttempt(
+                    "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH: this idempotency key was already used for "
+                    "a different reversal request; the recorded result is not a replay of this one.",
+                    action_type="REVERSAL_ATTEMPT_REFUSED_IDEMPOTENCY_MISMATCH",
+                    target_model="supplier_invoices",
+                    target_id=str(original_invoice_id),
+                    after_state={
+                        "company_id": company_id,
+                        "original_invoice_id": original_invoice_id,
+                        "idempotency_key": idempotency_key,
+                        "attempted_reason": reason,
+                        "attempted_request_sha256": req_hash,
+                        "recorded_request_sha256": idem["request_sha256"],
+                        "refusal_reason": "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH",
+                    },
+                )
             cached = json.loads(idem["response_json"])
             cached["idempotent_replay"] = True
             return cached
@@ -1648,6 +2919,39 @@ def create_reversal_request(
         if not orig or orig["workflow_state"] != "Posted":
             raise FinancialIntegrityError("Only a Posted invoice can be reversed.")
 
+        # P32-F5: refuse a second reversal of the same invoice before touching
+        # the ledger. A rejected/discarded credit note does not block a retry.
+        existing_reversal = conn.execute(
+            """
+            SELECT id, workflow_state, supplier_invoice_no
+            FROM supplier_invoices
+            WHERE company_id = ? AND invoice_type = 'IN_REFUND' AND reversal_of_invoice_id = ?
+              AND workflow_state NOT IN ('Rejected', 'DuplicateRejected')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (company_id, original_invoice_id),
+        ).fetchone()
+        if existing_reversal is not None:
+            raise _RefusedAttempt(
+                f"INVOICE_ALREADY_REVERSED: invoice {original_invoice_id} already has credit note "
+                f"{existing_reversal['id']} ('{existing_reversal['supplier_invoice_no']}') in state "
+                f"'{existing_reversal['workflow_state']}'. A second reversal would credit the "
+                "payable twice.",
+                action_type="REVERSAL_ATTEMPT_REFUSED_DUPLICATE",
+                target_model="supplier_invoices",
+                target_id=str(original_invoice_id),
+                after_state={
+                    "company_id": company_id,
+                    "original_invoice_id": original_invoice_id,
+                    "existing_credit_note_id": int(existing_reversal["id"]),
+                    "existing_credit_note_state": existing_reversal["workflow_state"],
+                    "existing_credit_note_number": existing_reversal["supplier_invoice_no"],
+                    "attempted_reason": reason,
+                    "refusal_reason": "INVOICE_ALREADY_REVERSED",
+                },
+            )
+
         orig_je = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (orig["journal_entry_id"],)).fetchone()
         orig_je_lines = conn.execute(
             "SELECT * FROM journal_entry_lines WHERE journal_entry_id = ?",
@@ -1656,27 +2960,46 @@ def create_reversal_request(
 
         rev_entry_no = f"RAVOIR/{orig['fiscal_year']}/{original_invoice_id:05d}"
         # Create journal entry in DRAFT state (will be POSTED after approval)
-        jcur = conn.execute(
-            """
-            INSERT INTO journal_entries (
-                company_id, branch_id, entry_number, journal_code, entry_date,
-                state, source_model, source_id, source_document_id,
-                total_debit_dzd, total_credit_dzd, reversal_entry_id,
-                posted_by_id, posted_at
-            ) VALUES (?, ?, ?, 'ACH', ?, 'DRAFT', 'supplier_invoices_reversal', ?, ?, ?, ?, ?, NULL, NULL)
-            """,
-            (
-                company_id,
-                orig["branch_id"],
-                rev_entry_no,
-                now_iso[:10],
-                str(original_invoice_id),
-                orig["document_id"],
-                orig_je["total_credit_dzd"],
-                orig_je["total_debit_dzd"],
-                orig_je["id"],
-            ),
-        )
+        try:
+            jcur = conn.execute(
+                """
+                INSERT INTO journal_entries (
+                    company_id, branch_id, entry_number, journal_code, entry_date,
+                    state, source_model, source_id, source_document_id,
+                    total_debit_dzd, total_credit_dzd, reversal_entry_id,
+                    posted_by_id, posted_at
+                ) VALUES (?, ?, ?, 'ACH', ?, 'DRAFT', 'supplier_invoices_reversal', ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    company_id,
+                    orig["branch_id"],
+                    rev_entry_no,
+                    now_iso[:10],
+                    str(original_invoice_id),
+                    orig["document_id"],
+                    orig_je["total_credit_dzd"],
+                    orig_je["total_debit_dzd"],
+                    orig_je["id"],
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # A concurrent attempt won the race between the check above and this
+            # insert. Same domain refusal, never a leaked driver error.
+            raise _RefusedAttempt(
+                f"INVOICE_ALREADY_REVERSED: a reversal entry ('{rev_entry_no}') for invoice "
+                f"{original_invoice_id} was created concurrently.",
+                action_type="REVERSAL_ATTEMPT_REFUSED_DUPLICATE",
+                target_model="supplier_invoices",
+                target_id=str(original_invoice_id),
+                after_state={
+                    "company_id": company_id,
+                    "original_invoice_id": original_invoice_id,
+                    "attempted_entry_number": rev_entry_no,
+                    "attempted_reason": reason,
+                    "refusal_reason": "REVERSAL_ENTRY_UNIQUE_CONFLICT",
+                    "driver_error": str(exc),
+                },
+            ) from exc
         rev_je_id = int(jcur.lastrowid)
 
         for ol in orig_je_lines:
@@ -1744,10 +3067,18 @@ def create_reversal_request(
             ),
         )
         cn_id = int(ic.lastrowid)
+        # The credit note reverses a specific calculation: it cites the same rule
+        # identity as the invoice it reverses, never whatever is configured now.
+        inherit_timbre_provenance(
+            conn,
+            company_id=company_id,
+            source_invoice_id=original_invoice_id,
+            target_invoice_id=cn_id,
+        )
 
         # Copy invoice lines to the credit note
         orig_lines = conn.execute(
-            "SELECT * FROM supplier_invoice_lines WHERE invoice_id = ?",
+            "SELECT * FROM supplier_invoice_lines WHERE invoice_id = ? ORDER BY id",
             (original_invoice_id,),
         ).fetchall()
         for line in orig_lines:
@@ -1824,25 +3155,40 @@ def submit_reversal_for_approval(
                 f"Cannot request approval for reversal in state '{inv['workflow_state']}'; must be 'NeedsReview'."
             )
 
+        _invalidate_approval_requests(
+            conn,
+            company_id,
+            reversal_invoice_id,
+            reason="SUPERSEDED_BY_NEW_SUBMISSION",
+            actor_user_id=user_id,
+            now_iso=now_iso,
+            target_model="supplier_invoices_reversal",
+            include_approved=False,
+        )
         cur = conn.execute(
             """
             INSERT INTO approval_requests (
                 company_id, target_model, target_id, payload_sha256,
-                requested_by_id, requested_at, decision
-            ) VALUES (?, 'supplier_invoices_reversal', ?, ?, ?, ?, 'PENDING')
+                source_review_fingerprint, requested_by_id, requested_at, decision
+            ) VALUES (?, 'supplier_invoices_reversal', ?, ?, ?, ?, ?, 'PENDING')
             """,
-            (company_id, reversal_invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
+            (
+                company_id,
+                reversal_invoice_id,
+                inv["payload_sha256"],
+                _source_review_fingerprint(conn, company_id, inv["document_id"]),
+                inv["created_by_id"],
+                now_iso,
+            ),
         )
         req_id = int(cur.lastrowid)
         conn.execute(
             "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
             (reversal_invoice_id,),
         )
-        if inv["document_id"]:
-            conn.execute(
-                "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
-                (inv["document_id"],),
-            )
+        _refresh_document_state(
+            conn, company_id, inv["document_id"], "PendingApproval", invoice_id=reversal_invoice_id
+        )
 
         db.append_audit_event(
             conn=conn,

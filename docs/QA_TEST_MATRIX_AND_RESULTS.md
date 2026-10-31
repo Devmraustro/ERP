@@ -902,3 +902,250 @@ the Phase 30 head). Per module: `review_policy.py` 91 % (281 statements), `intak
 `decimal_utils.py` 89 %. The total count reconciles exactly: 723 (Phase 30 head) + 11 new
 instances = 734. No test was suppressed, weakened or skipped to obtain this result. CI for this
 exact head is reported with the PR, not assumed.
+
+---
+
+## 2H. Phase 33 — recoverable invoice lifecycle and accounting error semantics (`tests/test_phase33_invoice_lifecycle.py`) — `Passed`
+
+Phase 32's independent audit (`docs/PHASE32_INDEPENDENT_INTEGRATION_AUDIT.md`)
+reported four reproducible findings and, by design, did not fix them. Phase 33
+reproduces all four on the verified Phase 32 head
+`2a2b9b14de0cf792356488d645f20e5c4d4ad565` and remediates them with one rule
+behind every change: **an attempt that is refused must leave the books, the
+evidence and the audit chain exactly as they were, while the refusal itself
+becomes durable, attributed evidence.**
+
+| Finding | What was wrong (Phase 32 tree) | What the test now pins |
+| :--- | :--- | :--- |
+| P32-F2 | `NeedsReview` was terminal: no service re-validated an invoice, and re-creating it was refused as a duplicate of the broken draft | correction + re-validation on the same invoice identity, every prerequisite re-run, previous attempts preserved, digest recomputed so a rejected result can never authorise posting |
+| P32-F3 | a refused duplicate attempt rewrote the *original* document's `workflow_state` to `DuplicateRejected` | no document write on refusal, one paper = one live invoice, refusal audited independently |
+| P32-F4 | modification left the document `PendingApproval` and the request `PENDING` while the invoice became `NeedsReview`, with no binding to the approved payload | explicit `INVALIDATED` + state sync + payload/fingerprint binding, legacy `NULL` binding tolerated |
+| P32-F5 | a second reversal escaped as `sqlite3.IntegrityError` (HTTP 500) from a unique constraint | `INVOICE_ALREADY_REVERSED` domain refusal (409) detected before the insert, attributed audit, exactly one credit note under a race |
+
+| Test group | Cases | What they prove |
+| :--- | ---: | :--- |
+| `test_f2_*` | 12 | correct-in-place and post the result; repeated re-validation is idempotent and each attempt is audited; a failed re-validation is recorded and still blocks submission; the approved digest is the corrected one, never the rejected one; `PendingApproval`/`Approved`/`Posted`/`Rejected` refuse re-validation (4 params); a duplicate-rejected draft is correctable; re-validation cannot steal another invoice's reference; the reviewed-source gate survives re-validation; document-less legacy invoices are correctable; role and tenant scoping; HTTP `200` / `409` |
+| `test_f3_*` | 3 | the refused attempt leaves both documents and the original invoice byte-identical, records actor/company/document/reference/reason with `document_state_touched: false`; a second live invoice on an owned document is refused `DOCUMENT_ALREADY_INVOICED` with one invoice remaining; duplicate detection stays company-scoped |
+| `test_f4_*` | 8 | price/quantity/discount modifications each invalidate the approval, re-derive the exact line net and header totals and invalidate every request with actor + reason; document and invoice stay consistent; a corrected manual invoice can be resubmitted and approved; an obsolete request cannot authorise a modified invoice; approval is bound to the source-review fingerprint; a legacy `NULL` fingerprint still works; rejection of a modified invoice is never gated |
+| `test_f5_*` | 5 | first reversal succeeds and the second is a domain conflict with an attributed audit event and an HTTP `409`; a two-thread `threading.Barrier` race yields exactly one credit note and a balanced ledger; cross-company attempts are refused; an entry-number collision is mapped to `REVERSAL_ENTRY_UNIQUE_CONFLICT` |
+| `test_invariants_*`, `test_migration_*` | 3 | posted journal entries and their lines are never rewritten by any later refused operation; a full lifecycle (broken → corrected → posted → reversed) stays balanced with one `INVOICE_REVALIDATED` and one `REVERSAL_POSTED`; the additive `approval_requests.source_review_fingerprint` column migrates idempotently, and a `DROP COLUMN` round trip proves the pre-Phase-33 schema still reads and approves |
+
+Exact measured evidence on this host (Linux, Python **3.11.2**, pytest 8.3.5,
+coverage 6.0.0, ruff 0.14.0, hash-locked dependency set):
+
+* `pytest tests/test_phase33_invoice_lifecycle.py -q` → **33 passed**, 4.96 s.
+* `pytest tests/test_phase32_cross_phase_integration_audit.py tests/test_phase29_ocr_review_policy.py -q` → **92 passed, 1 skipped**, 12.02 s. The three Phase 32 characterisation tests (`T`, `U`, `W`) were converted into resolution assertions and `T2` was added; none was deleted, skipped or weakened.
+* `pytest tests/test_phase8_upload_boundary_and_ci.py -q` → 204 passed, 2 failed. Both failures are the interpreter floor (`Safe backup restore requires Python 3.11.17+`), an environment limit of this host, not an application result.
+* Full suite with coverage → **796 passed, 20 failed, 7 skipped**, 162.05 s, coverage **77 %** (7,116 statements, 1,623 missed; `api.py` 86 %, `database.py` 94 %, `procurement_stock.py` 87 %). All 20 failures are the same interpreter floor in `security_audit.py`'s restore gate; no application assertion failed, and none is recorded as a pass.
+* `ruff check dz_erp tests tools` → All checks passed; `compileall` clean; `tools/verify_dependency_graph.py` → OK; `tools/generate_hash_lock.py --check` → 51 distributions / 1,277 hashes, no drift; `cv2 4.11.0` and `RapidOCR` import OK; `tools/staging_acceptance.py` → 38/40 (the two failures are the restore check and its dependent restart check, same interpreter floor); `tools/risk_register_counts.py` → 36 rows consistent; `pytest tests/test_phase22_register_and_docs_consistency.py` → 15 passed; `git diff --check` clean; secret scan over the whole diff → no matches.
+* The protected-operation pin in `tests/test_phase8_upload_boundary_and_ci.py` moves from 28 to 29 with the new `POST /api/v1/invoices/{invoice_id}/revalidate` endpoint documented in the comment — the assertion itself is not relaxed.
+
+No Algerian SCF, TVA, timbre or G50 rule was changed and no external production
+gate was marked verified.
+
+**CI on the exact published SHA `f8facf036f76d75b7ed6e23bd5d4e9adbc12062e`
+(GitHub Actions run 41089747877) — 3/3 jobs success, zero non-success steps:**
+Python 3.11 (hash-locked install, dependency graph, cv2/RapidOCR import, ruff,
+compileall, full suite with coverage, staging acceptance, risk-register
+validation), Python 3.12 (full suite; the two Linux-only steps are skipped by
+design), and Windows 3.12.10 (rotation/migration/backup/recovery suite and
+staging acceptance). The restore paths that this host cannot run below Python
+3.11.17 are consequently proven green in CI — on CI, not here. Per-step log text
+is not retrievable from this sandbox (the log host is outside the allowlist), so
+the CI evidence cited is the run, job and per-step conclusions from the GitHub
+API, not copied console output.
+
+---
+
+## 2I. Phase 34 — duplicate OCR extraction rows must not fail open (`tests/test_phase34_ocr_duplicate_row_integrity.py`) — `Passed`
+
+Phase 29 made field review *enforced*, but it assumed one logical field is one row
+in `ocr_extracted_fields`. Nothing enforced that assumption, and the policy did not
+act on the flag it raised. Reproduced on `852f389f` before any change: a fully
+reviewed document plus a second `amount_ht_dzd` row holding `5555.00` produced
+`conflicting_extraction` on the field **and** `satisfied: true`, so the invoice
+validated and was submitted for approval.
+
+| Weakness | Resolution |
+|---|---|
+| `conflicting_extraction` / duplicate rows never affected `satisfied` | A duplicate group is its own blocking reason, `DUPLICATE_EXTRACTION_ROWS:<field>`; the field cannot be satisfied at all while the group is unresolved |
+| `rows[0]` was silently adopted as "the" value | The group is reported with every row id (`duplicate_row_ids`), and the evaluated `value` follows the reviewer's explicit selection, never insertion order |
+| A decision keyed by `(field_name, line_index)` authorised any later row | Each decision records `evidence_json` = `{row_ids, selected_row_id, group_size, selected_source}`; satisfaction requires the binding to cover **exactly** the rows present now |
+| Line-level duplicates were blocked only by accident | Line rows are grouped by logical index; a duplicate index blocks quantity, price and discount with the same reason code |
+| Nothing re-checked the review at posting | Posting re-runs the same gate inside the posting transaction; a refusal rolls the attempt back, records the refusal durably, invalidates the approval and returns the invoice to `NeedsReview` (no dead-end) |
+
+| Test | What it proves |
+| --- | --- |
+| `test_1_duplicate_header_rows_with_identical_values_still_block` | Identical duplicates are record-integrity evidence: the system never decides which of two equal rows is redundant |
+| `test_2_duplicate_header_rows_with_different_values_block_until_resolved` | **The regression**: the conflicting duplicate that used to submit is refused at submission and audited |
+| `test_3_duplicate_rows_on_different_pages_block_and_are_all_named` | Page scope does not make a duplicate benign; every row is listed so the reviewer chooses with the evidence visible |
+| `test_4_duplicate_line_rows_with_the_same_index_block_every_element` | A cloned line blocks quantity, price and discount, and the displayed value never follows the clone |
+| `test_5_distinct_line_indices_are_not_duplicates` | Two real lines stay two lines — the fix does not collapse evidence |
+| `test_6_explicit_reviewer_resolution_records_identity_value_and_evidence` | The resolution is attributed (actor, timestamp, note), names the selected row and the whole group, and appears in the audit chain |
+| `test_6b_selection_cannot_name_another_documents_row` | A selection cannot be pointed at another document's evidence (`EXTRACTION_ROW_NOT_IN_GROUP`) |
+| `test_7_unresolved_duplicates_block_every_required_field_type` | Money, identity and date fields all block, with the right diagnosis (not a misleading "not decided") |
+| `test_8_recorded_alternate_reading_is_a_distinct_concept` | `conflict_values_json` (intake-recorded alternate reading) stays separate from duplicate *rows* and neither masks the other; resolution still works the Phase 29 way |
+| `test_9_a_row_appearing_after_resolution_stales_the_decision` | The binding is to the evidence *set*; a third row re-opens the field, and re-resolution is possible (no dead-end) and idempotent once the set is stable |
+| `test_10_submission_is_blocked_and_the_refusal_is_audited` | `INVOICE_SUBMIT_BLOCKED_UNREVIEWED`, invoice stays `Validated`, no approval row, no journal entry |
+| `test_11_approval_is_blocked_when_a_duplicate_appears_after_submission` | `INVOICE_APPROVAL_BLOCKED_UNREVIEWED`, invoice stays `PendingApproval`, nothing posted |
+| `test_12_posting_re_runs_the_gate_so_a_late_duplicate_cannot_reach_the_ledger` | Posting refuses, records `INVOICE_POSTING_BLOCKED_UNREVIEWED`, invalidates the approval (`SOURCE_REVIEW_INVALID_AT_POSTING`), returns the invoice and document to `NeedsReview`, then the repaired invoice posts exactly once and balances at 1190.00 |
+| `test_13_duplicate_evidence_is_tenant_scoped` | Another tenant cannot decide on the document and sees no part of its duplicate set |
+| `test_14_concurrent_review_and_submission_cannot_race_past_the_gate` | Two threads (resolution + submission) always end in one coherent state, with a valid audit chain |
+| `test_15_evidence_column_migrates_idempotently_and_keeps_legacy_decisions` | `ocr_field_reviews.evidence_json` is additive and nullable; `DROP COLUMN` round trip; legacy `NULL` bindings still satisfy a single-row field and do **not** cover a duplicate set |
+| `test_16_a_flagged_duplicate_cannot_be_confirmed_into_satisfaction` | FLAG/NOT_PRESENT are observations, not selections: neither launders an unresolved group, and no row is deleted |
+| `test_17_transcription_resolves_the_group_without_deleting_rows` | A human transcription supersedes the group, both rows keep their raw evidence, the invoice posts once and balances |
+| `test_18_json_extraction_never_duplicates_a_field` | The intake path itself writes one row per logical field (guards the assumption this phase closes) |
+
+Measured on this host (Linux, CPython 3.11.2, pytest 8.3.5):
+
+* `pytest tests/test_phase34_ocr_duplicate_row_integrity.py -q` → **19 passed**, 4.43 s.
+* Phase 29 + 32 + 33 + OCR/Arabic/doc-consistency suites → **196 passed, 1 skipped** (the skip is the interpreter floor).
+* Full suite → **815 passed, 20 failed, 7 skipped**, 214 s, 77 % coverage; the 20 failures are `diff`-identical to the pre-change baseline and are all `restore_and_verify_backup`'s interpreter floor.
+* `ruff check dz_erp tests tools` → All checks passed; `compileall` clean; risk-register summary consistent.
+
+Nothing was deleted or merged: duplicate extraction rows remain stored evidence.
+No UNIQUE constraint was added, because a constraint cannot distinguish a
+legitimate re-extraction artefact from an operator error, and enforcing one on
+historical data would either fail the migration or silently drop rows.
+
+---
+
+## 2J. Phase 35 — authentication throttling and request logging (`tests/test_phase35_api_rate_limiting_and_request_logging.py`) — `Passed`
+
+The token endpoint accepted unlimited guesses: a wrong password cost a 401 and nothing else,
+while the server paid for a full password hash each time. That is a credential-stuffing target
+and a denial-of-service lever in one. Every request was also unattributable in the log.
+
+| Test | What it proves |
+| --- | --- |
+| `test_sliding_window_counts_and_expires_fail_closed` | The window counts, refuses, keeps counting a refused attempt, and genuinely expires — a throttle, not a lockout |
+| `test_a_disabled_limiter_never_interferes` | `limit=0` disables a rule rather than blocking everything |
+| `test_login_key_is_case_and_space_insensitive_per_account` | `" Admin "` and `"admin"` share one budget; different clients do not |
+| `test_policy_description_is_secret_free` | The operator-facing description contains no credential-bearing field |
+| `test_repeated_wrong_passwords_are_throttled_and_audited` | The 4th attempt is 429 with `Retry-After`, the correct password is **not** verified once throttled, and `SECURITY_AUTH_RATE_LIMITED` is recorded |
+| `test_throttling_one_account_does_not_deny_service_to_another` | Locking `admin_a` leaves `clerk_a` working — no system-wide denial |
+| `test_a_successful_login_clears_the_counter` | Mistyping then succeeding restores the budget |
+| `test_the_throttle_expires_so_no_one_is_locked_out_forever` | After the window, the correct password works again |
+| `test_forwarded_for_cannot_escape_the_limit_without_a_trusted_proxy` | Rotating `X-Forwarded-For` from an untrusted peer still hits 429 — the bypass that matters |
+| `test_a_trusted_proxy_addresses_clients_separately` | Behind a **declared** proxy the forwarded address is the identity: one noisy client does not penalise another |
+| `test_every_response_carries_a_correlation_id` | A supplied `X-Request-Id` is echoed; otherwise a UUIDv4 is issued (including on 401) |
+| `test_request_log_records_path_status_and_duration` | `HTTP_REQUEST` carries method, path, status and a float duration |
+| `test_no_password_or_token_is_ever_logged` | Neither the password, the wrong password, nor the bearer token appears anywhere in the log |
+| `test_the_request_log_lands_in_the_durable_security_sink` | Records reach `JsonlSecurityLog` on disk, still credential-free |
+| `test_global_ceiling_is_off_by_default_and_enforces_when_configured` | 40 requests pass with the default; with `requests_per_minute=5`, attempts 6–7 are 429 and audited with the path |
+| `test_throttle_defaults_come_from_the_environment` | Environment configuration applies, and garbage (`not-a-number`, `-5`, `-1`) falls back to the documented default rather than disabling the control |
+
+Measured (Linux, CPython 3.11.2, pytest 8.3.5): **16 passed**, 2.28 s. The surrounding API and
+authentication suites (`test_phase25_read_api`, `test_phase27_review_api`,
+`test_phase28_user_admin`, `test_phase7_authentication_remediation`,
+`test_phase5_security_audit_backup`) → 99 passed, 1 failed, and that one failure is
+`restore_and_verify_backup`'s Python 3.11.17 interpreter floor, identical to the baseline.
+
+The honest limit of this control is documented rather than hidden: counters live in process
+memory, so the bound is per worker and a multi-replica deployment must also limit at the proxy.
+
+---
+
+## 2K. Phase 36 — accounting arithmetic and effective-dated tax configuration (`tests/test_phase36_accounting_and_tax_configuration.py`) — `Passed`
+
+Detailed rationale and the honest limits are in
+`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md`; this is the evidence table.
+
+| Group | Test | What it proves |
+| --- | --- | --- |
+| Arithmetic | `test_money_is_rounded_half_up_and_floats_are_refused` | Exact `Decimal` money, commercial half-up rounding, binary floats rejected |
+| | `test_header_totals_are_the_sum_of_rounded_lines` | Rounding happens per line, then lines are summed — never a rounded float sum |
+| | `test_discount_is_applied_before_tax_on_the_line_net` | TVA on the discounted net (1900 → 361 → 2261), not on the gross |
+| | `test_tax_breakdown_reconciles_with_the_header` | Σ base = HT, Σ tax = TVA, and the two rates stay separate for the G50 boxes |
+| | `test_ttc_identity_holds_with_and_without_stamp_duty` | TTC = HT + TVA + timbre for CASH/TRANSFER/CHEQUE; non-cash always 0 timbre |
+| | `test_line_order_does_not_change_any_total` | Order independence of every total and of the breakdown |
+| | `test_awkward_quantities_leave_no_sub_centime_residue` | 3 × 0.10 DZD = 0.30, TVA 0.06, no float artefact |
+| Timbre | `test_timbre_threshold_boundary_is_inclusive` | 300.00 → 0.00; 300.01 → the 5.00 minimum |
+| | `test_timbre_rates_minimum_and_cap` | Minimum floor, 1 %/1.5 %/2 % bands, configured maximum |
+| | `test_non_cash_payment_never_carries_stamp_duty` | Any case of BANK_TRANSFER/CHEQUE → 0.00 |
+| Timbre config | `test_no_configured_rule_uses_labelled_builtin_constants` | Unconfigured company uses constants **labelled** `builtin-default-v1` |
+| | `test_resolution_is_by_effective_date_not_by_newest_row` | A 2025 rule still governs a 2025 invoice after a 2026 rule exists; boundaries belong to the rule that includes them |
+| | `test_a_rule_that_is_configured_but_not_yet_in_force_is_never_applied` | Future rule → `TIMBRE_RULE_NOT_EFFECTIVE_ON_DATE`, never silently applied |
+| | `test_a_gap_between_versions_is_refused_rather_than_guessed` | A coverage gap raises instead of substituting a different rate |
+| | `test_malformed_bracket_tables_fail_closed` | Bad JSON and a closed final band both raise |
+| | `test_rules_are_tenant_scoped` | Company 2 never borrows company 1's rule |
+| | `test_the_resolved_rule_changes_the_amount_and_is_named` | Configuration reaches the arithmetic: same base, different duty, version named |
+| | `test_a_bad_invoice_date_is_refused` | Empty/impossible/truncated dates raise |
+| VAT config | `test_vat_rates_fall_back_to_labelled_builtins_only_when_unconfigured` | 0/9/19 only when nothing is configured, and labelled as such |
+| | `test_vat_rates_are_effective_dated_and_versioned` | A 2025-only rate is not acceptable on a 2026 invoice; label names the generation |
+| | `test_an_inactive_rate_is_not_accepted` | `active = 0` rows are ignored |
+| | `test_configured_rates_that_do_not_cover_the_date_are_refused` | `VAT_RATE_NOT_EFFECTIVE_ON_DATE` |
+| | `test_vat_rates_are_tenant_scoped` | Rate tables do not leak across tenants |
+| Integration | `test_invoice_validation_uses_the_configured_rate_set` | A 19 %-only company validates 19 % and **refuses 9 %** even though the built-in constants contain it |
+| | `test_invoice_creation_refuses_an_ambiguous_rate_configuration` | No effective rate row → the invoice is refused, not guessed |
+| G50 | `test_g50_boxes_are_arithmetically_closed` | `E3B110 = précompte + E3B91 + E3B92`, exactly one of payable/carry-forward, `payable − carry = collected − deductions`, every box traceable including E2 |
+| | `test_g50_reports_a_credit_before_it_reports_a_payment` | Credit carried forward, payable zero, statutory status states the sign-off requirement |
+| | `test_g50_refuses_a_cross_tenant_request` | Tenant isolation on the workbook |
+| | `test_g50_for_an_empty_period_is_zero_not_an_error` | Empty period is zeroes, not a crash |
+
+Measured: **29 passed**, 1.84 s. Full suite at the end of the workstream: **890 passed,
+20 failed, 7 skipped**, 231 s, **78 %** coverage, with the failure set `diff`-identical to
+the baseline. (At this phase it was 21: one older test counted records in the durable sink,
+which now also receives `HTTP_REQUEST` entries. It was rewritten to assert the rejections
+**by event** and to additionally assert those request records are credential-free —
+stricter than before, not weaker — and the count returned to the baseline 20.)
+
+### Behaviour changes an operator must know about
+
+1. An invoice dated **before a configured rule's `valid_from`** (e.g. before
+   `2025-01-01`, the seeded timbre version) now **raises** instead of computing with
+   compiled-in constants. That is the intended fail-closed behaviour; add a historical
+   rule version to process backdated invoices.
+2. An invoice whose line rate is **not in the company's configured rate table** now fails
+   validation (invoice stays in `NeedsReview`) even when the rate is 0/9/19 %.
+3. `E2_droit_de_timbre` now appears in the G50 traceability array, so
+   `traceability_count` for a period containing stamp duty is one higher per timbre entry.
+
+---
+
+## 2L. Phase 37 — deployment assets are guarded like code (`tests/test_phase37_deployment_assets.py`) — `Passed`
+
+A Dockerfile, a compose file and an environment example are load-bearing: a weakened one
+becomes a production incident no unit test would catch. They cannot be *executed* here (no
+container runtime), so these tests verify exactly what can honestly be verified, and nothing is
+recorded as run that was not run.
+
+| Test | What it proves |
+| --- | --- |
+| `test_image_is_pinned_to_the_interpreter_floor_and_hash_locked` | `FROM python:3.11.17` (the safe-restore floor, not "latest 3.11"), `--require-hashes` + `--no-deps` against the lockfile |
+| `test_image_runs_unprivileged_and_bakes_in_no_secret_state` | `USER erp` at fixed uid 10001 with no home; no `ERP_VAULT_KEY`/`ERP_AUDIT_HMAC_SECRET`/database in the image; exec-form entrypoint so PID 1 gets SIGTERM; healthcheck against `/healthz` |
+| `test_stack_keeps_the_security_properties_it_claims` | Port published to `127.0.0.1` only; `read_only: true`; `cap_drop: ALL`; `no-new-privileges`; tmpfs `/tmp`; **one replica** (per-process limiter, single SQLite writer); state and logs as volumes; bootstrap behind an explicit profile |
+| `test_every_environment_variable_the_code_reads_is_documented` | **Drift gate**: every `ERP_*` variable the code reads is documented in `ops/erp.env.example`, except the two secrets, which must not be given values in a committed file |
+| `test_env_example_states_the_rate_limiting_bounds` | The throttle variables and their honest per-process scope appear where an operator reads them |
+| `test_dockerignore_keeps_state_and_secrets_out_of_the_build_context` | `.dockerignore` excludes `.git`, databases, key registries, rotation journals and `ops/erp.env` — a layer is forever |
+
+Measured: **6 passed**, 0.04 s. `ops/erp.env.example` completeness was checked against the code
+as it stands (19 `ERP_*` variables read, 17 documented, 2 classified as secrets).
+
+---
+
+## 2M. Phase 38 — migration matrix (`tests/test_phase38_migration_matrix.py`) — `Passed`
+
+Detailed rules and the migration inventory are in `docs/MIGRATION_AND_DATA_SAFETY.md`.
+
+| Test | What it proves |
+| --- | --- |
+| `test_any_single_missing_column_is_restored[…]` (14 parametrised cases) | Every migrated column is restored when it is the only one missing — no migration can hide behind another |
+| `test_a_database_missing_every_migrated_column_converges` | The worst realistic case: a dump several phases old converges in one open |
+| `test_a_fresh_database_needs_no_migration_and_is_complete` | A new file is born complete, including the rebuilt confidence columns |
+| `test_running_the_migration_twice_changes_nothing` | Idempotency proved by comparing the full `sqlite_master` dump |
+| `test_data_and_the_audit_chain_survive_the_upgrade` | Row counts per table unchanged and the hash chain verifies identically before and after |
+| `test_legacy_rows_get_null_not_a_fabricated_value` | Legacy `evidence_json` and `extraction_route` are `NULL`, never a fabricated decision |
+| `test_no_column_is_dropped_by_a_migration` | Migrations only add |
+| `test_a_half_applied_upgrade_is_repaired_on_the_next_open` | An interrupted upgrade finishes on the next start, it does not stay broken |
+| `test_a_database_with_the_new_columns_but_an_old_value_shape_still_opens` | Legacy `NULL`s in new columns do not break the migrations |
+| `test_the_rebuild_migration_is_atomic` | The table rebuild does not use `executescript()` (which would commit the pending transaction) |
+| `test_migrations_never_touch_production_data_paths` | No migration opens its own connection; an upgrade cannot commit a partial result outside the caller's transaction |
+
+Measured: **24 passed**, 1.98 s.
+
+### What is still unverified
+
+No migration has been exercised against production-sized data. Every figure here comes from
+synthetic databases of a few rows; lock duration and wall-clock time at scale remain
+`BLOCKED_EXTERNAL` until a copy of real state is available.

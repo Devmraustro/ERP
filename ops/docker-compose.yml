@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+#
+# Single-host reference deployment for the Algerian AI ERP API.
+#
+# STATUS: prepared, not run. No container runtime exists in the environment that
+# wrote this file, so `docker compose config` has been validated for syntax only
+# (by parsing the YAML) and the stack has never been started. Recorded as
+# IMPLEMENTED_NOT_VERIFIED in docs/PROJECT_COMPLETION_TRACKER.md. Treat it as a
+# reviewed starting point that a platform owner must exercise in their own
+# staging environment before it means anything.
+#
+# What this file deliberately does NOT do:
+#   * no TLS termination and no certificate handling (a proxy in front does it);
+#   * no database server (SQLite is a file; the volume is the database);
+#   * no secret material (values come from ops/erp.env, which must not be
+#     committed — only ops/erp.env.example is in the repository);
+#   * no key management: file-backed keys live on the vault volume, and
+#     ERP_KEY_PROVIDER=kms|hsm is refused at start-up unless a provider is
+#     supplied (docs/KEY_PROVIDER_CONTRACT.md).
+services:
+  erp:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: dz-erp-api:local
+    restart: unless-stopped
+    # Bound to loopback: the API must not be reachable except through the TLS
+    # proxy on the same host. Change only with a proxy and ERP_TRUSTED_PROXIES.
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ./erp.env
+    volumes:
+      # Durable state: the SQLite database, its WAL, the document vault and the
+      # vault key file that sits beside it. Losing this volume loses the system.
+      - erp-state:/var/lib/erp
+      # Security log. Keep it on its own volume so it can be shipped off-host and
+      # is not lost when the container is replaced.
+      - erp-logs:/var/log/erp
+    # The application never needs to write inside its own image.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # A single process, because the rate limiter and the SQLite writer are
+    # per-process state. Scaling this service horizontally needs a shared
+    # limiter and a database that supports concurrent writers first.
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1g
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # One-shot bootstrap of the first company and admin user. Run explicitly:
+  #   docker compose -f ops/docker-compose.yml run --rm bootstrap <username>
+  # It is not part of `up`, because creating an administrator is a deliberate,
+  # audited act and must not happen as a side effect of starting the stack.
+  bootstrap:
+    profiles: ["bootstrap"]
+    image: dz-erp-api:local
+    env_file:
+      - ./erp.env
+    volumes:
+      - erp-state:/var/lib/erp
+    read_only: true
+    entrypoint: ["python", "-m", "dz_erp.serve", "--bootstrap-admin"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  erp-state:
+    # A named volume is only as durable as the host disk. For a real deployment
+    # back this with a documented, monitored location and a verified restore
+    # procedure (docs/BACKUP_AND_RECOVERY_RUNBOOK.md).
+  erp-logs:

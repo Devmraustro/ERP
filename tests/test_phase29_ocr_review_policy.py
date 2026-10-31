@@ -391,7 +391,15 @@ def test_field_review_satisfies_the_gate_and_approval_rechecks_it(tmp_path: Path
             " WHERE document_id = ? ORDER BY id",
             (doc["document_id"],),
         ).fetchall()
-    assert len(rows) >= 10  # 8 required header fields + line qty + price + discount (+ NOT_PRESENTs)
+    # Exact, not a floor: 8 required header fields + line qty + price + discount
+    # = 11 decided rows, plus the 5 fields the extraction records as missing and
+    # the clerk therefore decides NOT_PRESENT (F-R2-5: the bound used to be
+    # ``>= 10`` while the comment claimed 11, so it pinned nothing).
+    assert len(rows) == 16, [(r["field_name"], r["decision"]) for r in rows]
+    decided_fields = {r["field_name"] for r in rows}
+    assert {"invoice_number", "supplier_name", "supplier_nif", "invoice_date", "currency_code",
+            "amount_ht_dzd", "amount_tva_dzd", "amount_ttc_dzd"} <= decided_fields
+    assert {"line_item_json", "line_unit_price", "line_discount"} <= decided_fields
     # Header fields and extracted line readings are confirmed or honestly
     # absent only — no correction, flag or stale record. Line discounts are
     # the one legitimate CORRECTED flow here: extraction never emits them, so
@@ -2186,3 +2194,68 @@ def test_api_review_policy_endpoint(tmp_path: Path) -> None:
     # The cross-company read attempt was audited in the *victim's* chain.
     blocks = [a for a in _audit_actions(db) if a[1] == "SECURITY_CROSS_COMPANY_READ_BLOCKED"]
     assert len(blocks) == 1
+
+
+# ---------------------------------------------------------------------------
+# F-R2-6 — a missing reading is reported as missing, not as "unparseable"
+# ---------------------------------------------------------------------------
+def test_fr2_6_a_missing_decided_price_or_discount_is_its_own_refusal(tmp_path: Path) -> None:
+    """The old ``None`` test sat *after* the parse, so it could never fire.
+
+    ``to_decimal(str(None))`` raises, so a decided-but-absent reading was
+    reported as ``..._UNPARSEABLE`` and the ``None`` branch was dead code. The
+    refusal is now specific, which matters because the two mean different
+    things to the clerk: a missing reading is re-decided, an unparseable one is
+    re-transcribed.
+    """
+    from dz_erp.procurement_stock import _source_invoice_mismatches
+
+    db, vault, _ = _make_env(tmp_path)
+    doc = _upload_standard_doc(db, vault)
+    invoice = _make_invoice(db, doc["document_id"])
+    _confirm_extracted(db, 1, doc["document_id"])
+
+    evaluation = _evaluate(db, 1, doc["document_id"])
+    with db.transaction() as conn:
+        invoice_row = conn.execute(
+            "SELECT * FROM supplier_invoices WHERE id = ?", (invoice["invoice_id"],)
+        ).fetchone()
+
+    def _mismatches(ev):
+        with db.transaction() as conn:
+            return _source_invoice_mismatches(conn, 1, invoice_row, ev)
+
+    # Baseline: the confirmed evidence matches.
+    assert _mismatches(evaluation) == []
+
+    # A decided-but-absent price reading.
+    broken_price = {
+        **evaluation,
+        "line_prices": [
+            {**p, "value": None} if i == 0 else p for i, p in enumerate(evaluation["line_prices"])
+        ],
+    }
+    price_mismatches = _mismatches(broken_price)
+    assert "LINE_1_PRICE_SOURCE_MISSING" in price_mismatches, price_mismatches
+    assert not any("PRICE_SOURCE_UNPARSEABLE" in m for m in price_mismatches), price_mismatches
+
+    # A decided-but-absent discount reading.
+    broken_discount = {
+        **evaluation,
+        "line_discounts": [
+            {**d, "value": None} if i == 0 else d for i, d in enumerate(evaluation["line_discounts"])
+        ],
+    }
+    discount_mismatches = _mismatches(broken_discount)
+    assert "LINE_1_DISCOUNT_SOURCE_MISSING" in discount_mismatches, discount_mismatches
+    assert not any("DISCOUNT_SOURCE_UNPARSEABLE" in m for m in discount_mismatches), discount_mismatches
+
+    # A genuinely unparseable reading keeps its own, different code.
+    garbage = {
+        **evaluation,
+        "line_prices": [
+            {**p, "value": "not-a-number"} if i == 0 else p
+            for i, p in enumerate(evaluation["line_prices"])
+        ],
+    }
+    assert "LINE_1_PRICE_SOURCE_UNPARSEABLE" in _mismatches(garbage)

@@ -59,7 +59,19 @@ def test_the_counts_tool_detects_drift(tmp_path: Path) -> None:
     module = _counts_module()
     text = REGISTER.read_text(encoding="utf-8")
     rows = module.parse_rows(text)
-    damaged = text.replace(module.render(rows), module.render(rows).replace("| Medium | 3", "| Medium | 99", 1))
+    summary = module.render(rows)
+    # Corrupt the Total cell of the first severity row *as rendered*, so the
+    # probe keeps working when the register gains rows (the previous hard-coded
+    # "| Medium | 3" silently stopped corrupting anything once a Medium row was
+    # added, which would have made this test vacuous).
+    target = next(
+        line for line in summary.splitlines() if re.match(r"^\| (Critical|High|Medium|Low) \|", line)
+    )
+    cells = target.split("|")
+    cells[-2] = f" {int(cells[-2].strip()) + 1} "
+    damaged_summary = summary.replace(target, "|".join(cells), 1)
+    assert damaged_summary != summary
+    damaged = text.replace(summary, damaged_summary, 1)
     assert damaged != text
     assert module.render(module.parse_rows(damaged)) not in damaged
 

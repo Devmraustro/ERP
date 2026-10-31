@@ -8,14 +8,16 @@ import json
 import os
 import sqlite3
 import threading
-from contextlib import contextmanager
+import time
+import uuid
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .decimal_utils import format_dzd, to_decimal
 from .rotation_audit import RecordedOperation, RotationLedger
-from .key_provider import FileKeyProvider
+from .key_provider import FileKeyProvider, KeyMaterialUnavailable
 from .key_rotation import (
     LEGACY_KEY_VERSION,
     MIN_HMAC_KEY_BYTES,
@@ -167,6 +169,18 @@ CREATE TABLE IF NOT EXISTS timbre_rules (
     max_amount_dzd  TEXT,
     threshold_dzd   TEXT NOT NULL DEFAULT '300.00',
     brackets_json   TEXT NOT NULL,
+    -- Phase 46 (finding R-05): a rule is never in force because somebody
+    -- inserted a row. It is created as a DRAFT, which the resolver ignores, and
+    -- only a second, differently-attributed approval makes it ACTIVE. Rows that
+    -- predate this column default to ACTIVE because they are, factually, the
+    -- configuration that has been in force; nothing is back-filled beyond that.
+    review_state    TEXT NOT NULL DEFAULT 'ACTIVE'
+                        CHECK (review_state IN ('DRAFT', 'ACTIVE')),
+    reason          TEXT,
+    created_by_id   INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    created_at      TEXT,
+    reviewed_by_id  INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    reviewed_at     TEXT,
     UNIQUE(company_id, version_code)
 );
 
@@ -199,6 +213,11 @@ CREATE TABLE IF NOT EXISTS products (
     standard_cost_dzd       TEXT NOT NULL DEFAULT '0.000000',
     stock_account_code      TEXT NOT NULL DEFAULT '31',
     clearing_account_code   TEXT NOT NULL DEFAULT '380',
+    -- F-R2-3: where a receipt-cost / invoice-price difference is booked.
+    -- NULL means no policy has been approved: the difference is then
+    -- recorded on the invoice as an explained, audited residual instead of
+    -- being posted to an account nobody chose.
+    price_variance_account_code TEXT,
     expense_account_code    TEXT NOT NULL DEFAULT '600',
     income_account_code     TEXT NOT NULL DEFAULT '700',
     UNIQUE(company_id, sku)
@@ -293,6 +312,11 @@ CREATE TABLE IF NOT EXISTS ocr_field_reviews (
     decision        TEXT NOT NULL CHECK (decision IN ('CONFIRMED', 'CORRECTED', 'FLAGGED', 'NOT_PRESENT')),
     reviewed_value  TEXT,
     note            TEXT,
+    -- Phase 34: which extraction rows this decision actually reviewed (JSON).
+    -- Nullable on purpose: decisions taken before this column existed reviewed
+    -- the only row there was, and a NULL binding is read as "covers a single
+    -- row", never as "covers any number of rows".
+    evidence_json   TEXT,
     reviewed_by_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     reviewed_at     TEXT NOT NULL
 );
@@ -409,6 +433,15 @@ CREATE TABLE IF NOT EXISTS supplier_invoices (
     posted_at               TEXT,
     journal_entry_id        INTEGER,
     reversal_of_invoice_id  INTEGER REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+    -- Phase 40 (F-04): which stamp-duty rule produced amount_timbre_dzd.
+    -- NULL means "not recorded" — never a fabricated identity for an invoice
+    -- that was validated before this column existed.
+    timbre_rule_version     TEXT,
+    timbre_rule_source      TEXT CHECK (timbre_rule_source IN ('configured', 'builtin_default')),
+    timbre_rule_hash        TEXT,
+    timbre_rule_valid_from  TEXT,
+    timbre_rule_valid_to    TEXT,
+    timbre_snapshot_json    TEXT,
     created_at              TEXT NOT NULL
 );
 
@@ -432,12 +465,76 @@ CREATE TABLE IF NOT EXISTS supplier_invoice_lines (
     line_ttc_dzd    TEXT NOT NULL
 );
 
+-- Phase 40 (F-04): the content of every stamp-duty rule version actually used.
+-- Append-only by trigger: it is the evidence that lets a posted invoice be
+-- explained years later, even after the operator has configured new rules.
+CREATE TABLE IF NOT EXISTS timbre_rule_versions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    version_code        TEXT NOT NULL,
+    content_hash        TEXT NOT NULL,
+    source              TEXT NOT NULL CHECK (source IN ('configured', 'builtin_default')),
+    valid_from          TEXT NOT NULL,
+    valid_to            TEXT,
+    min_amount_dzd      TEXT NOT NULL,
+    max_amount_dzd      TEXT,
+    threshold_dzd       TEXT NOT NULL,
+    brackets_json       TEXT NOT NULL,
+    first_used_at       TEXT NOT NULL,
+    first_used_by_invoice_id INTEGER REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+    UNIQUE(company_id, version_code, content_hash)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_update
+BEFORE UPDATE ON timbre_rule_versions
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_delete
+BEFORE DELETE ON timbre_rule_versions
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+END;
+
+-- A rule version an invoice was posted against may not be rewritten or removed:
+-- that would silently change the explanation of an amount already in the ledger.
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_update_when_referenced
+BEFORE UPDATE ON timbre_rules
+WHEN EXISTS (
+    SELECT 1 FROM supplier_invoices
+    WHERE company_id = OLD.company_id
+      AND timbre_rule_version = OLD.version_code
+      AND workflow_state = 'Posted'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_delete_when_referenced
+BEFORE DELETE ON timbre_rules
+WHEN EXISTS (
+    SELECT 1 FROM supplier_invoices
+    WHERE company_id = OLD.company_id
+      AND timbre_rule_version = OLD.version_code
+      AND workflow_state = 'Posted'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+END;
+
 CREATE TABLE IF NOT EXISTS approval_requests (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id      INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
     target_model    TEXT NOT NULL,
     target_id       INTEGER NOT NULL,
     payload_sha256  TEXT NOT NULL,
+    -- Phase 33: the source-review evidence the request was raised against
+    -- (a digest of the document's review decisions), so an approval can prove
+    -- it decided the *same* invoice payload reviewed against the *same*
+    -- evidence. NULL on rows created before Phase 33 and on invoices with no
+    -- linked document — read as "not bound", never as "matches".
+    source_review_fingerprint TEXT,
     requested_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     requested_at    TEXT NOT NULL,
     decision        TEXT NOT NULL CHECK (decision IN ('PENDING', 'APPROVED', 'REJECTED', 'INVALIDATED')),
@@ -625,6 +722,87 @@ def _file_backed_db_has_audit_events(db_path: str) -> bool:
         conn.close()
 
 
+def _publish_key_file(key_path: Path, secret: bytes) -> bytes:
+    """Create the database's key file atomically, or adopt the existing one.
+
+    **Why this is not ``O_CREAT|O_EXCL`` followed by ``write``.** That was the
+    original implementation and it has a window: the creator publishes an empty
+    file, and a second process starting in the same instant sees it, reads it,
+    and raises ``KeyMaterialUnavailable: Key file ... is empty``. Two workers
+    booting together is the normal case for this application (a process pool, a
+    rolling restart, the multi-process tests), so the loser of that race could
+    fail to start for no real reason — intermittently, which is the worst way to
+    find out.
+
+    The material is therefore written to a private temporary file in the same
+    directory, fsynced, and *linked* into place. ``link`` is atomic and fails if
+    the name already exists, so a reader can only ever observe either no file or
+    a complete one: the winner's content is what everybody ends up reading, and
+    the loser adopts it instead of overwriting it.
+
+    ``os.link`` is unavailable on a few filesystems (FAT, some network mounts).
+    There the fallback is to re-check and read the winner's file, waiting
+    briefly for it to be non-empty; if it never is, the error says what the
+    operator has to do. Failure to publish a *usable* key must be visible, never
+    silently replaced with a different key — that would invalidate every
+    existing audit chain.
+    """
+    tmp_path = key_path.with_name(f".{key_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(secret)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(str(tmp_path), str(key_path))
+            return secret
+        except FileExistsError:
+            # Another process published first; its key is authoritative.
+            return FileKeyProvider(key_path).read()
+        except OSError:
+            # No hard links here: fall back to adopt-or-create with a wait.
+            if key_path.exists():
+                return _read_published_key(key_path)
+            try:
+                fd2 = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return _read_published_key(key_path)
+            with os.fdopen(fd2, "wb") as handle:
+                handle.write(secret)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return secret
+    finally:
+        if fd >= 0:  # pragma: no cover - only when os.fdopen itself failed
+            os.close(fd)
+        with suppress(FileNotFoundError):
+            os.unlink(str(tmp_path))
+
+
+def _read_published_key(key_path: Path, *, attempts: int = 50) -> bytes:
+    """Read a key file another process is publishing, waiting out the write.
+
+    Only reachable on filesystems without ``os.link``. A file that exists but is
+    still empty is briefly retried (50 × 20 ms) instead of being reported as
+    corrupt, because the alternative — declaring a per-process key — would make
+    the audit chain unverifiable across the very restart that is happening.
+    """
+    last: Optional[Exception] = None
+    for _attempt in range(attempts):
+        try:
+            return FileKeyProvider(key_path).read()
+        except KeyMaterialUnavailable as exc:
+            last = exc
+            time.sleep(0.02)
+    raise KeyMaterialUnavailable(
+        f"Key file {key_path} exists but never became readable: {last}. "
+        "Refusing to generate a second key, which would invalidate every existing "
+        "audit chain. Restore the key file or set ERP_AUDIT_HMAC_SECRET."
+    )
+
+
 def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
     """Resolve the HMAC key that chains ``audit_events``.
 
@@ -672,15 +850,7 @@ def _resolve_audit_secret(db_path: str, explicit: Optional[bytes]) -> bytes:
             )
         secret = base64.urlsafe_b64encode(os.urandom(32))
         key_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            # O_EXCL: if two processes race to initialise the same database, the
-            # loser adopts the winner's key rather than replacing it.
-            fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return FileKeyProvider(key_path).read()
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(secret)
-        return secret
+        return _publish_key_file(key_path, secret)
 
     return DEFAULT_AUDIT_HMAC_SECRET
 
@@ -833,6 +1003,43 @@ class ERPDatabase:
             "events_by_version": by_version,
         }
 
+    def read_probe(self, sql: str, params: Any = ()) -> Optional[sqlite3.Row]:
+        """Run ONE read-only statement without taking the write lock.
+
+        ``transaction()`` opens ``BEGIN IMMEDIATE`` because it exists to guard
+        writes. A pure read — the rate limiter asking "is this client blocked?"
+        on every authentication attempt — does not need that lock, and taking it
+        made every unrelated business write wait on a check that changes nothing
+        (finding R-03).
+
+        Why this is safe rather than merely faster:
+
+        * the statement runs in autocommit mode, so SQLite gives it a read
+          snapshot and it cannot dirty the database or leave a transaction open;
+        * file-backed databases run in WAL, where readers never block writers
+          and readers see a consistent snapshot rather than a torn one;
+        * the process-wide ``RLock`` is still taken, so a probe can never
+          interleave with a transaction in this process. It blocks only while a
+          write transaction is genuinely in progress — the honest cost of
+          reading the same database, not an extra one;
+        * every decision that *writes* still goes through ``transaction()``.
+
+        Callers are expected to pass a pure ``SELECT``; nothing here tries to
+        police that, because the only production caller is the limiter's read
+        path and tests assert the behaviour end to end.
+        """
+        with self._lock:
+            conn = (
+                self._persistent_conn
+                if self._persistent_conn is not None
+                else self._create_connection()
+            )
+            try:
+                return conn.execute(sql, params).fetchone()
+            finally:
+                if self._persistent_conn is None:
+                    conn.close()
+
     def _create_connection(self) -> sqlite3.Connection:
         if self._read_only:
             uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
@@ -855,15 +1062,55 @@ class ERPDatabase:
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(SCHEMA_SQL)
+        # The OCR confidence migration toggles ``PRAGMA foreign_keys``, which is a
+        # no-op inside a transaction, so it must run outside one and manage its
+        # own. It is therefore sequenced first; everything else runs under the
+        # single write transaction opened by ``_migrate_schema``.
+        self._migrate_ocr_confidence(conn)
         self._migrate_schema(conn)
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
-        """Idempotently upgrade pre-existing databases to the authenticated schema.
+        """Idempotently upgrade pre-existing databases, as one serialised unit.
 
         `CREATE TABLE IF NOT EXISTS` cannot add columns to a table that already
         exists, so databases created before authentication was introduced are
         brought forward here. Safe to run on every startup.
+
+        **Concurrency (Phase 43).** These migrations used to run as a sequence of
+        autocommitted statements. Every step guards itself with a check
+        (``PRAGMA table_info`` before ``ALTER``, ``DROP TRIGGER`` before
+        ``CREATE TRIGGER``), and that is safe for one process — but two processes
+        starting at the same moment on one database file interleave *between*
+        the check and the DDL. Real multi-process startup reproduced it:
+
+            sqlite3.OperationalError: trigger trg_ocr_field_preserve_raw already exists
+
+        because both processes dropped the trigger and then both created it. The
+        whole sequence therefore now runs inside one ``BEGIN IMMEDIATE``
+        transaction: the check-and-DDL pairs become atomic, and two starting
+        workers serialise instead of racing. This also strengthens the F-06
+        guarantee for these steps — an interruption rolls the entire set back
+        rather than leaving half of it applied, and the next start re-runs it.
+
+        The ``DROP``/``CREATE`` of the trigger deliberately does **not** use
+        ``CREATE TRIGGER IF NOT EXISTS``: replacing an outdated trigger body is
+        the point (a legacy database must also protect the newer column), and
+        inside this transaction the replacement cannot race anyone.
         """
+        if conn.in_transaction:
+            raise sqlite3.OperationalError(
+                "Schema migration must start outside an active transaction."
+            )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._migrate_schema_body(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def _migrate_schema_body(self, conn: sqlite3.Connection) -> None:
+        """The migration steps themselves; always called inside one transaction."""
         user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if user_cols and "password_hash" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
@@ -890,9 +1137,13 @@ class ERPDatabase:
                 "ALTER TABLE audit_events ADD COLUMN hmac_key_version INTEGER NOT NULL DEFAULT 1"
             )
 
-        self._migrate_ocr_confidence(conn)
         self._migrate_review_policy(conn)
+        self._migrate_approval_binding(conn)
         self._migrate_document_routing(conn)
+        self._migrate_review_evidence(conn)
+        self._migrate_timbre_provenance(conn)
+        self._migrate_timbre_rule_administration(conn)
+        self._migrate_price_variance_account(conn)
 
     def _migrate_review_policy(self, conn: sqlite3.Connection) -> None:
         """Phase 29 review-policy schema, idempotently, on pre-existing databases.
@@ -931,6 +1182,39 @@ class ERPDatabase:
             """
         )
 
+    def _migrate_approval_binding(self, conn: sqlite3.Connection) -> None:
+        """Phase 33: bind an approval request to the source-review evidence.
+
+        Additive and idempotent: the column is nullable with no default, so
+        requests recorded before this phase (and those for invoices with no
+        linked document) keep ``NULL``, which the approval gate reads as
+        "not bound" and skips — a legacy pending request keeps working exactly
+        as it did, while every request raised from now on is bound and
+        re-checked. No stored row is rewritten.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(approval_requests)").fetchall()}
+        if not cols:
+            return
+        if "source_review_fingerprint" not in cols:
+            conn.execute("ALTER TABLE approval_requests ADD COLUMN source_review_fingerprint TEXT")
+
+    def _migrate_review_evidence(self, conn: sqlite3.Connection) -> None:
+        """Phase 34: record which extraction rows a review decision covered.
+
+        Additive and idempotent — one nullable column, no default, no rewrite.
+        A decision recorded before this phase keeps ``NULL``, which the policy
+        reads as "the single row that existed when it was made". If a document
+        turns out to hold several rows for that field, a ``NULL`` binding does
+        *not* authorise any of them: the field stays blocked until a reviewer
+        resolves the duplicate explicitly. That is the fail-closed direction,
+        and it never deletes or merges a stored extraction row.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_field_reviews)").fetchall()}
+        if not cols:
+            return
+        if "evidence_json" not in cols:
+            conn.execute("ALTER TABLE ocr_field_reviews ADD COLUMN evidence_json TEXT")
+
     def _migrate_document_routing(self, conn: sqlite3.Connection) -> None:
         """Add the review-routing columns to `source_documents`, leaving old rows NULL.
 
@@ -955,6 +1239,139 @@ class ERPDatabase:
         for column, definition in additions.items():
             if column not in cols:
                 conn.execute(f"ALTER TABLE source_documents ADD COLUMN {column} {definition}")
+
+    def _migrate_timbre_rule_administration(self, conn: sqlite3.Connection) -> None:
+        """Add the review-state columns that make rule activation explicit (R-05).
+
+        Additive only: every pre-existing ``timbre_rules`` row becomes ``ACTIVE``
+        through the column DEFAULT, which preserves the behaviour those rows
+        already had. No value, window or bracket is touched, no row is created
+        and no trigger is dropped, so an interrupted run leaves the database in a
+        state the next start finishes (the same forward-recovery contract as the
+        rest of the migration sequence, F-06).
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(timbre_rules)").fetchall()}
+        if not cols:
+            return
+        additions = (
+            ("review_state", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+            ("reason", "TEXT"),
+            ("created_by_id", "INTEGER REFERENCES users(id) ON DELETE RESTRICT"),
+            ("created_at", "TEXT"),
+            ("reviewed_by_id", "INTEGER REFERENCES users(id) ON DELETE RESTRICT"),
+            ("reviewed_at", "TEXT"),
+        )
+        for name, ddl in additions:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE timbre_rules ADD COLUMN {name} {ddl}")
+
+    def _migrate_price_variance_account(self, conn: sqlite3.Connection) -> None:
+        """Add the per-product variance account (F-R2-3). Additive only.
+
+        NULL is the historical and current behaviour — no variance is posted —
+        so existing products keep exactly the treatment they had. Nothing is
+        backfilled with a guessed account code: the account is a policy
+        decision and arrives through configuration.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+        if cols and "price_variance_account_code" not in cols:
+            conn.execute("ALTER TABLE products ADD COLUMN price_variance_account_code TEXT")
+
+    def _migrate_timbre_provenance(self, conn: sqlite3.Connection) -> None:
+        """Phase 40 (F-04): record which stamp-duty rule produced each amount.
+
+        Additive and idempotent. Existing invoices keep ``NULL``: their rule
+        identity is genuinely unknown, and inventing one would be worse than
+        admitting it. The append-only ledger and the guards that stop a
+        referenced rule from being rewritten are created here too, so an older
+        database gains the same protection as a new one.
+        """
+        invoice_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(supplier_invoices)").fetchall()
+        }
+        for column, ddl in (
+            ("timbre_rule_version", "TEXT"),
+            ("timbre_rule_source", "TEXT"),
+            ("timbre_rule_hash", "TEXT"),
+            ("timbre_rule_valid_from", "TEXT"),
+            ("timbre_rule_valid_to", "TEXT"),
+            ("timbre_snapshot_json", "TEXT"),
+        ):
+            if invoice_cols and column not in invoice_cols:
+                conn.execute(f"ALTER TABLE supplier_invoices ADD COLUMN {column} {ddl}")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS timbre_rule_versions (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+                version_code        TEXT NOT NULL,
+                content_hash        TEXT NOT NULL,
+                source              TEXT NOT NULL CHECK (source IN ('configured', 'builtin_default')),
+                valid_from          TEXT NOT NULL,
+                valid_to            TEXT,
+                min_amount_dzd      TEXT NOT NULL,
+                max_amount_dzd      TEXT,
+                threshold_dzd       TEXT NOT NULL,
+                brackets_json       TEXT NOT NULL,
+                first_used_at       TEXT NOT NULL,
+                first_used_by_invoice_id INTEGER REFERENCES supplier_invoices(id) ON DELETE RESTRICT,
+                UNIQUE(company_id, version_code, content_hash)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_update
+            BEFORE UPDATE ON timbre_rule_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rule_versions_no_delete
+            BEFORE DELETE ON timbre_rule_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_LEDGER_APPEND_ONLY');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_update_when_referenced
+            BEFORE UPDATE ON timbre_rules
+            WHEN EXISTS (
+                SELECT 1 FROM supplier_invoices
+                WHERE company_id = OLD.company_id
+                  AND timbre_rule_version = OLD.version_code
+                  AND workflow_state = 'Posted'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_timbre_rules_no_delete_when_referenced
+            BEFORE DELETE ON timbre_rules
+            WHEN EXISTS (
+                SELECT 1 FROM supplier_invoices
+                WHERE company_id = OLD.company_id
+                  AND timbre_rule_version = OLD.version_code
+                  AND workflow_state = 'Posted'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'TIMBRE_RULE_REFERENCED_BY_POSTED_INVOICE');
+            END
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timbre_rule_versions_lookup "
+            "ON timbre_rule_versions(company_id, version_code)"
+        )
 
     def _migrate_ocr_confidence(self, conn: sqlite3.Connection) -> None:
         """Bring `ocr_extracted_fields` forward to nullable, provenance-bearing confidence.

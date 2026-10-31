@@ -2,6 +2,58 @@
 
 Production-grade Algerian *Système Comptable Financier* (SCF) localization, procure-to-pay (`PO → Goods Receipt → 3-Way Match → SoD Approval → Idempotent GL Posting`), encrypted supplier invoice intake with OCR (`pdfplumber` + `RapidOCR PP-OCRv4`), and tamper-evident audit/backup architecture.
 
+## Current state — completion workstream (Phases 34–38)
+
+Read this section first; the phase narratives below are dated history.
+
+**Fixed and verified in this workstream** (branch `arena/7f12d627-erp`, PR #7,
+on top of `852f389f`):
+
+| Phase | Change | Tests |
+|---|---|---|
+| 34 | **A duplicate OCR extraction row could reach the ledger.** A second row for the same field was flagged but the flag never blocked anything; the invoice submitted with an unreviewed value. Duplicates are now a blocking reason at submit, approve **and** post; decisions bind to the extraction rows they covered (`evidence_json`); flagging never resolves a group; a posting-time refusal recovers the invoice to `NeedsReview` instead of dead-ending it | `tests/test_phase34_ocr_duplicate_row_integrity.py` — 19 |
+| 35 | Failed logins throttled per (client, account) **before** password verification; every response carries `X-Request-Id` and a credential-free `HTTP_REQUEST` record | `tests/test_phase35_api_rate_limiting_and_request_logging.py` — 16 |
+| 36 | Stamp duty and VAT resolved from the **effective-dated** configuration instead of compiled constants; a gap or ambiguous configuration stops the invoice rather than guessing; G50 box E2 is now traceable | `tests/test_phase36_accounting_and_tax_configuration.py` — 29 |
+| 37 | Container and operator assets prepared, with a drift gate that fails when the code reads an `ERP_*` variable the operator docs do not document | `tests/test_phase37_deployment_assets.py` — 6 |
+| 38 | Migration matrix: convergence, idempotency, preservation, interruption recovery, atomic rebuild | `tests/test_phase38_migration_matrix.py` — 24 |
+
+**Measured on this host** (Linux, CPython 3.11.2): full suite **890 passed, 20
+failed, 7 skipped, 78 % coverage**. All 20 failures are
+`restore_and_verify_backup`'s interpreter floor (`Safe backup restore requires
+Python 3.11.17+`), and the failure set is `diff`-identical to the pre-change
+baseline; every one of those paths is green in CI on the runner's CPython `3.11` and
+`3.12`. `ruff check dz_erp tests tools` is clean.
+
+**CI on the final head** (`8b1b56c9`, run
+[`41129089741`](https://github.com/Devmraustro/ERP/actions/runs/41129089741)):
+**3/3 jobs green** — full suite with coverage on the runner's CPython `3.11` and
+`3.12`, plus the Windows rotation/backup/staging job (pinned `3.12.10`). On those interpreters the 20
+interpreter-floor failures above do not occur.
+
+**Not done, and not claimed:** the container image has never been built here; no
+migration has run against production-sized data; there is no MFA; the rate limiter
+is per process; and the Algerian tax values, key custody, DR evidence and Law 18-07
+determinations remain `BLOCKED_EXTERNAL`. See
+[`docs/RELEASE_READINESS_MATRIX.md`](docs/RELEASE_READINESS_MATRIX.md).
+
+New documents: [`docs/PROJECT_BASELINE_AND_COMPLETION_PLAN.md`](docs/PROJECT_BASELINE_AND_COMPLETION_PLAN.md),
+[`docs/PROJECT_COMPLETION_TRACKER.md`](docs/PROJECT_COMPLETION_TRACKER.md),
+[`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md`](docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md),
+[`docs/MIGRATION_AND_DATA_SAFETY.md`](docs/MIGRATION_AND_DATA_SAFETY.md),
+[`docs/SECURITY_FINAL_AUDIT.md`](docs/SECURITY_FINAL_AUDIT.md),
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md),
+[`docs/DATA_PROTECTION_COMPLIANCE.md`](docs/DATA_PROTECTION_COMPLIANCE.md),
+[`docs/INCIDENT_RESPONSE_PLAN.md`](docs/INCIDENT_RESPONSE_PLAN.md),
+[`docs/BACKUP_AND_RECOVERY_RUNBOOK.md`](docs/BACKUP_AND_RECOVERY_RUNBOOK.md),
+[`docs/PRODUCTION_DEPLOYMENT_GUIDE.md`](docs/PRODUCTION_DEPLOYMENT_GUIDE.md),
+[`docs/FINAL_QA_REPORT.md`](docs/FINAL_QA_REPORT.md),
+[`docs/EXECUTIVE_REPORT.md`](docs/EXECUTIVE_REPORT.md),
+[`docs/TECHNICAL_REPORT.md`](docs/TECHNICAL_REPORT.md),
+[`docs/USER_GUIDE_FR.md`](docs/USER_GUIDE_FR.md),
+[`docs/USER_GUIDE_AR.md`](docs/USER_GUIDE_AR.md),
+[`docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md`](docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md),
+[`docs/REMAINING_BLOCKERS.md`](docs/REMAINING_BLOCKERS.md).
+
 ## Desktop application - installed, local-first (Phases 25-27)
 
 The product is an **installed desktop application** (logiciel de gestion), not a website: launch
@@ -176,3 +228,17 @@ python -m ruff check dz_erp tests tools        # static check
 10. [`docs/PRODUCTION_READINESS_AND_GO_NO_GO.md`](docs/PRODUCTION_READINESS_AND_GO_NO_GO.md) — Final production-readiness assessment and Go/No-Go decision.
 11. [`docs/KEY_PROVIDER_CONTRACT.md`](docs/KEY_PROVIDER_CONTRACT.md) — The contract between the application and any key source: provider protocol, auditable `describe()` surface, failure modes (raise, never fall back), rotation behaviour, Windows ACL limitation, and the acceptance criteria a real KMS/HSM integration must meet (none is bundled; `KmsKeyProvider` reports `implemented: False`, `hsm_equivalent: False`). Includes the fail-closed `ERP_KEY_PROVIDER` selection gate and per-provider outage behaviour.
 12. [`docs/RELEASE_READINESS_MATRIX.md`](docs/RELEASE_READINESS_MATRIX.md) — The single release-gate table: requirement/risk ID, owner, required evidence, verification command, status (Verified vs. Blocked-external), external dependency and explicit pass criteria for KMS/HSM custody, publisher provenance, off-host checkpoints, alerting, DR, production-scale concurrency, OCR validation, Algerian accounting/tax review and Law 18-07/ANPDP. Companion tool: `tools/operational_readiness.py`, the deterministic deployed-configuration checker whose exit code covers only what it can actually see.
+13. [`docs/EXECUTIVE_REPORT.md`](docs/EXECUTIVE_REPORT.md) / [`docs/TECHNICAL_REPORT.md`](docs/TECHNICAL_REPORT.md) — what this workstream changed, with the evidence and the limits stated side by side.
+14. [`docs/SECURITY_FINAL_AUDIT.md`](docs/SECURITY_FINAL_AUDIT.md) — control-by-control status, findings and residual risk.
+15. [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — assets, threats, the control that answers each, and what remains accepted with a named owner.
+16. [`docs/DATA_PROTECTION_COMPLIANCE.md`](docs/DATA_PROTECTION_COMPLIANCE.md) — what the software does about personal data, and the determinations only a lawyer can make.
+17. [`docs/INCIDENT_RESPONSE_PLAN.md`](docs/INCIDENT_RESPONSE_PLAN.md) — severity, roles, playbooks, evidence handling; organisational blanks marked `TBD`.
+18. [`docs/BACKUP_AND_RECOVERY_RUNBOOK.md`](docs/BACKUP_AND_RECOVERY_RUNBOOK.md) — backup, verification in a separate process, and recovery procedures.
+19. [`docs/PRODUCTION_DEPLOYMENT_GUIDE.md`](docs/PRODUCTION_DEPLOYMENT_GUIDE.md) — prerequisites, configuration, health model, verification, and the external blockers.
+20. [`docs/MIGRATION_AND_DATA_SAFETY.md`](docs/MIGRATION_AND_DATA_SAFETY.md) — the migration rules, the inventory, and why there is no down-migration.
+21. [`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md`](docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md) — arithmetic invariants, effective-dated tax resolution, and the explicit boundary between engineering proof and legal qualification.
+22. [`docs/FINAL_QA_REPORT.md`](docs/FINAL_QA_REPORT.md) — every command run, its result, and what was not run.
+23. [`docs/USER_GUIDE_FR.md`](docs/USER_GUIDE_FR.md) / [`docs/USER_GUIDE_AR.md`](docs/USER_GUIDE_AR.md) — the invoice workflow for accountants and clerks, in French and Arabic.
+
+24. [`docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md`](docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md) — the independent pass over the exact head: commits and PR containment, CI at step level, the suite and its baseline, the Priority 0 inspection with its own probe, the limiter's deployment scope, log contents, tax resolution, the container gap, the findings register (F-01…F-05) and the four-status classification.
+25. [`docs/REMAINING_BLOCKERS.md`](docs/REMAINING_BLOCKERS.md) — what still stands between this repository and a defensible deployment, with a named owner and the exact evidence that closes each item.

@@ -963,8 +963,8 @@ is recorded in §10.9.
 
 | Item | Value |
 |---|---|
-| Commit | `bdbd64a84c54c12760c125fc11ffd188ff8aa8f0` (this section's docs on top of `9d5d112a`; the code is identical to `9d5d112a`) |
-| CI run | **`41241542402`** |
+| Commits | `bdbd64a84c54c12760c125fc11ffd188ff8aa8f0` and `ca881c5726abd1ce1ca47e502504d2c9b66dce3b` — this section's prose on top of `9d5d112a`, no code change |
+| CI runs | `41241542402` (bdbd64a), `41242087857` (ca881c57) |
 | Jobs | `Test, coverage and static checks (Python 3.11)` ✅ · `(Python 3.12)` ✅ · `Key rotation, backup and recovery on Windows` ✅ — **3/3 success** |
 | F-R3-1 | **Did not recur.** One failure, then green on the next run of the same test suite. It stays recorded as an intermittent, pre-existing, unreproduced start-up race — not as something this round fixed, and not as something it caused |
 

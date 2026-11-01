@@ -1382,3 +1382,16 @@ accounting behaviour and should be reviewed first among #4–#7 after #3.
 **Status: `READY_FOR_HUMAN_REVIEW` for the code; `BLOCKED_EXTERNAL` for LB-1,
 LB-2, LB-3 and the SCF/legal sign-offs; `NOT_PRODUCTION_READY` overall.**
 Nothing was merged, retargeted, rebased or deployed.
+
+### 12.8 Delivery
+
+| Item | Value |
+|---|---|
+| Code + tests commit | `99c37530c316f61e71f8b295cc6b4166a4b9f80d` |
+| CI run | `41295231516` — `Test, coverage and static checks (Python 3.11)` ✅ · `(Python 3.12)` ✅ · `Key rotation, backup and recovery on Windows` ✅ — **3/3 success** |
+| Commit after it | this section's prose only; behaviour identical to `99c3753` |
+| Branch / PR | `arena/7f12d627-erp`, PR #7 `OPEN`, `CLEAN` against its base |
+
+The Windows job is the one that exercises the restore and key-rotation paths
+that cannot run in this sandbox (the interpreter-gated tests), which is why those
+remain "verified on CI, not here" in §12.4.

@@ -1577,3 +1577,16 @@ a coding task that this round was authorised to complete:
 
 The code itself is **`READY_FOR_HUMAN_REVIEW`**, and F-R6-1's fix is
 **`FIXED_AND_VERIFIED`**. Nothing was merged, retargeted, rebased or deployed.
+
+### 13.10 Delivery
+
+| Item | Value |
+|---|---|
+| Code + tests + docs commit | `37536e10a57effd8af8e5911a895c47923a01f07` |
+| CI run | `41314444230` — `Test, coverage and static checks (Python 3.11)` ✅ · `(Python 3.12)` ✅ · `Key rotation, backup and recovery on Windows` ✅ — **3/3 success** |
+| Commit after it | this section's prose only; behaviour identical to `37536e1` |
+| Branch / PR | `arena/7f12d627-erp`, PR #7, `OPEN` |
+
+The green 3.11 job is the evidence that the interpreter-gated restore assertions ran
+on a ≥3.11.17 runner (§13.5); it is not independent proof that they assert what they
+claim, which is why the revert experiments in §13.8 exist.

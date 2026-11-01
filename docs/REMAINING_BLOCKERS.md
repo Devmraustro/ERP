@@ -353,3 +353,86 @@ figure would mean importing an unreviewed tax policy. Recorded, not changed.
 
 **Status: `BLOCKED_EXTERNAL` + `NOT_PRODUCTION_READY`.** No code-side change is
 outstanding. Nothing merged, retargeted or deployed.
+
+## Round 6 (2026-11-01) — production readiness gate: one defect fixed, a dependency blocker found
+
+No legal, tax or SCF decision was taken in this round. What changed: the first step of
+the deployment runbook no longer breaks after an interrupted password prompt
+(**F-R6-1**), and the lockfile was scanned for advisories for the first time
+(**DEP-1**, a release blocker).
+
+### Fixed this round — F-R6-1
+
+`python -m dz_erp.serve --bootstrap-admin admin` inserted and **committed the company
+before prompting for the password**. An aborted prompt (mistyped, Ctrl-C, or the
+documented `docker compose run --rm bootstrap` without a TTY) left a company with no
+user and no audit event, and every retry died with
+`sqlite3.IntegrityError: UNIQUE constraint failed: companies.code`. Recovery needed
+manual SQL against a financial database before its first use.
+
+Now: the password is read before anything is written; an orphaned bootstrap company is
+reused so a broken deployment recovers by re-running the same command; an
+already-bootstrapped company is a documented refusal; and a failed user insert removes
+only the company that attempt created. `tests/test_phase53_bootstrap_admin_atomicity.py`
+— 6 tests, all 6 fail on the old ordering.
+
+### New blocker — DEP-1: pinned dependencies carry published advisories
+
+**Status: `OPEN` — release blocker. Owner: engineering, with a security reviewer's
+sign-off on the resulting matrix.** Evidence and the reproduction command are in
+`docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §4.4.
+
+`pip-audit 2.10.1` against `requirements.lock.hashes.txt`: **8 of 51 packages** have
+advisories with fixes available — `pypdf` 5.4.0 (103), `pillow` 11.1.0 (69),
+`starlette` 0.46.2 (14), `python-multipart` 0.0.20 (12), `cryptography` 44.0.2 (10),
+`pdfminer.six` (4), `certifi` (2), `pytest` 8.3.5 (2, test-only).
+
+**Why it blocks.** `pypdf`, `pdfminer.six`, `pillow` and `python-multipart` parse
+third-party supplier documents — the system's primary input, supplied by untrusted
+parties. `starlette` fronts every request and `cryptography` protects the vault and the
+audit chain. These are externally reachable, not insider-only.
+
+**What is missing:** upgraded pins plus a regenerated hash lockfile, a full matrix run
+(including the Windows key-rotation job and the interpreter-gated restore tests), and
+an advisory scan wired into CI so this cannot accumulate again. It was *not* done here:
+moving `pypdf` 5→6, `pillow` 11→13 and `starlette` 0.46→1.x is a substantial change
+that a release candidate should not absorb un-reviewed at its final gate, and a partial
+upgrade would leave the same exposure with a false sense of progress.
+
+### New blocker — OPS-1: the container image has never been built
+
+**Status: `NOT_VERIFIED`.** No container runtime exists in this environment and none can
+be installed (no `docker`/`podman`/`buildah`; the Debian mirrors are unreachable from
+the sandbox's network allowlist). **No build is claimed.** What was verified statically
+and by executing the same entrypoint is listed in `docs/PR_STACK_REVIEW.md` §13.3: the
+interpreter pin matches the code's safe-restore floor, the install command is the
+CI-proven one, every `ENV` name is read by the code, the build context contains no
+secret material, and startup/health/SIGTERM/restart behaviour was executed against a
+real file-backed database.
+
+Still owed by whoever owns the platform: the image build itself, an image CVE scan of
+`python:3.11.17-slim-bookworm`, a layer secret scan, and the compose stack coming up.
+
+### New blocker — OPS-2: RTO/RPO and a real restore drill
+
+**Status: `OPEN`.** Backup creation, manifest contents and interrupted-backup safety
+were verified here; restore is interpreter-gated (this sandbox runs 3.11.2) and is
+evidenced only by a green CI job that fails loudly — not skips — below 3.11.17. The
+runbook's own rule stands: **RTO/RPO must not be quoted until a drill runs on the target
+host**, because a synthetic restore cannot produce a production recovery objective.
+
+### Blocker matrix — decision, evidence, owner
+
+| ID | Decision required | Evidence currently available | Exact missing artefact | Responsible reviewer | Technically ready once approved? |
+|---|---|---|---|---|---|
+| **LB-1** | Is the top *droit de timbre* band capped, and at what figure in DZD (or explicitly "no ceiling")? | Spec states the shipped seed applies **no** cap and that the ceiling is UNDETERMINED; `max_amount_dzd` cannot default to NULL (`TIMBRE_RULE_CAP_NOT_DECLARED`); boundaries pinned at 100,000.00 / 100,000.01 / 500,000.00 / 600,000.00 | The Finance Law / Code du Timbre article in force for the invoice period, stated as a ceiling or as "uncapped" | Accountant of record (expert-comptable) | **Yes** — a new rule version through the audited two-person path; no code change |
+| **LB-2** | Which SCF account carries a purchase price variance, and is the policy "book on invoice" or "revalue stock"? | `products.price_variance_account_code` is nullable with **no** compiled-in or seeded default; split is exact and tested both directions; unknown codes refused (`PRICE_VARIANCE_ACCOUNT_UNKNOWN`); unconfigured residuals are named and audited | A written SCF account code for the variance **and** the policy choice | Accountant of record | **Yes** — set the product column per policy; mechanism and tests exist |
+| **LB-3** | Is TVA rounded **per line** (and the header must equal the sum) or on the **invoice total**? | Per-line rule implemented and documented; invoice-level declarations are refused with `HEADER_TVA_MISMATCH`; measured divergence in **67 of 100** small-value cases | The convention the tax administration expects for multi-line invoices | Accountant of record | **Yes, conditionally** — if "invoice total", the change is a rounding-policy change plus test updates, not a redesign |
+| **C1** | Does the SCF mapping, journal-code choice and rounding match statutory expectation? | Vendored chart; tested mappings; `Decimal` throughout; trial balance and journal balance checks in every posting path | Signed mapping table and reversal policy from the expert-comptable | Expert-Comptable (ONEC) | **Yes** — mapping is data in `vendor/`, not hard-coded logic |
+| **C2** | Are the VAT rates, timbre brackets and G50 box mapping correct for the period? | Versioned rate rules; effective-dated resolution; per-invoice provenance (`timbre_rule_version` / `_source`) retained through reversal; G50 tags emitted | Dated rate schedule and G50 box specification for each open period | Expert-Comptable / tax adviser | **Yes** — rates are configuration versions, not constants |
+| **C6** | Law 18-07: processing register, data-subject workflow, ANPDP filing, transfer assessment | Encryption at rest for documents; audit chain; redaction of NIN/RIB/IBAN/tokens in logs; retention documented in `docs/DATA_PROTECTION_COMPLIANCE.md` | ANPDP filing/registration evidence, a signed processing register, and a data-subject request procedure with an owner | Legal counsel / DPO | **No** — partially software, mostly organisational; the technical controls exist, the legal artefacts do not |
+| **S1** | Key material is a readable file: is a KMS/HSM funded, or is the residual accepted in writing? | `0600` on the open descriptor, custody-drift detection, symlink/reparse refusal, atomic publish with directory fsync (R-08 closed), `describe()` reports `hsm_equivalent: False`; `ERP_KEY_PROVIDER=kms|hsm` fails closed unless a provider is supplied | A funded KMS/HSM, or a recorded acceptance by the security owner | Security officer | **Yes for KMS** — the provider contract and fail-closed switch exist; the investment does not |
+| **S3** | Is split custody / two-person control required for rotate–retire–remove? | Rotation is audited and versioned; `vault-rollback` / `audit-rollback` exist; a single operator can currently perform all of it | A policy decision plus an approval-workflow requirement | Security officer | **No** — needs an approval workflow; today the audit trail records who did it, which is detection, not prevention |
+
+**Status: `BLOCKED_EXTERNAL` for LB-1/LB-2/LB-3/C1/C2/C6/S1/S3 · `OPEN` for DEP-1,
+OPS-1, OPS-2 · `NOT_PRODUCTION_READY` overall.** Nothing merged, retargeted or deployed.

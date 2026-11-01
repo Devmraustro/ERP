@@ -1395,3 +1395,185 @@ Nothing was merged, retargeted, rebased or deployed.
 The Windows job is the one that exercises the restore and key-rotation paths
 that cannot run in this sandbox (the interpreter-gated tests), which is why those
 remain "verified on CI, not here" in §12.4.
+
+---
+
+## 13. Round 6 — production readiness gate (2026-11-01)
+
+A gate, not a feature round: verify, fix only what can be fixed without a legal or
+accounting decision, and state an evidence-backed readiness verdict. It found and
+fixed **one defect on the first step of the deployment runbook** (§13.2), found a
+**dependency-advisory blocker** that had never been scanned for (§13.4), and could
+not verify the container image for want of a container runtime (§13.3).
+
+### 13.1 Entry verification (nothing assumed)
+
+| Item | Observed |
+|---|---|
+| `origin/arena/7f12d627-erp` | `8c21adebe2309198eb647424ae0215c7992cc8c7` — matches the reported final commit |
+| Local `HEAD` at entry | **`4fc1364a` (main), 75 dirty entries** — the sandbox again recreated the branch ref from `main` while the files were already at `8c21adeb` (the same artifact Round 5 recorded) |
+| Verify-before-repair | A sha256 manifest of all 276 files was taken **before** touching git, and re-taken after: byte-identical. Repair was `git reset --soft <sha>` + `git reset` — moves the ref, writes nothing to the tree |
+| After repair | `HEAD = 8c21adeb`, worktree clean, `main` untouched at `4fc1364a` |
+| PR stack | #3→#4→#5→#6→#7 each base == previous head (`main`, `phase29/ocr-failclosed`, `fix/phase29-source-invoice-consistency`, `fix/phase29-invoice-line-price-consistency`, `fix/phase29-invoice-discount-and-line-net-consistency`) |
+| CI per PR head | #3 `40763416753` ✅ · #4 `40775473917` ✅ · #5 `40965006912` ✅ · #6 `41064213366` ✅ · #7 `41296204685` ✅ — 3/3 jobs each (3.11, 3.12, Windows) |
+| Reviews | **0 of 5** |
+
+### 13.2 F-R6-1 — the bootstrap could not be retried after an aborted password prompt
+
+**Where:** `dz_erp/serve.py::_bootstrap_admin` (now lines 61–160).
+**Reproduction:** on a fresh `ERP_DB_PATH`,
+`python -m dz_erp.serve --bootstrap-admin admin` with no TTY (or Ctrl-C at the
+prompt), then re-run the same documented command.
+
+**Expected:** an aborted first step leaves the database untouched and the retry works.
+**Actual (before the fix):** the function inserted and **committed the company
+first**, then prompted for the password. An aborted prompt left a company row, no
+user and no audit event, and the retry died with
+`sqlite3.IntegrityError: UNIQUE constraint failed: companies.code` — a raw traceback
+from the *first* step of the runbook, on a database that is now neither empty nor
+bootstrapped.
+
+That state is reachable by ordinary operation, not by misuse:
+`ops/docker-compose.yml` defines the bootstrap as an interactive one-shot
+(`stdin_open: true`, `tty: true`), so any mistyped run, Ctrl-C, or non-TTY invocation
+produces it, and recovery required manual SQL — editing a financial database by hand
+before first use.
+
+**Fix** (minimal, no policy invented):
+
+1. the password is read **before** anything touches the disk, so an aborted prompt is
+   a no-op on the database;
+2. an **orphaned** bootstrap company (the state the old ordering left behind) is
+   **reused**, so an existing broken deployment recovers by re-running the same
+   command — no SQL, and no deletion of company rows;
+3. an already-bootstrapped company is a documented `SystemExit` naming what to do,
+   not a traceback;
+4. the one window that cannot be a single transaction (`AuthManager.create_user`
+   opens its own; a nested transaction raises `database is locked` by design) is
+   closed by a **compensating delete** that only ever removes the company *this
+   attempt* created.
+
+**Evidence:** `tests/test_phase53_bootstrap_admin_atomicity.py`, 6 tests. All 6 fail
+with the pre-fix ordering restored and pass with the fix. End-to-end on a real file:
+aborted prompt → `companies: []`; retry → `Created admin 'admin' (id=1)`; second run
+→ exit 1 with "already bootstrapped"; an injected orphan → reused at `id=1`.
+
+**Severity:** High for deployment friction, none for ledger integrity (no financial
+row was ever written by the failed path; the company row carries no balances).
+
+### 13.3 Container and deployment verification — **partially verified, not built**
+
+**Docker is not available in this environment**, and it cannot be installed: there is
+no `docker`/`podman`/`buildah` binary, and `apt-get` cannot reach the Debian mirrors
+(the sandbox's network allowlist covers GitHub, PyPI and npm only). **No image was
+built and no claim of a successful build is made.**
+
+What *was* verified, statically and by running the same entrypoint the image runs:
+
+| Property | Evidence |
+|---|---|
+| Interpreter floor is real and matches the code | `ops/Dockerfile` pins `python:3.11.17-slim-bookworm`; `security_audit.py:1078` requires `(3, 11): (3, 11, 17)` for safe restore — the pin is a security property, not decoration |
+| Dependency install is the CI-proven command | Dockerfile: `pip install --no-deps --require-hashes -r requirements.lock.hashes.txt`; `ci.yml:70,202` run the identical command on the 3.11/3.12 jobs, so the step is CI-verified on a supported interpreter (only the exact patch tag of the base image is unverified here) |
+| Every `ENV` name the image sets is actually read by the code | `ERP_DB_PATH` 16 refs, `ERP_VAULT_PATH` 12, `ERP_SECURITY_LOG_PATH` 9, `ERP_HOST` 3, `ERP_PORT` 2 — a typo here would silently point the container at the wrong volume, so this was checked one by one |
+| Non-root, fixed uid/gid | `USER erp` (uid/gid 10001) after the chown; `/var/lib/erp`, `/var/log/erp` are the only writable paths and are volumes |
+| No secret in any copied directory | The image `COPY`s only `requirements*.txt`, `dz_erp`, `vendor`, `tools`, `ops`, `pyproject.toml`, `LICENSE`. A scan of those four directories for `*.sqlite3|*.key|*.pem|*.env|*secret*|*credential*` returns nothing; `ops/erp.env` is `.dockerignore`d and only the example is committed |
+| `.dockerignore` keeps state out of the context | `.git`, `tests`, `*.sqlite3*`, `*.keys.json`, `*.pem`, `*.key`, `ops/erp.env`, `.env*` |
+| Startup refuses an unbootstrapped volume loudly | Executed: exit code **2** with an actionable message; schema and a `0600` 44-byte audit key are created |
+| `/healthz` answers unauthenticated and does not touch the DB | Executed: `200 {"status":"ok"...}`; `api.py:390` returns a constant |
+| Graceful shutdown on SIGTERM | Executed: `Shutting down → Waiting for application shutdown → Application shutdown complete → Finished server process`; exit status **143**, which is uvicorn 0.34.0 re-raising the captured signal (`server.py:329`) after draining — a clean signal stop, not a crash |
+| Restart against the existing volume | Executed: second start healthy in <1 s; `verify_audit_chain` valid, trial balance balanced after restart |
+| Binds `0.0.0.0` in the image | `ERP_HOST=0.0.0.0`; the compose file deliberately publishes to `127.0.0.1:8000` only |
+| Compose hardening | `read_only: true`, `cap_drop: ALL`, `no-new-privileges`, `replicas: 1`, `stop_grace_period: 30s`, named volumes for state and logs |
+| Named-volume ownership works | Only because the Dockerfile `chown`s the directories it creates: Docker seeds a fresh named volume from the image path's ownership, which is what makes uid 10001 able to write |
+
+**Still unverified, and it must stay that way until someone runs it:** the actual image
+build, the `apt-get` layer, layer-level secret scanning, image CVE scanning of the base
+image, `read_only` behaviour under a real kernel, the compose stack coming up, and a
+restore inside the container. `ops/Dockerfile` and `ops/docker-compose.yml` both carry
+`STATUS: prepared, not built` headers, and they remain accurate.
+
+### 13.4 Dependency advisories — first scan, and it found a blocker
+
+`pip-audit` was installed into a throwaway venv and run against the hash lockfile:
+**8 of 51 pinned packages carry published advisories**, all with fixed releases
+available, none upgraded here. Full table and reasoning:
+`docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §4.4. The short version: `pypdf` (103),
+`pillow` (69), `starlette` (14), `python-multipart` (12), `cryptography` (10),
+`pdfminer.six` (4), `certifi` (2), `pytest` (2, test-only).
+
+The four document/upload parsers are the system's primary attack surface: they consume
+**untrusted files uploaded by third parties**. This is recorded as release blocker
+**DEP-1**, not as a note, and the scan is recommended as a CI gate once the upgrade
+lands — there is no point failing CI on advisories nobody is allowed to fix yet.
+
+### 13.5 Backup and disaster recovery
+
+| Claim | Status |
+|---|---|
+| Backup creation produces an encrypted archive with a SHA-256 manifest | **Verified here.** 13,860-byte archive; the SQLite magic and `password_hash` do not appear in the ciphertext; manifest carries `db_sha256`, `audit_key_versions`, `vault_key_versions`, `vault_file_count` |
+| Manifest records **every** key version, not just the active one | **Verified** (`create_encrypted_backup`: `vault_key_versions` / `audit_key_versions` both present) |
+| An interrupted backup does not poison the next one | **Verified.** A planted stale `.tmp_backup_*` directory did not affect two subsequent backups (unique scratch names); each run removes its own scratch directory and leaves the foreign one alone |
+| Isolated restore, tampered-archive refusal, interrupted migration repair, no silently-minted key | **Not reproducible here — interpreter gate.** `safe_restore_supported()` is `False` on this sandbox's CPython **3.11.2**. These tests *fail loudly* below 3.11.17 rather than skipping (`test_restore_requires_a_backup_key…` raises `Safe backup restore requires Python 3.11.17+`), and CI's 3.11 job runs the full suite with `exit $status` and no deselect — so a green 3.11 job is itself the evidence that the runner is ≥ 3.11.17 and those restore assertions executed. CI logs cannot be downloaded from this sandbox, so the assertion-level output was not read |
+| Key loss never mints a replacement | **Verified here** and pinned by `test_phase52_audit_key_publish_durability.py::test_r08_a_lost_key_with_events_fails_loudly_and_mints_nothing` |
+| Migration interruption recovery | **Verified here** — `tests/test_phase38_migration_matrix.py` 24/24, including the half-applied-upgrade repair |
+| RPO / RTO | **Not established.** `docs/BACKUP_AND_RECOVERY_RUNBOOK.md` states plainly that RTO/RPO must not be quoted until a drill is run on the target host. Nothing in this round changes that: a synthetic restore cannot produce a production RPO |
+
+### 13.6 Security and tenant isolation
+
+| Control | Result |
+|---|---|
+| Every protected route rejects an unauthenticated caller | **Verified** — 10/10 routes probed return 401; only `/healthz` and `/api/v1/upload-policy` are public, both by documented design |
+| Forged/malformed tokens | 401 for `Bearer not-a-token`, empty bearer, and `Basic …` |
+| Cross-tenant read | Company 2's token lists **no** partners while company 1 sees its own; invoice 1 read → `404 "Invoice 1 does not exist."` (no existence disclosure) |
+| Cross-tenant write | Invoice 1 posted by company 2 → `403 "Invoice not found in target company."` |
+| Segregation of duties | Creator cannot approve own invoice — `SEGREGATION_OF_DUTIES_VIOLATION`, audited, state unchanged |
+| Audit immutability | `UPDATE` and `DELETE` on `audit_events` refused by trigger (`AUDIT_TAMPER_VIOLATION`) |
+| Rate limiting | **Verified working** — with limit 3, the 4th failed login returns 429, and a *correct* password during the lockout is still refused (no bypass). **Process-local only** — no Redis backend is bundled, and the code says so; it must not be described as distributed |
+| Log redaction | Token, DZ IBAN, 18-digit NIN and 20-digit RIB patterns redacted |
+| Key custody | `0600` on the open descriptor, custody drift refused, symlink/reparse refused, atomic publish with directory fsync (R-08 closed in Round 5) |
+| Backup access control | The archive is Fernet-encrypted with the SHA-256 manifest inside it; access control is filesystem/infrastructure, **not verified here** |
+| Dependency vulnerabilities | **DEP-1 blocker** (§13.4) — 8 packages with advisories |
+| Container vulnerabilities | **Unverified** — no runtime, no scanner (§13.3) |
+
+### 13.7 Findings register
+
+| ID | Finding | Status | Evidence |
+|---|---|---|---|
+| **F-R6-1** | Bootstrap commits the company before prompting; aborted prompt orphans it; retry crashes with a raw `IntegrityError` | **FIXED_AND_VERIFIED** | `serve.py:61–160`; 6 tests, all 6 fail on the old ordering |
+| F-R5-1 | Reversal numbered for the original year but dated today; credit note's `fiscal_year` disagreed with its own `invoice_date` | **CLOSED** (Round 5) | `procurement_stock.py:2736–2738`, `3015–3017`; revert → 2 failures |
+| F-R3-1 | `PRAGMA journal_mode = WAL` fails instantly against a RESERVED peer | **CLOSED** (Round 4) | `database.py:955–990`, call site `1157`; 9 tests |
+| R-08 | Key file fsynced but not its directory | **CLOSED** (Round 5) | `database.py:725`, `796`, `814`; revert → 1 failure |
+| R-09 | `O_CREAT|O_EXCL` fallback publishes an empty file before writing | **OPEN, accepted** | `database.py:785`, `806`, reader retry `823`; inherent without hard links; `os.replace` would reintroduce split-key risk |
+| F-R3-2 | `CAST(... AS REAL)` in the variance split | **CLOSED** (Round 4) | revert → 2 failures |
+| F-R3-3 | Unknown variance account posted silently | **CLOSED** (Round 4) | `PRICE_VARIANCE_ACCOUNT_UNKNOWN` |
+| **DEP-1** | 8 of 51 pinned packages carry advisories, including the untrusted-document parsers | **OPEN — release blocker** | §13.4, `DEPENDENCY_AND_LICENSE_REGISTER.md` §4.4 |
+| **OPS-1** | Container image never built; compose stack never started | **NOT_VERIFIED** | §13.3 |
+| **OPS-2** | RTO/RPO not established; restore never drilled on target hardware | **OPEN** | `BACKUP_AND_RECOVERY_RUNBOOK.md` |
+
+### 13.8 Test matrix and environment
+
+| Item | Value |
+|---|---|
+| Sandbox interpreter | CPython **3.11.2** — below the 3.11.17 safe-restore floor, which is why 20 tests fail here |
+| Full suite | **20 failed, 1118 passed, 9 skipped** (Round-5 baseline 20F/1112P/9S; +6 tests this round) |
+| Failure set | Same 20 ids, same distribution (3 phase11, 10 phase12, 1 phase5, 1 phase6, 2 phase8, 3 phase9); every one raises `Safe backup restore requires Python 3.11.17+`. Not skips — the gate fails loudly |
+| Revert checks | F-R6-1 → 6/6 fail · F-R5-1 → 2 fail · R-08 → 1 fail · F-R3-2 → 2 fail; all restored byte-identical (`sha256sum -c`) |
+| Focused suites | migration matrix 24, WAL contention 9, phase49 race 7, phase51 3, phase52 4, phase53 6, docs consistency 15 — all pass |
+| Security suites | phase35 + phase7 + phase34 + phase33 = 134 passed |
+| `ruff check dz_erp tests tools` | clean |
+| Risk register | consistent |
+| Tool versions | pytest 8.x, pip-audit 2.10.1, uvicorn 0.34.0 |
+
+### 13.9 Verdict
+
+**`NOT_PRODUCTION_READY`.** Three classes of gate are still open, and none of them is
+a coding task that this round was authorised to complete:
+
+1. **Legal / accounting (external):** LB-1, LB-2, LB-3, and the C1/C2/C6 sign-offs.
+2. **Security (external + engineering):** DEP-1 dependency advisories, S1/S3 key
+   custody, container and base-image scanning.
+3. **Operational (needs a real environment):** OPS-1 image build, OPS-2 restore drill
+   and RTO/RPO.
+
+The code itself is **`READY_FOR_HUMAN_REVIEW`**, and F-R6-1's fix is
+**`FIXED_AND_VERIFIED`**. Nothing was merged, retargeted, rebased or deployed.

@@ -292,3 +292,25 @@ manifest of all 274 files proving no content changed. Detail:
 **Status: code `READY_FOR_HUMAN_REVIEW`; `BLOCKED_EXTERNAL` for LB-1, LB-2 and
 the new LB-3; `NOT_PRODUCTION_READY` overall.** Nothing merged, retargeted,
 rebased or deployed.
+
+## S14. Round 6 — production readiness gate (2026-11-01)
+
+Entry state re-verified (the branch ref had again been recreated from `main` by the
+sandbox; repaired metadata-only after a before/after sha256 manifest of all 276 files
+proved the worktree already matched the delivered commit). Detail:
+`docs/PR_STACK_REVIEW.md` §13.
+
+| Row | Area | Result |
+|---|---|---|
+| S14a | Entry verification | origin `8c21adeb` == reported commit; PRs #3–#7 chained, `OPEN`/`CLEAN`, 3/3 CI each, **0 reviews**; `main` untouched |
+| S14b | **F-R6-1** bootstrap atomicity | **FIXED_AND_VERIFIED** — the company was committed before the password prompt, so an aborted prompt orphaned it and the retry died with a raw `IntegrityError` on the runbook's first step. Prompt-first, orphan reuse, documented refusal, compensating delete. 6 tests, all fail on the old ordering |
+| S14c | Container image | **NOT_VERIFIED** — no container runtime and none installable; **no build claimed**. Static verification plus real process smoke tests (startup refusal, `/healthz`, SIGTERM graceful drain, restart, chain valid) in §13.3 |
+| S14d | **DEP-1** dependency advisories | **OPEN — release blocker.** First scan ever: 8 of 51 pinned packages carry advisories with fixes, including `pypdf`, `pillow`, `python-multipart`, `pdfminer.six` — the parsers fed by untrusted uploads |
+| S14e | Backup / DR | Backup creation, manifest key-version coverage, interrupted-backup safety, no-silent-key-mint, migration-interruption recovery: **verified**. Isolated restore: **interpreter-gated here**, evidenced only by a green CI 3.11 job. **OPS-2**: RTO/RPO not established |
+| S14f | Security | 10/10 protected routes 401; forged tokens 401; cross-tenant read 404 / write 403 with no existence leak; SoD enforced and audited; audit immutability by trigger; brute-force lockout works and cannot be bypassed; redaction and custody verified; rate limiting **process-local only** |
+| S14g | Test matrix | **20F/1118P/9S**; the same 20 ids, all the 3.11.17 gate (sandbox is 3.11.2); distribution unchanged. Revert checks: F-R6-1 6/6, F-R5-1 2, R-08 1, F-R3-2 2 — all restored byte-identical |
+| S14h | Static checks | `ruff` clean; risk register consistent; docs consistency 15 passed |
+
+**Status: code `READY_FOR_HUMAN_REVIEW`; `BLOCKED_EXTERNAL` (LB-1, LB-2, LB-3, C1, C2,
+C6, S1, S3); `OPEN` (DEP-1, OPS-1, OPS-2); `NOT_PRODUCTION_READY`.** Nothing merged,
+retargeted or deployed.

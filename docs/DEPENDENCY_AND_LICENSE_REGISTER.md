@@ -276,3 +276,47 @@ digests, tampered bytes, missing pins) are covered by ten tests in
 **Still not covered:** publisher provenance (§4.2) — a wheelhouse proves the
 *bytes* are the pinned ones, not who published them. PEP 740/sigstore
 attestation verification remains an accepted residual risk (B2).
+
+### 4.4 Known advisories against the pinned versions — `OPEN` (Round 6)
+
+Hash pinning proves *which bytes* run; it says nothing about whether those bytes are
+known-vulnerable. Round 6 ran the first advisory scan of this lockfile and found that
+**8 of the 51 pinned packages carry published advisories**. Every one of them has a
+fixed release available; none of them was upgraded in that round, because doing so
+means moving several packages across major versions and re-running the whole matrix,
+which is a change a release candidate should not absorb at its final gate without the
+review the upgrade itself deserves.
+
+Reproduce with (network required; `pip-audit` is deliberately **not** a dependency of
+this project, so it is not in the lockfile):
+
+```
+python -m venv /tmp/sca && /tmp/sca/bin/pip install pip-audit
+/tmp/sca/bin/pip-audit --requirement requirements.lock.hashes.txt --no-deps --disable-pip
+```
+
+Result on the Round-6 tree (pip-audit 2.10.1):
+
+| Package | Pinned | Advisories | Fixed in |
+|---|---|---:|---|
+| pypdf | 5.4.0 | 103 | 6.4.0 … 6.21.4 |
+| pillow | 11.1.0 | 69 | 12.1.1 … 13.0.0 |
+| starlette | 0.46.2 | 14 | 0.47.2 / 0.49.1 / 1.3.1 |
+| python-multipart | 0.0.20 | 12 | 0.0.22 … 0.0.31 |
+| cryptography | 44.0.2 | 10 | 46.0.5 … 50.0.0 |
+| pdfminer.six | 20250327 | 4 | 20251107 / 20251230 |
+| certifi | 2026.7.22 | 2 | 2026.10.18 |
+| pytest | 8.3.5 | 2 | 9.0.3 *(test-only)* |
+
+**Why this is a deployment blocker rather than housekeeping.** `pypdf`, `pdfminer.six`,
+`pillow` and `python-multipart` are exactly the components that parse **untrusted
+supplier documents uploaded by third parties** — the system's primary input. `starlette`
+handles every HTTP request and `cryptography` protects the vault and audit chain. An
+advisory in those components is reachable by an external actor, not by a curious insider.
+
+**What has to happen.** Regenerate the hash lockfile with upgraded pins for the runtime
+packages, re-run the full matrix (including the Windows key-rotation job and the
+interpreter-gated restore tests), and re-run this scan as part of CI so a future
+advisory cannot accumulate unnoticed. The pinned `python:3.11.17-slim-bookworm` base
+image needs the same treatment with an image scanner; that is unverified here because
+no container runtime exists in this environment (§4.3 of `docs/REMAINING_BLOCKERS.md`).

@@ -722,6 +722,40 @@ def _file_backed_db_has_audit_events(db_path: str) -> bool:
         conn.close()
 
 
+def _fsync_directory(directory: Path) -> bool:
+    """Make a new directory entry durable, where the platform supports it.
+
+    ``os.fsync`` on the *file* only guarantees the file's content; the name that
+    points at it lives in the parent directory, whose own metadata is a separate
+    durability domain. A machine crash between publishing a key and the next
+    directory sync could therefore leave the key file's content on disk but not
+    its name — the audit events signed with that key would survive, the key would
+    not, and start-up would fail loudly with ``AuditKeyUnavailableError``
+    (residual risk R-08).
+
+    Windows has no portable directory fsync (the handle semantics differ and
+    ``os.open`` on a directory fails), and a few filesystems refuse it. There the
+    function returns ``False`` rather than failing the start-up: losing crash
+    durability is not a reason to refuse to run, and the consequence is the
+    already-documented, already-fail-loud missing-key path rather than a silent
+    integrity break.
+    """
+    if os.name == "nt":  # pragma: no cover - exercised on the Windows CI job
+        return False
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:  # pragma: no cover - filesystem without directory handles
+        return False
+    try:
+        try:
+            os.fsync(dir_fd)
+        except OSError:  # pragma: no cover - filesystem refusing directory sync
+            return False
+        return True
+    finally:
+        os.close(dir_fd)
+
+
 def _publish_key_file(key_path: Path, secret: bytes) -> bytes:
     """Create the database's key file atomically, or adopt the existing one.
 
@@ -757,6 +791,9 @@ def _publish_key_file(key_path: Path, secret: bytes) -> bytes:
             os.fsync(handle.fileno())
         try:
             os.link(str(tmp_path), str(key_path))
+            # R-08: the link is a directory entry, so the key is only durable
+            # once the directory itself is synced.
+            _fsync_directory(key_path.parent)
             return secret
         except FileExistsError:
             # Another process published first; its key is authoritative.
@@ -773,6 +810,8 @@ def _publish_key_file(key_path: Path, secret: bytes) -> bytes:
                 handle.write(secret)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # Same reasoning as the hard-link path: the new name needs syncing.
+            _fsync_directory(key_path.parent)
             return secret
     finally:
         if fd >= 0:  # pragma: no cover - only when os.fdopen itself failed

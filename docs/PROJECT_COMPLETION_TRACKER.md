@@ -268,3 +268,27 @@ found two more defects. Detail and evidence: `docs/PR_STACK_REVIEW.md` §11.
 `NOT_PRODUCTION_READY` overall.** The 20 failing tests are the same intentional
 Python 3.11.17 interpreter gates as every previous round, not regressions.
 `0 of 5` PRs carry a human review. Nothing merged, retargeted or deployed.
+
+## S13. Round 5 — final independent audit (2026-11-01)
+
+Entry state was re-verified, including a sandbox artifact: the branch ref had
+been recreated from `main` while the working files were already at the delivered
+commit. Repaired by moving the ref (`reset --soft` + `reset`), with a sha256
+manifest of all 274 files proving no content changed. Detail:
+`docs/PR_STACK_REVIEW.md` §12.
+
+| Row | Area | Result |
+|---|---|---|
+| S13a | Financial correctness (A) | **One defect, fixed.** All money is `Decimal` in `TEXT` columns; the only `REAL` columns are OCR confidence/latency. Header totals are pinned to the sum of per-line roundings, timbre is re-derived, TTC identity enforced. Adversarial cases (0.01 DZD, fractional prices, 10^6 quantities, discounts+VAT, two partial receipts, mixed rates) all exact |
+| S13b | **F-R5-1** reversal period contradiction | **FIXED_AND_VERIFIED** — `RAVOIR/2025/…` dated 2026-11-01, and a credit note whose `fiscal_year` (2025) disagreed with its own `invoice_date` (2026). Both now derive from the date actually written, at both the request and posting writers. 3 tests; 2 fail on the old code |
+| S13c | SQLite / audit integrity (B) | **F-R3-1 re-verified** on both database forms and both lock types; bounded 0.48 s fail-loud on the switch path, no switch at all when already WAL; no split key, chain valid after recovery |
+| S13d | **R-08** key publish durability | **CLOSED (FIXED_AND_VERIFIED)** — `_fsync_directory()` after the link (and after the fallback create); 4 tests, the first fails if the fix is removed |
+| S13e | **R-09** | **Open, with rationale** — inherent to create-if-absent without hard links; `os.replace` would reintroduce split-key risk. Not closed on an argument |
+| S13f | Procurement / inventory (C) | Tenant isolation enforced (0 rows written); receipt and posting replays write no duplicate stock move; partial receipts reconcile; one credit note per invoice |
+| S13g | Security / ops (D) | SoD, role gates, audit immutability, custody `0600`, redaction, process-local-only rate limiting: **verified**. Container build, real-volume restore, KMS custody, off-host backup, scale migration: **not verifiable here** |
+| S13h | PR readiness (E) | Stack chains correctly (#3→#4→#5→#6→#7, each base == previous head); all `OPEN`/`CLEAN`, 3/3 CI each, **0 reviews**; no open code findings in any PR |
+| S13i | Verification | full suite **20F/1112P/9S** (+7 tests over the 20F/1105P/9S baseline), same 20 interpreter-gate failures; `ruff` clean |
+
+**Status: code `READY_FOR_HUMAN_REVIEW`; `BLOCKED_EXTERNAL` for LB-1, LB-2 and
+the new LB-3; `NOT_PRODUCTION_READY` overall.** Nothing merged, retargeted,
+rebased or deployed.

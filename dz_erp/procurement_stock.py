@@ -2724,7 +2724,18 @@ def reverse_posted_invoice(
             (orig["journal_entry_id"],),
         ).fetchall()
 
-        rev_entry_no = f"RAVOIR/{orig['fiscal_year']}/{original_invoice_id:05d}"
+        # The reversal is booked in the period it is issued (today), so the
+        # entry number and the credit note's fiscal_year are derived from that
+        # same date. Using the *original* invoice's fiscal year produced a
+        # self-contradictory record: an entry numbered ``RAVOIR/2025/...`` dated
+        # 2026, and a credit note whose ``invoice_date`` fell in 2026 while its
+        # ``fiscal_year`` said 2025 — the value the duplicate-invoice index and
+        # every year-grouped report key on. Whichever period a reversal is
+        # booked in, number and date must agree; deriving both from one date
+        # keeps them so under any dating policy.
+        rev_entry_date = now_iso[:10]
+        rev_year = int(rev_entry_date[:4])
+        rev_entry_no = f"RAVOIR/{rev_year}/{original_invoice_id:05d}"
         jcur = conn.execute(
             """
             INSERT INTO journal_entries (
@@ -2738,7 +2749,7 @@ def reverse_posted_invoice(
                 company_id,
                 orig["branch_id"],
                 rev_entry_no,
-                now_iso[:10],
+                rev_entry_date,
                 str(original_invoice_id),
                 orig["document_id"],
                 orig_je["total_credit_dzd"],
@@ -2800,8 +2811,8 @@ def reverse_posted_invoice(
                 orig["grn_id"],
                 cn_no,
                 normalize_invoice_ref(cn_no),
-                orig["fiscal_year"],
-                now_iso[:10],
+                rev_year,
+                rev_entry_date,
                 orig["payment_method"],
                 orig["amount_ht_dzd"],
                 orig["amount_tva_dzd"],
@@ -2992,7 +3003,18 @@ def _create_reversal_request(
             (orig["journal_entry_id"],),
         ).fetchall()
 
-        rev_entry_no = f"RAVOIR/{orig['fiscal_year']}/{original_invoice_id:05d}"
+        # The reversal is booked in the period it is issued (today), so the
+        # entry number and the credit note's fiscal_year are derived from that
+        # same date. Using the *original* invoice's fiscal year produced a
+        # self-contradictory record: an entry numbered ``RAVOIR/2025/...`` dated
+        # 2026, and a credit note whose ``invoice_date`` fell in 2026 while its
+        # ``fiscal_year`` said 2025 — the value the duplicate-invoice index and
+        # every year-grouped report key on. Whichever period a reversal is
+        # booked in, number and date must agree; deriving both from one date
+        # keeps them so under any dating policy.
+        rev_entry_date = now_iso[:10]
+        rev_year = int(rev_entry_date[:4])
+        rev_entry_no = f"RAVOIR/{rev_year}/{original_invoice_id:05d}"
         # Create journal entry in DRAFT state (will be POSTED after approval)
         try:
             jcur = conn.execute(
@@ -3008,7 +3030,7 @@ def _create_reversal_request(
                     company_id,
                     orig["branch_id"],
                     rev_entry_no,
-                    now_iso[:10],
+                    rev_entry_date,
                     str(original_invoice_id),
                     orig["document_id"],
                     orig_je["total_credit_dzd"],
@@ -3086,8 +3108,8 @@ def _create_reversal_request(
                 orig["grn_id"],
                 cn_no,
                 normalize_invoice_ref(cn_no),
-                orig["fiscal_year"],
-                now_iso[:10],
+                rev_year,
+                rev_entry_date,
                 orig["payment_method"],
                 orig["amount_ht_dzd"],
                 orig["amount_tva_dzd"],

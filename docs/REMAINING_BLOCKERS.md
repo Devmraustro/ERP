@@ -295,3 +295,61 @@ unallocated behaviour.
 
 **Status: `BLOCKED_EXTERNAL` + `NOT_PRODUCTION_READY`.** Code-side
 `CHANGES_REQUIRED` is cleared; nothing was merged, retargeted or deployed.
+
+## Round 5 (2026-11-01) — final audit: one defect fixed, R-08 closed, one new question
+
+### Fixed in this round
+
+**F-R5-1 — a reversal contradicted itself about its own period.** Reversing a
+prior-year invoice produced an entry numbered `RAVOIR/2025/00001` **dated
+2026-11-01**, and a credit note whose `invoice_date` was 2026 while its
+`fiscal_year` said 2025 — the value the duplicate-invoice unique index and every
+year-grouped report key on. Number, date and `fiscal_year` now derive from the
+single date the function writes, so they agree under any dating policy. Fixed at
+both writers; 3 regression tests, 2 of which fail on the old code.
+
+**R-08 — CLOSED.** The key publish path fsynced the file but not the directory
+that received the link, so a crash could keep the audit events and lose the key.
+`_fsync_directory()` now runs after both publish paths; the regression test wraps
+`os.fsync`, inspects the descriptor and fails if the call is removed. Round 2's
+rule — no closure without a verified fix **and** regression tests — is satisfied.
+
+**R-09 — remains open** with its rationale: the `O_CREAT|O_EXCL` fallback exists
+only where hard links are unavailable, its reader-side window is bounded and
+fails loudly, and the obvious "fix" (`os.replace`) would reintroduce the
+split-key race that `O_EXCL` prevents.
+
+### LB-3 — should TVA be rounded per line or on the invoice total?
+
+**Status: `BLOCKED_EXTERNAL`.** Owner: the accountant of record. Required
+evidence: the rounding convention the *droit fiscal* expects when an invoice has
+several lines, i.e. whether TVA is computed per line and summed, or on the
+invoice's total base.
+
+**What the code does.** Rounding is per line by documented design
+(`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §1), and the header TVA must
+equal the sum of the line values. An invoice that declares the invoice-level
+figure is refused with `HEADER_TVA_MISMATCH`. A sweep of 1–100 centimes × 3 lines
+shows the two conventions disagree in **67 of 100** cases, so this is not a
+theoretical edge: a supplier using the other convention produces an invoice that
+this system cannot accept as declared.
+
+**Why it is not simply a bug.** The refusal is loud and the declared figures are
+never altered — a reviewer sees exactly which value failed. Which convention is
+correct is a tax question, not an engineering one, and silently accepting either
+figure would mean importing an unreviewed tax policy. Recorded, not changed.
+
+### Unchanged and still blocking
+
+| Item | Status | Owner |
+|---|---|---|
+| LB-1 stamp-duty cap | `BLOCKED_EXTERNAL` | Accountant of record |
+| LB-2 SCF variance account and policy | `BLOCKED_EXTERNAL` | Accountant of record |
+| LB-3 TVA rounding convention | `BLOCKED_EXTERNAL` (**new**) | Accountant of record |
+| SCF mapping / journal sign-off (C1), legal and fiscal review (C2, C6) | `BLOCKED_EXTERNAL` | Expert-Comptable / counsel |
+| Key custody beyond a readable file (S1, S3) | `BLOCKED_EXTERNAL` (budget) | Security officer |
+| Container image not built by CI; restore unverified on real volumes | **Not verified** | Engineering / ops |
+| Human review of PRs #3–#7 | **0 of 5** | Reviewer |
+
+**Status: `BLOCKED_EXTERNAL` + `NOT_PRODUCTION_READY`.** No code-side change is
+outstanding. Nothing merged, retargeted or deployed.

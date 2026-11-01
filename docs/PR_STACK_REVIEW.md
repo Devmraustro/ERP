@@ -1160,3 +1160,225 @@ passed on the first attempt, which is consistent with the fix but is **not**
 offered as proof of it. The proof is the deterministic reproduction in §11.1: the
 failure is now produced on demand by holding a `RESERVED` lock, and the test that
 covers the fix fails when the fix is removed.
+
+---
+
+## 12. Round 5 — final independent audit (2026-11-01)
+
+An independent pass over the delivered tree: financial correctness, SQLite and
+audit integrity, procurement and inventory, security and operational readiness,
+and per-PR readiness. It found **one new defect** (§12.1), **closed R-08** with a
+fix and tests (§12.2), and re-verified the rest without finding further defects.
+
+### 12.0 Entry state, re-verified rather than assumed
+
+| Item | Observed |
+|---|---|
+| `origin/arena/7f12d627-erp` | `e0396a85a690e57857e3c8ffe7b14fe8a9c1136b` |
+| Local `HEAD` at audit start | **`4fc1364a` (main) with a dirty tree** — the sandbox restore recreated the branch ref from `main` while the working files were already at `e0396a85` |
+| Repair | `git reset --soft origin/arena/7f12d627-erp` + `git reset` — metadata only. A sha256 manifest of all 274 files was taken before and after: **byte-identical**, no file content changed |
+| `main` | `4fc1364a9504fab1153ea44e753f354f00023428` — untouched |
+| CI on `e0396a85` | 3/3 success (3.11, 3.12, Windows key rotation) |
+| PRs #3–#7 | All `OPEN`, `CLEAN`, **0 reviews** |
+
+The mismatch is recorded here because "the tree is green" must be a statement
+about a verified commit, not about a working directory that merely resembles it.
+
+### 12.1 Audit A — financial correctness. One defect, now fixed
+
+**What was verified as sound.** Every monetary column in the schema is `TEXT`
+holding a `Decimal`; the only `REAL` columns are OCR `confidence` and
+`latency_ms`. `to_decimal()` raises `FloatMonetaryError` on a float, so binary
+floats cannot enter a money path by accident. Line arithmetic is
+`round_dzd(qty × pu × (100 − disc)/100)` and TVA is charged on the discounted
+net. Header HT and TVA must equal the **sum of the per-line roundings** exactly,
+the timbre is re-derived from `HT + TVA`, and TTC must equal `HT + TVA + timbre`
+— so no total can silently drift from its lines. Exercised adversarially
+(all through the real validation and posting path):
+
+| Case | Result |
+|---|---|
+| 0.01 DZD unit price, qty 1 / 3 / 100 | 0.01 / 0.03 / 1.00 HT; TVA 0.00 / 0.01 / 0.19 |
+| Fractional prices, large quantities (12,345 × 1.000125; 999,999 × 0.000001; 1,000,000 × 9,999.99) | exact, no residue |
+| Discounts with VAT (5 % @19 %, 12.5 % @9 %, 33.33 % @19 %, 100 % @19 % → 0.00) | exact |
+| Three lines, mixed rates 19 %/19 %/9 %, discounts, **two partial receipts** | every entry balances; `380` nets to 0.00 with a variance account; balanced trial balance |
+
+**The defect — F-R5-1: a reversal contradicted itself about its own period.**
+Reversing an invoice from a prior fiscal year produced:
+
+* a journal entry numbered `RAVOIR/2025/00001` carrying `entry_date` **2026-11-01**;
+* a credit note whose `invoice_date` was `2026-11-01` while its `fiscal_year`
+  said **2025** — and `fiscal_year` is exactly what the
+  `(company_id, supplier_id, normalized_invoice_no, fiscal_year)` unique index
+  and every year-grouped report key on.
+
+So the 2026 ledger contained an entry numbered for 2025, and the credit note
+disagreed with itself about which year it belonged to. Both fields were taken
+from the **original** invoice while the date came from `datetime.now()`.
+
+**The fix is policy-neutral on purpose.** Whether a reversal should be booked in
+the issuing period or backdated into the original one is an accounting decision
+this round is not authorised to make — and the code already dates reversals in
+the issuing period. The fix therefore derives the number's year and the credit
+note's `fiscal_year` from the **same date the function already writes**, so
+number, date and year agree under either policy; changing the dating policy later
+changes all three together. Applied at both writers (the reversal *request*'s
+DRAFT entry and the reversal *posting*), in `procurement_stock.py`.
+
+**Regression tests:** `tests/test_phase51_reversal_period_consistency.py`
+(3 tests). Restoring the old derivation fails 2 of them; the third pins the
+same-period case, which must not regress.
+
+**One documented limitation, not a defect.** Because rounding is per line and the
+header must equal the sum of the lines, an invoice whose TVA was computed on the
+**invoice total** rather than per line is refused with `HEADER_TVA_MISMATCH`.
+A sweep of 1–100 centimes × 3 lines found the two conventions disagree in
+**67 of 100** cases. The per-line convention is documented in
+`docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §1, and the refusal is loud
+rather than silent — but which convention is legally correct for Algerian
+invoices is the accountant's decision, so it is recorded as an open question
+(§12.7) rather than changed.
+
+### 12.2 Audit B — SQLite and audit integrity
+
+**F-R3-1 re-verified independently**, on both database forms and both lock types:
+
+| Situation | Behaviour |
+|---|---|
+| Existing WAL database, peer holds RESERVED or EXCLUSIVE | **opens** (no switch is issued at all); 1.04 s while a 1 s lock is held |
+| Rollback-journal database, peer holds RESERVED | fails **loudly** after a bounded **0.48 s** with the original `database is locked` |
+| Same, after the peer releases | opens in 0.03 s |
+| Rollback-journal database, peer holds RESERVED 5 s | still fails at 0.48 s — the budget is bounded, not an open-ended wait |
+
+The key-file consequence was re-measured: a contended start raises *before*
+completing, yet the key file it published is the one the next start adopts —
+`verify_audit_chain` valid afterwards, no second key, no lost event. Unaudited
+start attempts do not create events, which is correct: the failure is not an
+audited business action.
+
+**R-08 — CLOSED (FIXED_AND_VERIFIED).** The publish path fsynced the key *file*
+but not the *directory* that received the link, so a crash in that window could
+persist the audit events and lose the key. Added `_fsync_directory()` and called
+it after both the hard-link publish and the no-hard-links fallback; on Windows,
+or a filesystem that refuses directory handles, it returns `False` instead of
+failing the start (losing crash durability is not a reason to refuse to run, and
+the consequence remains the already-loud `AuditKeyUnavailableError`).
+`tests/test_phase52_audit_key_publish_durability.py` (4 tests) pins: the
+directory is fsynced (the test wraps `os.fsync` and inspects the fd, so the real
+syscalls still run) and fails if the fix is removed; a concurrent publisher
+adopts the winner instead of splitting the key; a lost key with events fails
+loudly and mints nothing; an empty key file is neither adopted nor overwritten.
+**This satisfies Round 2's "no closure without a verified fix and regression
+tests" rule.**
+
+**R-09 — still open, deliberately.** The `O_CREAT|O_EXCL` fallback (used only
+where `os.link` is unavailable) publishes an empty file before writing its 44
+bytes; readers retry 50 × 20 ms and then fail with an actionable message, and
+never adopt partial material. Closing it would need a create-if-absent-with-content
+primitive that the filesystem in question does not offer — replacing it with
+`os.replace` would *introduce* the split-key risk `O_EXCL` prevents. It stays
+open with that rationale rather than being closed on an argument.
+
+### 12.3 Audit C — procurement and inventory
+
+Driven through the public API on a real database file:
+
+| Check | Result |
+|---|---|
+| Tenant isolation | Receipt attempted by company 2's user against company 1's PO → `TenantIsolationError`; **0 rows written** |
+| Receipt replay | Same idempotency key returns `idempotent_replay`, same `grn_id`, **1 stock move** (not 2) |
+| Partial receipts | Two receipts (4 + 6) → on hand 10.000000, `qty_received` 10.000000, backorder document `GRN-1-BO` for the remainder |
+| Invoice for received qty | `Validated`, no errors |
+| Posting replay | `idempotent_replay`, still 3 entries (2 stock + 1 purchase), stock unchanged |
+| Reversal replay | `idempotent_replay`, **1** credit note; a second request with a new key → `INVOICE_ALREADY_REVERSED` |
+| Clearing after reversal | `380` nets to 0.00; trial balance balanced; chain valid |
+| Configured variance account must exist | Enforced since F-R3-3 (`PRICE_VARIANCE_ACCOUNT_UNKNOWN`), re-confirmed |
+
+The `GRN-1-BO` document deserves a note: a receipt of 4 against a PO for 10
+creates a backorder GRN for the remaining 6. It is a document, not a stock
+movement — it carries no lines and no move until received, so it is not a
+duplicated receipt.
+
+### 12.4 Audit D — security and operational readiness
+
+**Verified in this environment (code and tests):**
+
+| Control | Evidence |
+|---|---|
+| Segregation of duties | An admin who created the invoice is refused approval: `SEGREGATION_OF_DUTIES_VIOLATION`; refusal audited; state stays `PendingApproval` |
+| Role authorisation | `_check_user_and_tenant` on every mutating entry point; roles checked before state |
+| Audit immutability | `UPDATE` and `DELETE` on `audit_events` both refused by trigger (`AUDIT_TAMPER_VIOLATION`) |
+| Audit chain | `verify_audit_chain` valid throughout, including after a failed contended start |
+| Key custody | `0600` on the open descriptor, symlink/reparse refused, custody drift refused (`KeyCustodyError: mode 0o644`), atomic publish |
+| Log redaction | Token, DZ IBAN, NIN (18-digit) and RIB (20-digit) patterns redacted |
+| Rate limiting | **Process-local and documented as such** — the module states no Redis backend is bundled; not claimed as distributed |
+
+**Not verifiable here — needs staging or external infrastructure:**
+
+| Item | Why | Owner |
+|---|---|---|
+| Container image build | `ops/Dockerfile` is static-only here: non-root `USER erp`, `python:3.11.17-slim`, hash-enforced install, `HEALTHCHECK`, `EXPOSE 8000` — but **no Docker daemon in this environment and no CI job builds it** | Engineering / ops |
+| Backup and restore against real volumes | The 13 restore tests are Python-3.11.17-gated (tar filter); they run on CI, not in this sandbox | Engineering |
+| Key custody beyond a readable file | S1/S3 — needs a KMS/HSM investment | Security officer |
+| Off-host backup separation | Procedural today | Ops |
+| Production-scale migration timing | Synthetic data only | Engineering |
+
+### 12.5 Audit E — per-PR readiness
+
+The stack chains correctly: each PR's base branch head equals the previous PR's
+head, so the review order is #3 → #4 → #5 → #6 → #7. All five are `OPEN`,
+`CLEAN`, with **0 reviews** and 3/3 green checks on each head.
+
+| PR | Head | Base | Files | CI | High-risk paths |
+|---|---|---|---|---|---|
+| #3 | `29645e5d1d9f317363343c6c98585e0ce4e81bb5` | `main` | 20 (+2972/−133) | 3/3 | `review_policy.py` (new, 467 lines), `intake_ocr.py` (+552), `procurement_stock.py` (+202), `database.py` (+97) |
+| #4 | `99864baba8bdc7a2153b829f3a16b35831e44d2d` | `phase29/ocr-failclosed` | 2 (+185/−2) | 3/3 | `procurement_stock.py` approval binding to reviewed source values |
+| #5 | `c466cea734dc3d30b428f17092f9f64974486223` | `fix/phase29-source-invoice-consistency` | 10 (+716/−38) | 3/3 | source vs invoice unit-price comparison (`review_policy.py`, `intake_ocr.py`) |
+| #6 | `e4e47b3bf4376e804f17b23e63c86f7fe384056c` | `fix/phase29-invoice-line-price-consistency` | 10 (+908/−42) | 3/3 | line discount decision and derived line net |
+| #7 | `e0396a85a690e57857e3c8ffe7b14fe8a9c1136b` | `fix/phase29-invoice-discount-and-line-net-consistency` | 65 (+21104/−327) | 3/3 | phases 30–52: ledger, reversal, variance, migration matrix, audit key, start-up |
+
+**Findings by severity, per PR**
+
+* **#3 — none open.** Its scope is fail-closed OCR and field-level review; the
+  three review rounds since found and fixed P5, P6, F-R2-5 and F-R2-6 in it.
+  *Residual:* the OCR/confidence calibration remains unvalidated against a real
+  Algerian corpus (O2), which is data-dependent, not a code defect.
+* **#4 — none open.** F-R2-6's dead `None` branch was here and is fixed with
+  distinct `..._SOURCE_MISSING` codes.
+* **#5 — none open.**
+* **#6 — none open.** Its discount-vs-line-net comparison is the path that
+  F-R2-5's exact 16-row pin protects.
+* **#7 — none open in code.** This is where every later finding lived, and all
+  are now fixed and pinned: F-R2-2 (reversal idempotency), F-R2-3 (clearing),
+  F-R2-4 (negative amounts), F-R3-1 (start-up), F-R3-2 (float variance),
+  F-R3-3 (unknown variance account), F-R5-1 (reversal period), R-08 (key
+  publish durability).
+
+**Acceptability for human approval:** all five are ready to be **reviewed**;
+none is ready to be **merged unreviewed**. #7 is the one that carries the
+accounting behaviour and should be reviewed first among #4–#7 after #3.
+
+### 12.6 Verification
+
+| Item | Value |
+|---|---|
+| Full suite | **20 failed, 1112 passed, 9 skipped** (previous baseline 20F/1105P/9S; +7 tests added by this round) |
+| Failure set | Same 20 tests, same distribution (3 phase11, 10 phase12, 1 phase5, 1 phase6, 2 phase8, 3 phase9); **all 20 are the Python 3.11.17 interpreter gate** (this sandbox runs 3.11.2) |
+| New tests | `test_phase51_reversal_period_consistency.py` (3), `test_phase52_audit_key_publish_durability.py` (4) — both proven to fail without their fixes |
+| `ruff check dz_erp tests tools` | clean |
+| Docs consistency | re-run after these updates |
+
+### 12.7 What this round could not decide
+
+* **LB-1** — is the top stamp-duty band capped, and at what figure? (unchanged)
+* **LB-2** — which SCF account carries a purchase price variance? (unchanged)
+* **NEW, LB-3** — should TVA be rounded per line or on the invoice total? The
+  code enforces per line (documented), which refuses 67 % of small-value
+  invoices that use the other convention. Choosing is an accounting decision.
+* **F-R5-1's underlying policy** — is a reversal booked in the issuing period or
+  backdated? The fix makes either consistent; the choice remains the
+  accountant's.
+
+**Status: `READY_FOR_HUMAN_REVIEW` for the code; `BLOCKED_EXTERNAL` for LB-1,
+LB-2, LB-3 and the SCF/legal sign-offs; `NOT_PRODUCTION_READY` overall.**
+Nothing was merged, retargeted, rebased or deployed.

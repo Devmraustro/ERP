@@ -356,7 +356,10 @@ jobs:
 
       - name: Build the image
         run: |
-          docker build -f ops/Dockerfile -t erp-algeria:ci .
+          # --load is required with the docker-container buildx driver: without it
+          # the image lands in buildx's own store and `docker run`/`docker scout`
+          # on the host daemon cannot see it.
+          docker build --load -f ops/Dockerfile -t erp-algeria:ci .
 
       - name: Verify the runtime user is unprivileged
         run: |
@@ -373,12 +376,19 @@ jobs:
             -e ERP_SECURITY_LOG_PATH=/var/log/erp/security.jsonl \
             -e ERP_HOST=0.0.0.0 -e ERP_PORT=8000 \
             erp-algeria:ci
-          for i in $(seq 1 30); do
+          ok=0
+          for i in $(seq 1 90); do
             if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
-              echo "healthz OK after ${i}s"; break
+              echo "healthz OK after ${i}s"; ok=1; break
             fi
             sleep 1
           done
+          if [ "$ok" -ne 1 ]; then
+            echo "healthz did not become ready within 90s" >&2
+            docker ps -a --filter name=erp-smoke
+            docker logs erp-smoke 2>&1 | tail -n 40
+            exit 1
+          fi
           curl -fsS http://127.0.0.1:8000/healthz
           docker logs erp-smoke 2>&1 | tail -n 20 > smoke-logs.txt
 

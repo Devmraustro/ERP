@@ -93,7 +93,9 @@ def test_every_environment_variable_the_code_reads_is_documented() -> None:
     """The drift gate: new knob in code, missing from the operator's list."""
     used: set[str] = set()
     for path in sorted((REPO / "dz_erp").rglob("*.py")):
-        used.update(re.findall(r'"(ERP_[A-Z0-9_]+)"', path.read_text()))
+        # encoding is explicit: the sources are UTF-8 (Arabic literals), and a
+        # locale-default decode (cp1252 on Windows) is not a drift signal.
+        used.update(re.findall(r'"(ERP_[A-Z0-9_]+)"', path.read_text(encoding="utf-8")))
     documented = set(re.findall(r"ERP_[A-Z0-9_]+", ENV_EXAMPLE.read_text()))
     missing = used - documented - SECRET_VARS
     assert not missing, f"undocumented environment variables: {sorted(missing)}"

@@ -1590,3 +1590,93 @@ The code itself is **`READY_FOR_HUMAN_REVIEW`**, and F-R6-1's fix is
 The green 3.11 job is the evidence that the interpreter-gated restore assertions ran
 on a ≥3.11.17 runner (§13.5); it is not independent proof that they assert what they
 claim, which is why the revert experiments in §13.8 exist.
+
+## 14. Round 7 — DEP-1 dependency security remediation (2026-11-02)
+
+Round 6 recorded DEP-1 (advisories against the pinned dependency set) as a release blocker
+and deliberately did not absorb the upgrade at that gate. Round 7 performs it and makes the
+scan a CI precondition. No application behaviour was changed.
+
+### 14.1 Entry verification
+
+| Item | Value |
+|---|---|
+| Reported head | `0b9a6cad064cefb34cced5f2348b10b1171b9c20` |
+| Local head before any change | identical (`0b9a6cad…`); branch `arena/7f12d627-erp`, PR #7 `OPEN`/`DRAFT` |
+| Stack | `main ← #3 ← #4 ← #5 ← #6 ← #7`, each base == previous head; nothing merged; `main` untouched |
+| CI on the entry head | run `41315417889` — all three jobs success |
+| Working tree | clean apart from untracked scratch; SHA-256 of every file to be touched recorded before editing |
+
+### 14.2 Reproduction (before)
+
+`pip-audit 2.10.1 --requirement requirements.lock.hashes.txt --no-deps --disable-pip`:
+**216 raw findings across 8 of the 51 pinned packages**. Raw counts double-count alias
+ids; deduplicating by identifier-alias overlap gives **143 clusters / 140 distinct CVEs**.
+Per package (clusters): pypdf 67, pillow 53, starlette 7, python-multipart 6,
+cryptography 6, pdfminer.six 2, certifi 1, pytest 1.
+
+Severity is reported by the advisory database as CVSS **vectors** (V3/V4), not numeric
+scores; the machine-readable inventory (`tools/security_scan_gate.py` consumes the same
+report shape) classifies each vector by its own metrics. The dominant class is
+crafted-file **resource exhaustion** — all 67 pypdf clusters, 33 of pillow's 53 — with a
+network attack vector and no user interaction: reachable by an attacker simply attaching a
+document.
+
+### 14.3 Remediation
+
+Every pin moved to the minimum version clearing all of its advisories (chosen from the
+per-cluster fix versions, not "latest"):
+
+`pypdf 6.21.4` · `pillow 13.0.0` · `starlette 1.3.1` (with `fastapi 0.133.0`) ·
+`python-multipart 0.0.31` · `cryptography 50.0.0` · `pdfminer.six 20251230` (with
+`pdfplumber 0.11.9`) · `certifi 2026.10.18` · `pytest 9.0.3` (test-only); two transitives
+added (`annotated-doc 0.0.5`, `pygments 2.21.0`).
+
+Two upgrades are dependency-forced: `pdfplumber 0.11.6` pinned `pdfminer.six==20250327`
+exactly, and five of starlette's seven advisories are fixed only in the 1.x line, which no
+`fastapi` release admitted before `0.133.0` (the earliest with unbounded `starlette` and
+without the later `opentelemetry-api` core dependency). `pydantic` stays at the pinned
+`2.11.1`. Everything else in the closure is unchanged.
+
+### 14.4 After, and the permanent gate
+
+Re-scan of the remediated set: **`No known vulnerabilities found`** (0 findings, 53
+distributions). The three declaration sites agree (`pyproject.toml`,
+`requirements.lock.txt` 53 pins, `requirements.lock.hashes.txt` 1,304 hashes, `--check`
+clean), both 3.11 and 3.12 environments install `--require-hashes` from the committed
+lockfile, and `tools/verify_dependency_graph.py` accepts both (opencv substitution only).
+
+The CI `dependency-scan` job runs the pinned scanner over the committed closure, fails on
+any unresolved advisory, keeps report + decision as an artifact, and self-checks by
+requiring the gate to reject a deliberately vulnerable fixture (`jinja2 2.11.0`, never
+installed). Exceptions are time-bounded (package, advisory, justification, owner, expiry
+≤ 90 days) and enforced by expiry — details in `docs/DEPENDENCY_AND_LICENSE_REGISTER.md`
+§4.5. Policy: zero unresolved advisories; a clean scan proves no *known* advisory, not the
+absence of vulnerabilities.
+
+### 14.5 Findings
+
+| ID | Finding | Status | Evidence |
+|---|---|---|---|
+| **DEP-1** | 8 of 51 pinned packages carried advisories, including the untrusted-document parsers | **CLOSED** (Round 7) | re-scan 0 findings; `DEPENDENCY_AND_LICENSE_REGISTER.md` §4.4/§4.5; CI `dependency-scan` job; risk register P20 |
+| — | Desktop-UI fixture wrote a `line_index` on non-line rows (a state extraction cannot produce), correctly flagged by the Phase-34 duplicate-row integrity check | **FIXED (test-only)**, pre-existing — reproduced on a pristine `0b9a6cad` worktree with the *old* dependency set | `tests/test_phase27_desktop_ui.py` |
+| — | Env-var drift test decoded sources with the locale default (cp1252 on Windows) instead of UTF-8 | **FIXED (test-only)**, pre-existing | `tests/test_phase37_deployment_assets.py` |
+| — | Audit-key race test raced its own poller with a bookkeeping unlink on Windows | **FIXED (test-only)**, pre-existing | `tests/test_phase49_audit_key_bootstrap_race.py` |
+| — | Dev-extra pin expectation followed the pytest bump | **FIXED (test-only)**, follows the upgrade | `tests/test_phase19_dependency_integrity.py` |
+
+No test was skipped or weakened to obtain a green result, and no application code changed.
+
+### 14.6 Verdict
+
+**DEP-1 `CLOSED`.** The external blockers from §13 are unchanged: legal/accounting
+(LB-1..3, C1/C2/C6), key custody (S1/S3), the container image (OPS-1) and the restore
+drill (OPS-2). Still `NOT_PRODUCTION_READY`; code `READY_FOR_HUMAN_REVIEW`. Nothing
+merged, retargeted, rebased or deployed.
+
+### 14.7 Delivery
+
+| Item | Value |
+|---|---|
+| Code + tests + docs commit | `<COMMIT>` |
+| CI run on that commit | `<CI_RUN>` |
+| Branch / PR | `arena/7f12d627-erp`, PR #7, `OPEN`/`DRAFT` |

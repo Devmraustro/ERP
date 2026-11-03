@@ -277,46 +277,116 @@ digests, tampered bytes, missing pins) are covered by ten tests in
 *bytes* are the pinned ones, not who published them. PEP 740/sigstore
 attestation verification remains an accepted residual risk (B2).
 
-### 4.4 Known advisories against the pinned versions — `OPEN` (Round 6)
+### 4.4 Known advisories against the pinned versions — `CLOSED` (Round 7, DEP-1)
 
 Hash pinning proves *which bytes* run; it says nothing about whether those bytes are
-known-vulnerable. Round 6 ran the first advisory scan of this lockfile and found that
-**8 of the 51 pinned packages carry published advisories**. Every one of them has a
-fixed release available; none of them was upgraded in that round, because doing so
-means moving several packages across major versions and re-running the whole matrix,
-which is a change a release candidate should not absorb at its final gate without the
-review the upgrade itself deserves.
+known-vulnerable. Round 6 ran the first advisory scan and recorded the finding; Round 7
+remediated it, and this section is now the before/after record.
+
+**Before (Round-6 tree, pip-audit 2.10.1).** `pip-audit --requirement
+requirements.lock.hashes.txt --no-deps --disable-pip` reported **216 raw findings across 8
+of the 51 pinned packages**. Raw counts double-count: one vulnerability is reported under
+each identifier in its alias set (PYSEC, CVE, GHSA, vendor aliases). Deduplicating by
+identifier-alias overlap leaves **143 vulnerability clusters**, **140 of them carrying a
+distinct CVE identifier** — the number that should be quoted. The counts below are the
+raw pip-audit counts, exactly as the scanner emits them.
+
+| Package | Pinned before | Raw findings | Fixed in (max needed) | Pinned after |
+|---|---|---:|---|---|
+| pypdf | 5.4.0 | 103 | 6.21.4 | **6.21.4** |
+| pillow | 11.1.0 | 69 | 13.0.0 | **13.0.0** |
+| starlette | 0.46.2 | 14 | 1.3.1 | **1.3.1** |
+| python-multipart | 0.0.20 | 12 | 0.0.31 | **0.0.31** |
+| cryptography | 44.0.2 | 10 | 50.0.0 | **50.0.0** |
+| pdfminer.six | 20250327 | 4 | 20251230 | **20251230** |
+| certifi | 2026.7.22 | 2 | 2026.10.18 | **2026.10.18** |
+| pytest (test-only) | 8.3.5 | 2 | 9.0.3 | **9.0.3** |
+
+**Why this was a deployment blocker rather than housekeeping.** `pypdf`, `pdfminer.six`,
+`pillow` and `python-multipart` are exactly the components that parse **untrusted
+supplier documents uploaded by third parties** — the system's primary input. At the time
+of the scan, `pypdf` carried 67 distinct reported vulnerabilities and `pillow` 52,
+overwhelmingly decompression/resource-exhaustion and out-of-bounds classes reachable by
+opening a crafted file. `starlette` handles every HTTP request and `cryptography`
+protects the vault and audit chain. An advisory in those components is reachable by an
+external actor, not by a curious insider.
+
+**Remediation (Round 7).** Every affected pin was upgraded to the *minimum version that
+clears all of its advisories*, not to an arbitrary latest:
+
+* `pypdf 6.21.4`, `pillow 13.0.0`, `python-multipart 0.0.31`, `cryptography 50.0.0`,
+  `certifi 2026.10.18`, `pytest 9.0.3` — direct upgrades; the application uses only the
+  stable high-level APIs (`pypdf.PdfReader`, `PIL.Image.*`), which are unchanged.
+* `pdfminer.six` moved to `20251230`, which requires `pdfplumber 0.11.9` (0.11.6 pinned
+  `pdfminer.six==20250327` **exactly**, so the fix is only reachable through the
+  pdfplumber release that re-pins it).
+* `starlette` moved to `1.3.1`: five of its seven advisories are fixed only in the 1.x
+  line. That requires a `fastapi` whose `starlette` constraint is unbounded, first
+  satisfied by `fastapi 0.133.0` — the earliest release with `starlette>=0.40.0` and
+  without the later `opentelemetry-api` core dependency. `pydantic` stayed at the pinned
+  `2.11.1` (fastapi 0.133.0 requires `>=2.7.0`).
+* The fastapi/pytest upgrades pulled in two new transitive pins — `annotated-doc 0.0.5`
+  and `pygments 2.21.0` — both added to the lockfile.
+
+**After (this tree, pip-audit 2.10.1).** The same command reports **`No known
+vulnerabilities found`** across all 53 pinned distributions. The lockfile was regenerated
+reproducibly (`python tools/generate_hash_lock.py --write`, 1,304 hashes) and both
+versions are re-installed hash-verified in CI on the 3.11, 3.12 and Windows jobs.
 
 Reproduce with (network required; `pip-audit` is deliberately **not** a dependency of
 this project, so it is not in the lockfile):
 
 ```
-python -m venv /tmp/sca && /tmp/sca/bin/pip install pip-audit
+python -m venv /tmp/sca && /tmp/sca/bin/pip install pip-audit==2.10.1
 /tmp/sca/bin/pip-audit --requirement requirements.lock.hashes.txt --no-deps --disable-pip
 ```
 
-Result on the Round-6 tree (pip-audit 2.10.1):
+**What this does and does not prove.** A clean scan proves that no *known* advisory
+applies to the pinned closure; it is not proof that the application has no
+vulnerabilities, and it does not vet the publisher. The pinned
+`python:3.11.17-slim-bookworm` base image still needs the same treatment with an image
+scanner, which remains unverified because no container runtime exists in this environment
+(§4.3 of `docs/REMAINING_BLOCKERS.md`).
 
-| Package | Pinned | Advisories | Fixed in |
-|---|---|---:|---|
-| pypdf | 5.4.0 | 103 | 6.4.0 … 6.21.4 |
-| pillow | 11.1.0 | 69 | 12.1.1 … 13.0.0 |
-| starlette | 0.46.2 | 14 | 0.47.2 / 0.49.1 / 1.3.1 |
-| python-multipart | 0.0.20 | 12 | 0.0.22 … 0.0.31 |
-| cryptography | 44.0.2 | 10 | 46.0.5 … 50.0.0 |
-| pdfminer.six | 20250327 | 4 | 20251107 / 20251230 |
-| certifi | 2026.7.22 | 2 | 2026.10.18 |
-| pytest | 8.3.5 | 2 | 9.0.3 *(test-only)* |
+### 4.5 The CI dependency-vulnerability gate and its exception process
 
-**Why this is a deployment blocker rather than housekeeping.** `pypdf`, `pdfminer.six`,
-`pillow` and `python-multipart` are exactly the components that parse **untrusted
-supplier documents uploaded by third parties** — the system's primary input. `starlette`
-handles every HTTP request and `cryptography` protects the vault and audit chain. An
-advisory in those components is reachable by an external actor, not by a curious insider.
+The one-off scan is now a precondition of every build, so a future advisory cannot
+accumulate unnoticed. The gate is `tools/security_scan_gate.py`, run by the
+`dependency-scan` job in `.github/workflows/ci.yml`:
 
-**What has to happen.** Regenerate the hash lockfile with upgraded pins for the runtime
-packages, re-run the full matrix (including the Windows key-rotation job and the
-interpreter-gated restore tests), and re-run this scan as part of CI so a future
-advisory cannot accumulate unnoticed. The pinned `python:3.11.17-slim-bookworm` base
-image needs the same treatment with an image scanner; that is unverified here because
-no container runtime exists in this environment (§4.3 of `docs/REMAINING_BLOCKERS.md`).
+* It audits the committed, hash-pinned dependency set
+  (`--requirement requirements.lock.hashes.txt --no-deps --disable-pip`), so the full
+  transitive closure is covered — transitive dependencies cannot be silently skipped.
+* The scanner is **pinned** (`pip-audit==2.10.1`) so the same tool version decides the
+  same tree the same way; it is installed only in the scan job and never into the runtime
+  environment.
+* It fails on any unresolved advisory in the pinned set. The severity policy is
+  deliberately blunt: zero unresolved advisories. pip-audit reports only advisories with
+  a known affected range, so there is no severity threshold to game; a justified delay is
+  expressed through the exception process below, not by relaxing the policy.
+* The machine-readable report and the decision (`sca-report.json`,
+  `sca-report.json.decision.json`) are uploaded as a CI artifact (90-day retention).
+* A **self-check** step runs the same gate against
+  `tools/security_scan_selfcheck/requirements-fixture.txt` — a deliberately vulnerable,
+  never-installed fixture — and *requires* the gate to reject it (exit 1, `jinja2`
+  flagged). A scanner that cannot demonstrate detection is decoration.
+
+**Exception process.** `tools/security_scan_exceptions.json` normally holds an empty
+list: an advisory against the pinned set is resolved by upgrading the pin, not by an
+entry. When a fix genuinely cannot be taken now, an exception may be added with:
+
+| Field | Requirement |
+|---|---|
+| `package` | the affected distribution (canonicalised, so `pdfminer.six`/`pdfminer-six` match) |
+| `advisory` | the canonical advisory id (plus optional `aliases`, so a CVE alias matches) |
+| `justification` | why the fixed version cannot be taken now |
+| `owner` | the role accountable for revisiting it |
+| `opened` / `expiry` | ISO dates; `expiry` at most **90 days** after `opened` |
+
+An entry is honoured only up to and including its `expiry`; after that the gate fails
+again until a fresh, reviewed entry renews it. Expired, mismatched, over-long or
+malformed entries are ignored and reported — never silently honoured — and every entry
+must also appear in this section so the register stays the source of truth. The gate's
+policy engine is unit-tested offline (network-free) by
+`tests/test_phase54_dependency_security_gate.py`, which covers the excepted, expired,
+mismatched, malformed and over-long cases and asserts the committed self-check fixture.

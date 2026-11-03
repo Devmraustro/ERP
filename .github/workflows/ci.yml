@@ -245,3 +245,84 @@ jobs:
           path: |
             junit-windows.xml
             staging-acceptance-windows.log
+
+  # ---------------------------------------------------------------------------
+  # Dependency vulnerability gate (DEP-1 / risk register P20)
+  # ---------------------------------------------------------------------------
+  # A clean scan is necessary, not sufficient (see tools/security_scan_gate.py):
+  # it proves no KNOWN advisory applies to the committed dependency set, and
+  # says nothing about undisclosed vulnerabilities. The scanner version is
+  # pinned so the same tool decides the same tree the same way; the report and
+  # the decision are kept as artifacts. pip-audit is deliberately NOT a project
+  # dependency: it audits the lockfile declaration, it is not installed into
+  # the runtime environment (--no-deps --disable-pip), so the audit covers the
+  # committed transitive closure and nothing the local environment contains.
+  # Transitive dependencies cannot be silently skipped: the hash-pinned
+  # lockfile enumerates the full closure.
+  dependency-scan:
+    name: Dependency vulnerability scan (pip-audit, pinned)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned scanner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit==2.10.1
+
+      - name: Scan the committed dependency set
+        run: |
+          python tools/security_scan_gate.py scan --report sca-report.json
+
+      - name: Upload the scan report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-report
+          retention-days: 90
+          if-no-files-found: error
+          path: |
+            sca-report.json
+            sca-report.json.decision.json
+
+      # A scanner that cannot demonstrate detection is decoration. This runs
+      # the same gate against an isolated, deliberately vulnerable fixture and
+      # requires the gate to reject it (exit 1, unresolved jinja2 advisory):
+      # never installed, only audited as a requirement declaration.
+      - name: Self-check - the gate must reject a deliberately vulnerable fixture
+        run: |
+          set +e
+          python tools/security_scan_gate.py scan \
+            --requirements tools/security_scan_selfcheck/requirements-fixture.txt \
+            --report sca-selfcheck-report.json
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "the gate passed a deliberately vulnerable fixture - it is not detecting anything" >&2
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "expected exit 1 (unresolved advisories), got $status" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+
+          decision = json.load(open("sca-selfcheck-report.json.decision.json"))
+          assert decision["decision"] == "fail", decision
+          packages = {
+              d["package"] for d in decision["dispositions"] if d["status"] == "unresolved"
+          }
+          assert "jinja2" in packages, decision
+          print("self-check OK: the gate flagged jinja2 in the isolated fixture")
+          PY

@@ -1,0 +1,15 @@
+{
+  "comment": [
+    "Time-bounded exceptions for the dependency-vulnerability CI gate",
+    "(tools/security_scan_gate.py). The list is normally empty: an advisory",
+    "against the pinned dependency set is resolved by upgrading the pin, not",
+    "by an entry here. An exception is valid only when it names the package,",
+    "the advisory (canonical id, plus aliases), a justification for why the",
+    "fixed version cannot be taken now, an owner role, an opened date and an",
+    "expiry date (ISO 8601; expiry at most 90 days after opened). Expired,",
+    "mismatched or malformed entries are ignored and reported - never silently",
+    "honoured. Every entry must also be listed in",
+    "docs/DEPENDENCY_AND_LICENSE_REGISTER.md section 4.5."
+  ],
+  "exceptions": []
+}

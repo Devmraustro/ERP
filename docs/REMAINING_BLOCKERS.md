@@ -434,5 +434,34 @@ host**, because a synthetic restore cannot produce a production recovery objecti
 | **S1** | Key material is a readable file: is a KMS/HSM funded, or is the residual accepted in writing? | `0600` on the open descriptor, custody-drift detection, symlink/reparse refusal, atomic publish with directory fsync (R-08 closed), `describe()` reports `hsm_equivalent: False`; `ERP_KEY_PROVIDER=kms|hsm` fails closed unless a provider is supplied | A funded KMS/HSM, or a recorded acceptance by the security owner | Security officer | **Yes for KMS** — the provider contract and fail-closed switch exist; the investment does not |
 | **S3** | Is split custody / two-person control required for rotate–retire–remove? | Rotation is audited and versioned; `vault-rollback` / `audit-rollback` exist; a single operator can currently perform all of it | A policy decision plus an approval-workflow requirement | Security officer | **No** — needs an approval workflow; today the audit trail records who did it, which is detection, not prevention |
 
-**Status: `BLOCKED_EXTERNAL` for LB-1/LB-2/LB-3/C1/C2/C6/S1/S3 · `OPEN` for DEP-1,
-OPS-1, OPS-2 · `NOT_PRODUCTION_READY` overall.** Nothing merged, retargeted or deployed.
+**Status: `BLOCKED_EXTERNAL` for LB-1/LB-2/LB-3/C1/C2/C6/S1/S3 · `OPEN` for
+OPS-1, OPS-2 · `CLOSED` for DEP-1 (Round 7) · `NOT_PRODUCTION_READY` overall.** Nothing
+merged, retargeted or deployed.
+
+## Round 7 (2026-11-02) — DEP-1 dependency security remediation (closed)
+
+The advisory blocker found in Round 6 was remediated. Every affected pin was upgraded to
+the minimum version that clears all of its advisories, the hash lockfile was regenerated,
+and the scan became a CI precondition.
+
+* **Before:** `pip-audit 2.10.1` against `requirements.lock.hashes.txt` — 216 raw findings
+  across 8 of 51 pins (143 identifier-alias clusters, 140 distinct CVEs).
+* **After:** the same command reports **`No known vulnerabilities found`** across all 53
+  pinned distributions. Full before/after table, the per-package upgrade rationale and the
+  reproduction command are in `docs/DEPENDENCY_AND_LICENSE_REGISTER.md` §4.4.
+* **Pins:** pypdf 6.21.4, pillow 13.0.0, starlette 1.3.1 (+ fastapi 0.133.0),
+  python-multipart 0.0.31, cryptography 50.0.0, pdfminer.six 20251230 (+ pdfplumber
+  0.11.9), certifi 2026.10.18, pytest 9.0.3 (test-only); two new transitive pins
+  (`annotated-doc`, `pygments`) were added.
+* **Permanent gate:** the `dependency-scan` CI job (pinned scanner, report artifact,
+  self-check that a deliberately vulnerable fixture is rejected) and a documented,
+  time-bounded exception process (`tools/security_scan_gate.py`,
+  `tools/security_scan_exceptions.json`, register §4.5).
+* **Still not verified:** an image CVE scan of `python:3.11.17-slim-bookworm` — no
+  container runtime exists here (OPS-1).
+
+**Status: `CLOSED` (DEP-1).** The remaining engineering work in this round was test-file
+repairs for defects that predate the dependency change (each reproducible on the prior
+tree): a desktop-UI fixture that misrepresented extraction output, a locale-dependent read
+in the environment-variable drift test, a Windows-only race in the audit-key test, and the
+dev-extra pin expectation.

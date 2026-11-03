@@ -314,3 +314,26 @@ proved the worktree already matched the delivered commit). Detail:
 **Status: code `READY_FOR_HUMAN_REVIEW`; `BLOCKED_EXTERNAL` (LB-1, LB-2, LB-3, C1, C2,
 C6, S1, S3); `OPEN` (DEP-1, OPS-1, OPS-2); `NOT_PRODUCTION_READY`.** Nothing merged,
 retargeted or deployed.
+
+## S15. Round 7 — DEP-1 dependency security remediation (2026-11-02)
+
+**Reported head:** `0b9a6cad064cefb34cced5f2348b10b1171b9c20` (PR #7, `arena/7f12d627-erp`),
+CI run `41315417889` success on all three jobs. Verified locally before any change:
+PRs #3–#7 chained (`main ← #3 ← #4 ← #5 ← #6 ← #7`), all `OPEN`, PR #7 `DRAFT`,
+nothing merged, `main` untouched; working tree clean apart from untracked scratch.
+
+| ID | Area | Result |
+|---|---|---|
+| S15a | Scan reproduction | `pip-audit 2.10.1` against the committed hash lockfile: **216 raw findings across 8 of 51 pins**; alias-deduplicated to **143 clusters / 140 distinct CVEs**. Concentration in the untrusted-upload parsers (pypdf 67, pillow 52 — overwhelmingly crafted-file resource-exhaustion). Machine-readable inventory with CVSS vectors and reachability in `.r7_advisory_report.json` |
+| S15b | Remediation | Each pin raised to the minimum version clearing all of its advisories: pypdf 6.21.4, pillow 13.0.0, starlette 1.3.1 (+ fastapi 0.133.0), python-multipart 0.0.31, cryptography 50.0.0, pdfminer.six 20251230 (+ pdfplumber 0.11.9), certifi 2026.10.18, pytest 9.0.3; +2 transitives (annotated-doc, pygments). Registry §4.4 |
+| S15c | After-scan | Same command on the remediated set: **`No known vulnerabilities found`** (0 findings, 53 distributions) |
+| S15d | Lockfile + install | `requirements.lock.txt` (53 pins), `requirements.lock.hashes.txt` (1,304 hashes, `--check` clean), `pyproject.toml` all consistent; both 3.11 and 3.12 environments installed `--no-deps --require-hashes` from the committed lockfile; `tools/verify_dependency_graph.py` OK on both (opencv substitution only) |
+| S15e | CI gate | `dependency-scan` job: pinned scanner (pip-audit 2.10.1), scan of the committed closure, report+decision artifact (90-day), and a self-check that a deliberately vulnerable fixture (`jinja2 2.11.0`, never installed) is rejected — proven locally (exit 1, jinja2 flagged). Time-bounded exception process (package/advisory/justification/owner/expiry ≤ 90 days), enforced by expiry; `tests/test_phase54_dependency_security_gate.py` (17 tests) |
+| S15f | Regression / adversarial | Upload-boundary, malformed-PDF, oversized, encrypted, corrupted-image, multipart-boundary, Unicode/Arabic filename, Arabic/French extraction, OCR fallback, rejected upload + audit suites; full 3.11 and 3.12 matrices; Windows platform subset; staging acceptance 40/40. OCR fail-closed behaviour unchanged (no application code touched) |
+| S15g | Pre-existing defects | Four test failures on the entry tree, each reproduced on a pristine `0b9a6cad` worktree **with the original dependency set** and therefore not attributed to the upgrade: desktop-UI fixture wrote a non-line `line_index` (Phase-34 duplicate-row integrity correctly flags it), locale-default decode in the env-var drift test, Windows-only unlink race in the audit-key test, and the dev-extra pin expectation (this one follows the pytest bump). All four repaired in test files only; no application code changed |
+| S15h | Static / consistency | `ruff` (dz_erp tests tools) clean; `compileall` clean; risk register consistent; docs consistency tests pass |
+
+**Status: DEP-1 `CLOSED`.** No unresolved advisory against the pinned set; the gate is
+green on the remediated tree and enforced in CI. `main` untouched, nothing merged,
+retargeted or deployed. The base-image CVE scan remains unverified (OPS-1, no container
+runtime); a clean scan proves no *known* advisory, not the absence of vulnerabilities.

@@ -81,7 +81,9 @@ def test_a_reader_never_observes_a_half_published_key(tmp_path: Path) -> None:
             if key_path.exists():
                 try:
                     content = key_path.read_bytes()
-                except FileNotFoundError:  # pragma: no cover - replaced mid-read
+                except (FileNotFoundError, PermissionError):
+                    # pragma: no cover - removed or being replaced mid-read
+                    # (Windows reports the delete race as a sharing violation)
                     continue
                 if not content:
                     observed.append("EMPTY")
@@ -94,7 +96,23 @@ def test_a_reader_never_observes_a_half_published_key(tmp_path: Path) -> None:
     try:
         for _ in range(20):
             if key_path.exists():
-                key_path.unlink()
+                try:
+                    key_path.unlink()
+                except PermissionError:
+                    # Windows-only, and a race with this test's own poller:
+                    # the reader thread can hold the file open (Python's open()
+                    # lacks FILE_SHARE_DELETE) at the instant of this
+                    # bookkeeping unlink. The property under test - the file is
+                    # never observable empty - is enforced by the assertions
+                    # below, not by this delete; retry briefly and move on.
+                    deadline = time.monotonic() + 2.0
+                    while key_path.exists() and time.monotonic() < deadline:
+                        time.sleep(0.001)
+                        try:
+                            key_path.unlink()
+                            break
+                        except PermissionError:
+                            continue
             published = _publish_key_file(key_path, secret)
             assert published == secret
             time.sleep(0.002)

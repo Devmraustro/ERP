@@ -460,8 +460,18 @@ jobs:
           # v0.76.1 is the latest real release whose Linux-64bit asset exists;
           # earlier guesses (v0.62.0, v0.64.1) have no published release asset,
           # which is why the install script failed silently.
-          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.76.1
+          # The download has failed once on a transient runner DNS error
+          # (curl exit 6 = could not resolve host), so retry.
+          installed=0
+          for attempt in 1 2 3; do
+            if curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                | sh -s -- -b /usr/local/bin v0.76.1; then
+              installed=1; break
+            fi
+            echo "trivy install attempt $attempt failed; retrying in 20s" >&2
+            sleep 20
+          done
+          [ "$installed" -eq 1 ] || { echo "trivy install failed after retries" >&2; exit 1; }
           trivy --version
           trivy image --scanners vuln --format json -o vulns.json erp-algeria:ci
           trivy image --scanners vuln --format sarif -o vulns.sarif erp-algeria:ci

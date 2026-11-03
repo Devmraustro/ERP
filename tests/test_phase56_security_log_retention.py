@@ -78,3 +78,20 @@ def test_age_based_deletion_ignores_non_rotated_files(tmp_path, monkeypatch):
     _prune_security_log_by_age(log)
 
     assert unrelated.exists(), "only numbered rotated files are eligible"
+
+
+def test_retention_age_configuration_rejects_non_positive_or_malformed_values():
+    import dz_erp.security_audit as sa
+
+    assert sa._parse_log_max_age_days(None) is None
+    assert sa._parse_log_max_age_days("") is None
+    assert sa._parse_log_max_age_days("1") == 1
+    assert sa._parse_log_max_age_days("30") == 30
+
+    for raw in ("0", "-1", "-30", "not-a-number", "1.5"):
+        try:
+            sa._parse_log_max_age_days(raw)
+        except ValueError as exc:
+            assert "must be a positive whole number of days" in str(exc)
+        else:
+            raise AssertionError(f"unsafe retention age was accepted: {raw!r}")

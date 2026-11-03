@@ -367,6 +367,18 @@ jobs:
           echo "Configured user: $user"
           test "$user" = "erp" || { echo "image must run as 'erp', got '$user'" >&2; exit 1; }
 
+      - name: Smoke test - bootstrap creates the first admin (synthetic data only)
+        run: |
+          # Bootstrap must run BEFORE the server starts: serve refuses to run
+          # against an empty database (exit 2) by design.
+          printf 'Synthetic#2026x' | docker run --rm -i \
+            -v erp-smoke-state:/var/lib/erp -v erp-smoke-logs:/var/log/erp \
+            -e ERP_DB_PATH=/var/lib/erp/erp.sqlite3 \
+            -e ERP_VAULT_PATH=/var/lib/erp/vault \
+            -e ERP_SECURITY_LOG_PATH=/var/log/erp/security.jsonl \
+            erp-algeria:ci --bootstrap-admin admin
+          echo "bootstrap exit: $?"
+
       - name: Smoke test - container starts and /healthz answers
         run: |
           docker run -d --name erp-smoke -p 127.0.0.1:8000:8000 \
@@ -391,16 +403,6 @@ jobs:
           fi
           curl -fsS http://127.0.0.1:8000/healthz
           docker logs erp-smoke 2>&1 | tail -n 20 > smoke-logs.txt
-
-      - name: Smoke test - bootstrap creates the first admin (synthetic data only)
-        run: |
-          printf 'Synthetic#2026x' | docker run --rm -i \
-            -v erp-smoke-state:/var/lib/erp -v erp-smoke-logs:/var/log/erp \
-            -e ERP_DB_PATH=/var/lib/erp/erp.sqlite3 \
-            -e ERP_VAULT_PATH=/var/lib/erp/vault \
-            -e ERP_SECURITY_LOG_PATH=/var/log/erp/security.jsonl \
-            erp-algeria:ci --bootstrap-admin admin
-          echo "bootstrap exit: $?"
 
       - name: Smoke test - X-Forwarded-For is honoured only from a trusted peer
         run: |

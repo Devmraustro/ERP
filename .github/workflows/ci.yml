@@ -406,12 +406,12 @@ jobs:
 
       - name: Smoke test - X-Forwarded-For is honoured only from a trusted peer
         run: |
-          # The host (127.0.0.1 is the only trusted proxy) is the peer here, so
-          # the forwarded header IS honoured; a request from an untrusted peer
-          # would discard it. Verify both directions with a small Python probe.
+          # No trusted proxy is configured on this container, so the forwarded
+          # header is caller-supplied data that MUST be ignored: the logged
+          # client_ip is the real peer (the docker bridge gateway), never the
+          # spoofed value. That is the fail-closed property.
           python - <<'PY'
           import json, subprocess, urllib.request
-          # Spoofed header from the host (trusted peer): the forwarded value wins.
           req = urllib.request.Request("http://127.0.0.1:8000/healthz",
                                       headers={"X-Forwarded-For": "1.2.3.4"})
           urllib.request.urlopen(req).read()
@@ -420,8 +420,11 @@ jobs:
               text=True,
           ).strip()
           record = json.loads(out)
-          assert record["context"]["client_ip"] == "1.2.3.4", record
-          print("XFF honoured from a trusted peer:", record["context"]["client_ip"])
+          client_ip = record["context"]["client_ip"]
+          assert client_ip != "1.2.3.4", (
+              "a spoofed X-Forwarded-For was accepted without a trusted proxy: " + out
+          )
+          print("XFF ignored (no trusted proxy); logged client_ip:", client_ip)
           PY
 
       - name: Record image metadata

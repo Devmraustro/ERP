@@ -40,6 +40,7 @@ constant.
 |---|---|---|
 | Single-file size before rotation | 100 MiB in code; **10 MiB in `ops/erp.env.example`** | `ERP_SECURITY_LOG_MAX_SIZE` |
 | Rotated files retained | 10 (so ≤ ~11 × the size above: ~1.1 GiB at the code default, ~110 MiB as shipped) | `ERP_SECURITY_LOG_MAX_FILES` |
+| Age-based deletion of rotated files | disabled by default (no deletion by age) | `ERP_SECURITY_LOG_MAX_AGE_DAYS` |
 | Rotation mechanics | atomic `os.replace`, serialised by a per-path lock, applied on write | — |
 | Write durability | one JSON object per line, appended under a per-path lock | — |
 | File mode | created `0600` (`os.open(..., 0o600)`); rotated files inherit the directory's permissions | operator (`chown`/ACL on the log directory) |
@@ -88,9 +89,20 @@ Interim operating rule (a default an operator may adopt, not a compliance claim)
 keep 90 days of request logs and 12 months of authentication-failure events,
 rotate as configured, and delete the oldest rotated file at each rotation.
 
-## 5. Deletion (not implemented; procedure only)
+## 5. Deletion
 
-There is no automatic deletion by age — only rotation with a fixed file count.
+Automatic deletion by age is now available as a *policy-driven* capability:
+`ERP_SECURITY_LOG_MAX_AGE_DAYS`, when set to a positive number of days, makes
+the rotation pass delete rotated files whose mtime is older than that age. The
+active log file is never touched. When the variable is unset (the default) the
+behaviour is unchanged — only size/count rotation applies — so no retention
+period is asserted without an approved schedule.
+
+The period itself is a legal determination owned by the DPO (§4); this
+repository provides the mechanism and never a statutory value. An operator who
+has an approved schedule sets the variable and may still schedule the host-side
+command below as defence in depth:
+
 To delete by age an operator must schedule it on the host, for example:
 
 ```bash
@@ -126,7 +138,7 @@ Any such deletion is irreversible and destroys evidence. It must be:
 | Gap | Owner | Closing evidence |
 |---|---|---|
 | Retention period and deletion schedule (§4) | DPO + counsel | Signed schedule with legal references |
-| Automated age-based deletion | Engineering/Operations | A scheduled job with a dry-run report, tested on a copy |
+| Automated age-based deletion | Engineering/Operations | Implemented as a policy-driven capability: set `ERP_SECURITY_LOG_MAX_AGE_DAYS` and the rotation pass ages out rotated files older than that. Disabled by default; a scheduled host-side job remains an acceptable defence-in-depth option. Evidence: `tests/test_phase56_security_log_retention.py` |
 | Off-host shipping and integrity protection of the log | Operations | Shipping configured, destination access-controlled, a restored sample proven |
 | Access audit inside the application | Engineering | Any endpoint that exposes log data must itself be audited; currently none exists, so this is latent |
 | Redaction review when new fields are added | Engineering | A test that fails when a new field is added to a log call site without a redaction decision (future work) |

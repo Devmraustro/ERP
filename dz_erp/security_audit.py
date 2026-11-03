@@ -71,6 +71,13 @@ _LOG_LOCK_TIMEOUT_SECONDS = 30.0
 _LOG_MAX_FILE_SIZE = int(os.environ.get("ERP_SECURITY_LOG_MAX_SIZE", "104857600"))
 # Number of rotated files to retain (default: 10)
 _LOG_MAX_FILES = int(os.environ.get("ERP_SECURITY_LOG_MAX_FILES", "10"))
+# Optional age-based retention for rotated files, in whole days. Unset (the
+# default) disables age-based deletion: only size/count rotation applies, which
+# preserves the pre-existing behaviour. A value is a *policy decision* that
+# belongs to the data-protection owner (see docs/LOG_RETENTION_AND_ACCESS.md);
+# this repository provides the mechanism and never a statutory period.
+_raw_age = os.environ.get("ERP_SECURITY_LOG_MAX_AGE_DAYS")
+_LOG_MAX_AGE_DAYS: Optional[int] = int(_raw_age) if _raw_age not in (None, "") else None
 
 # Process-local write locks, keyed by the resolved log path, so that two
 # ``JsonlSecurityLog`` instances aimed at the same file still share one lock.
@@ -93,15 +100,54 @@ def _rotation_lock_for(path: Path) -> threading.Lock:
         return lock
 
 
+def _prune_security_log_by_age(path: Path) -> None:
+    """Delete rotated log files older than ``_LOG_MAX_AGE_DAYS``.
+
+    Policy-driven and opt-in: when ``ERP_SECURITY_LOG_MAX_AGE_DAYS`` is unset
+    this is a no-op, so the existing size/count retention is unchanged and no
+    retention period is invented by the code. When set, rotated files (those
+    matching ``<path.name>.<n>``) whose mtime is older than the configured age
+    are removed; the active log file is never touched. Failures are best-effort:
+    a file that cannot be stat'd or unlinked is left for the next pass.
+
+    Off-host shipping is *not* implemented here: this function only deletes
+    local rotated files. Shipping to a central store is a separate, operator
+    configured capability and is documented as unavailable until configured and
+    tested (see docs/LOG_RETENTION_AND_ACCESS.md section 3).
+    """
+    if _LOG_MAX_AGE_DAYS is None:
+        return
+    cutoff = time.time() - (_LOG_MAX_AGE_DAYS * 86400)
+    for rotated in path.parent.glob(f"{path.name}.*"):
+        try:
+            suffix = rotated.name[len(path.name) + 1:]
+            if not suffix.isdigit():
+                continue
+        except (ValueError, IndexError):
+            continue
+        try:
+            if rotated.stat().st_mtime < cutoff:
+                rotated.unlink()
+        except OSError:
+            continue
+
+
 def _rotate_security_log(path: Path) -> None:
     """Rotate the security log file if it exceeds the configured maximum size.
 
+    Age-based retention (``ERP_SECURITY_LOG_MAX_AGE_DAYS``) is applied first,
+    on every call, so a quiet system still ages out rotated files even when the
+    size threshold is never reached. It is a no-op unless configured.
     Rotation is performed atomically using os.replace (POSIX) or MoveFileEx
     (Windows) to avoid losing records. The rotation is serialised with a
     process-local lock to prevent concurrent rotations.
 
     Retention policy: keep the current file plus _LOG_MAX_FILES - 1 rotated files.
     """
+    # Age-based retention runs on every call (including when no size rotation
+    # is needed), but only when configured. No-op otherwise.
+    _prune_security_log_by_age(path)
+
     # Check if rotation is needed
     try:
         if path.stat().st_size < _LOG_MAX_FILE_SIZE:

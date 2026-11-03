@@ -447,46 +447,58 @@ jobs:
           print(json.dumps(meta, indent=2))
           PY
 
-      - name: Generate SBOM (SPDX 2.3 JSON)
+      - name: Generate SBOM (SPDX 2.3 JSON, syft pinned)
         run: |
-          docker scout sbom --format spdx -o sbom.spdx.json erp-algeria:ci
+          # docker scout's plugin is not guaranteed on hosted runners; use the
+          # pinned syft release so the SBOM is reproducible.
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin v1.18.0
+          syft erp-algeria:ci -o spdx-json=sbom.spdx.json
 
-      - name: Scan image (SARIF)
+      - name: Scan image (trivy JSON + SARIF, pinned)
         run: |
-          docker scout cves --format sarif -o vulns.sarif erp-algeria:ci
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.62.0
+          trivy --version
+          trivy image --scanners vuln --format json -o vulns.json erp-algeria:ci
+          trivy image --scanners vuln --format sarif -o vulns.sarif erp-algeria:ci
 
       - name: Apply the documented security gate
         run: |
           python - <<'PY'
           import json, sys
-          sarif = json.load(open("vulns.sarif"))
-          rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+          report = json.load(open("vulns.json"))
 
-          def has_fix(p):
-              fv = (p.get("fixed_version") or "").strip().lower()
-              return fv not in ("", "not fixed", "n/a", "none")
+          def has_fix(v):
+              return bool((v.get("FixedVersion") or "").strip())
 
-          critical = [r for r in rules if (r.get("properties") or {}).get("cvssV3_severity") == "CRITICAL"]
-          fixable_high = [r for r in rules if (r.get("properties") or {}).get("cvssV3_severity") == "HIGH" and has_fix(r.get("properties") or {})]
-          unfixable_high = [r for r in rules if (r.get("properties") or {}).get("cvssV3_severity") == "HIGH" and not has_fix(r.get("properties") or {})]
-          medium = [r for r in rules if (r.get("properties") or {}).get("cvssV3_severity") == "MEDIUM"]
-          low = [r for r in rules if (r.get("properties") or {}).get("cvssV3_severity") == "LOW"]
+          critical, fixable_high, unfixable_high, medium, low = [], [], [], [], []
+          for result in report.get("Results", []):
+              target = result.get("Target", "")
+              for vuln in result.get("Vulnerabilities") or []:
+                  bucket = {
+                      "CRITICAL": critical,
+                      "HIGH": fixable_high if has_fix(vuln) else unfixable_high,
+                      "MEDIUM": medium,
+                      "LOW": low,
+                  }[vuln.get("Severity", "UNKNOWN")]
+                  bucket.append((target, vuln))
 
-          print(f"OS scan: critical={len(critical)} high_fixable={len(fixable_high)} "
+          print(f"image scan: critical={len(critical)} high_fixable={len(fixable_high)} "
                 f"high_unfixable={len(unfixable_high)} medium={len(medium)} low={len(low)}")
           if critical:
               print("FAIL: Critical vulnerabilities present:")
-              for r in critical:
-                  print("  ", r["id"])
+              for target, v in critical:
+                  print("  ", v.get("VulnerabilityID"), target, "->", v.get("FixedVersion"))
               sys.exit(1)
           if fixable_high:
               print("FAIL: High vulnerabilities with an available fix:")
-              for r in fixable_high:
-                  print("  ", r["id"], "->", r.get("properties", {}).get("fixed_version"))
+              for target, v in fixable_high:
+                  print("  ", v.get("VulnerabilityID"), target, "->", v.get("FixedVersion"))
               sys.exit(1)
           print("Gate: PASS (no Critical, no fixable High). "
                 f"{len(unfixable_high)} High without a fix, {len(medium)} Medium, "
-                f"{len(low)} Low are reported above and retained in vulns.sarif.")
+                f"{len(low)} Low are reported above and retained in vulns.json/vulns.sarif.")
           PY
 
       - name: Stop and remove the smoke container
@@ -505,6 +517,7 @@ jobs:
           if-no-files-found: warn
           path: |
             sbom.spdx.json
+            vulns.json
             vulns.sarif
             image-metadata.json
             smoke-logs.txt

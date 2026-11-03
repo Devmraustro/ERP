@@ -455,13 +455,27 @@ jobs:
             | sh -s -- -b /usr/local/bin v1.18.0
           syft erp-algeria:ci -o spdx-json=sbom.spdx.json
 
-      - name: Scan image (trivy JSON + SARIF, pinned)
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.62.0
-          trivy --version
-          trivy image --scanners vuln --format json -o vulns.json erp-algeria:ci
-          trivy image --scanners vuln --format sarif -o vulns.sarif erp-algeria:ci
+      - name: Scan image (trivy JSON, pinned action)
+        uses: aquasecurity/trivy-action@dc5a429b52fcf669ce959baa2c2dd26090d2a6c4 # v0.32.0
+        with:
+          image-ref: erp-algeria:ci
+          scan-type: image
+          format: json
+          output: vulns.json
+          vuln-type: os,library
+          ignore-unfixed: false
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+
+      - name: Scan image (trivy SARIF, pinned action)
+        uses: aquasecurity/trivy-action@dc5a429b52fcf669ce959baa2c2dd26090d2a6c4 # v0.32.0
+        with:
+          image-ref: erp-algeria:ci
+          scan-type: image
+          format: sarif
+          output: vulns.sarif
+          vuln-type: os,library
+          ignore-unfixed: false
+          severity: CRITICAL,HIGH,MEDIUM,LOW
 
       - name: Apply the documented security gate
         run: |

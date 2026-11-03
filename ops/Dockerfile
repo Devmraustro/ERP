@@ -3,12 +3,16 @@
 # Container image for the Algerian AI ERP API.
 #
 # STATUS: built and verified (2026-11-03, Round 7 continuation).
-# Image digest: sha256:a60d183863a2128c06ac74c015cdf4e3882894bae6abded5cc546a8e240a6378
+# Image digest: sha256:da54c6c3bf10fd2ec81467a9a8306f707f06937e450267da3215b6884a002ab0
+# (previous digest sha256:a60d1838... superseded by the openssl pin that fixes
+#  CVE-2026-84782; see the remediation note below.)
 # Base image: python:3.11.17-slim-bookworm (digest not pinned; see the remediation
-# matrix in docs/PROJECT_COMPLETION_TRACKER.md S16). Built with Docker 27.x on
+# matrix in docs/PROJECT_COMPLETION_TRACKER.md S16). Built with Docker 29.9 on
 # Windows; bootstrap, /healthz, X-Forwarded-For handling and audit-key rotation
-# were exercised inside the container. Base-image scan: 114 OS CVEs (0 critical,
-# 16 high, 20 medium, 78 low) — recorded, not suppressed.
+# were exercised inside the container. Base-image scan: 108 OS CVEs (0 critical,
+# 15 high with no available fix, 17 medium, 76 low) — recorded, not suppressed.
+# Remediation applied: openssl pinned to 3.0.22-1~deb12u2 (CVE-2026-84782 fixed);
+# the remaining 15 HIGH have no Debian fix and are reported, not suppressed.
 #
 # Deliberate choices, each with a reason:
 #
@@ -26,12 +30,15 @@
 FROM python:3.11.17-slim-bookworm
 
 # Runtime system libraries only. `libgl1`/`libglib2.0-0` are needed by the OCR
-# stack (opencv headless still links libGL on some builds); they are installed
-# and then the apt lists are dropped so the layer carries no package index.
+# stack (opencv headless still links libGL on some builds); `openssl` is pinned
+# to the security update that fixes CVE-2026-84782 (the base image ships the
+# vulnerable revision). apt lists are dropped so the layer carries no package
+# index.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
+        openssl=3.0.22-1~deb12u2 \
  && rm -rf /var/lib/apt/lists/*
 
 # Fixed, unprivileged runtime identity.

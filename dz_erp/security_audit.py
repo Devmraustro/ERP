@@ -76,8 +76,26 @@ _LOG_MAX_FILES = int(os.environ.get("ERP_SECURITY_LOG_MAX_FILES", "10"))
 # preserves the pre-existing behaviour. A value is a *policy decision* that
 # belongs to the data-protection owner (see docs/LOG_RETENTION_AND_ACCESS.md);
 # this repository provides the mechanism and never a statutory period.
-_raw_age = os.environ.get("ERP_SECURITY_LOG_MAX_AGE_DAYS")
-_LOG_MAX_AGE_DAYS: Optional[int] = int(_raw_age) if _raw_age not in (None, "") else None
+def _parse_log_max_age_days(raw: Optional[str]) -> Optional[int]:
+    """Parse the opt-in retention age; reject values that could erase all logs."""
+    if raw is None or raw == "":
+        return None
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ERP_SECURITY_LOG_MAX_AGE_DAYS must be a positive whole number of days"
+        ) from exc
+    if days < 1:
+        raise ValueError(
+            "ERP_SECURITY_LOG_MAX_AGE_DAYS must be a positive whole number of days"
+        )
+    return days
+
+
+_LOG_MAX_AGE_DAYS: Optional[int] = _parse_log_max_age_days(
+    os.environ.get("ERP_SECURITY_LOG_MAX_AGE_DAYS")
+)
 
 # Process-local write locks, keyed by the resolved log path, so that two
 # ``JsonlSecurityLog`` instances aimed at the same file still share one lock.

@@ -2,13 +2,13 @@
 #
 # Container image for the Algerian AI ERP API.
 #
-# STATUS: prepared, not built. No container runtime exists in the environment
-# where this file was written, so the image has never been built or run here; it
-# is recorded as IMPLEMENTED_NOT_VERIFIED in docs/PROJECT_COMPLETION_TRACKER.md.
-# The CI-verified facts it relies on are: the hash-pinned lockfile installs on
-# CPython 3.11.17 (the interpreter floor that `restore_and_verify_backup`
-# requires), `python -m dz_erp.serve` starts against a durable DB, and /healthz
-# answers without authentication.
+# STATUS: built and verified (2026-11-03, Round 7 continuation).
+# Image digest: sha256:a60d183863a2128c06ac74c015cdf4e3882894bae6abded5cc546a8e240a6378
+# Base image: python:3.11.17-slim-bookworm (digest not pinned; see the remediation
+# matrix in docs/PROJECT_COMPLETION_TRACKER.md S16). Built with Docker 27.x on
+# Windows; bootstrap, /healthz, X-Forwarded-For handling and audit-key rotation
+# were exercised inside the container. Base-image scan: 114 OS CVEs (0 critical,
+# 16 high, 20 medium, 78 low) — recorded, not suppressed.
 #
 # Deliberate choices, each with a reason:
 #

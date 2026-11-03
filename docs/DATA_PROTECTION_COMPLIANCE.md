@@ -75,3 +75,31 @@ None of these can be closed by code, and none has been claimed as closed. Until
 they are, the release readiness matrix keeps the corresponding rows
 **Blocked (external evidence required)** and no statement in this repository should
 be read as a compliance claim.
+
+## 6. Technical compliance checklist (Law 18-07 / ANPDP)
+
+Status vocabulary: `IMPLEMENTED` (code exists), `TESTED` (automated tests),
+`CI_VERIFIED`, `STAGING_VERIFIED`, `EXTERNALLY_APPROVED`, `BLOCKED`, `NOT_VERIFIED`,
+`NOT_APPLICABLE`. A row may be `IMPLEMENTED` and `TESTED` while still being
+`BLOCKED` on external evidence — that is the expected state for this project.
+
+| Obligation | Technical control in the code | Missing technical control | Legal decision | External evidence |
+|---|---|---|---|---|
+| Registration / notification with the ANPDP (where applicable) | none — registration is an organisational act | n/a | ANPDP registration or notification, as applicable | filed reference |
+| Lawful basis for processing | none in code — the basis is a legal determination per processing purpose | n/a | lawful basis per purpose (contract, legal obligation, legitimate interest) | written determination |
+| Data minimisation | only the fields the schema needs are stored; no user-agent or request body in logs; query strings stripped from `HTTP_REQUEST` | none identified | scope of processing agreed | processing register |
+| Purpose limitation | B2B accounting scope; security logging purpose documented in `docs/LOG_RETENTION_AND_ACCESS.md` §1 | none identified | documented purposes per category | processing register |
+| Storage limitation / retention | Size- and count-bounded security log (100 MiB × 10 default, configurable); age-based deletion available as an opt-in, policy-driven capability (`ERP_SECURITY_LOG_MAX_AGE_DAYS`, default disabled) | no automatic deletion by age unless configured; no off-host shipping; no in-app access audit | retention period per record class, legal reference, deletion trigger, accountable person | signed retention schedule |
+| Integrity and confidentiality | Encryption at rest for documents (Fernet vault); hashed passwords and session tokens; tenant isolation on every query; audit chain HMAC-chained; redaction of NIN/RIB/IBAN/tokens in logs | no KMS/HSM (file-backed keys); no off-host checkpointing | key custody and backup custody decisions | provider contract / recorded acceptance |
+| Access control | Role-based access; SoD (creator cannot approve); audit immutability by trigger; file mode `0600` on logs | no in-application log read/search/export endpoint (by design); no role-based log access inside the app | access policy and access-audit policy | access matrix signed by the DPO |
+| Data subject rights (access, rectification, objection, erasure) | deactivation instead of hard delete (audit trail preserved); partner supersession; no erasure workflow | no subject-access or erasure workflow; no pseudonymisation of historical records | resolution of the retention/erasure conflict for posted financial records | signed procedure |
+| Cross-border transfers | none — hosting is an operator decision | none | hosting location, transfer assessment, adequacy or safeguards | transfer assessment memo |
+| Security incident handling | durable redacted security log; audit chain; backup/restore; key rotation with verification | no alert channel (detection exists, nobody is paged); no breach-notification procedure | breach notification procedure and timelines with a named owner | procedure with tested contact list |
+| Processor / vendor responsibilities | none in code | none | processor agreements with hosting and any third-party service | executed agreements |
+| Accountability / documentation | processing register not implemented | n/a | processing register, DPO appointment, ANPDP filing where applicable | filed reference |
+
+**Summary.** The implemented technical controls are real and tested (encryption at rest,
+redaction, tenant isolation, audit immutability, bounded logging, key rotation). Every
+row that requires a legal determination, a signed procedure or an external artefact is
+`BLOCKED_EXTERNAL` and is **not** claimed as closed by this repository. Nothing in
+this document or in the code should be read as a compliance attestation.

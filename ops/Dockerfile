@@ -43,10 +43,8 @@ RUN apt-get update \
         libsqlite3-0 \
         zlib1g \
         openssl \
-        python3-setuptools \
  && apt-get remove -y --purge libxml2 2>/dev/null || true \
  && apt-get autoremove -y 2>/dev/null || true \
- && apt-get install -y --only-upgrade python3-setuptools 2>/dev/null || true \
  && rm -rf /var/lib/apt/lists/*
 
 # Fixed, unprivileged runtime identity.

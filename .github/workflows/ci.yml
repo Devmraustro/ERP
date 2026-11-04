@@ -479,6 +479,12 @@ jobs:
           if not isinstance(report, dict):
               print("FAIL: vulns.json must be a JSON object", file=sys.stderr)
               sys.exit(1)
+          if "Results" not in report:
+              print("FAIL: vulns.json missing Results key (incomplete scan)", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(report["Results"], list):
+              print("FAIL: vulns.json Results must be a list", file=sys.stderr)
+              sys.exit(1)
 
           def has_fix(v):
               fv = (v.get("FixedVersion") or "").strip()
@@ -512,13 +518,25 @@ jobs:
           medium = []
           low = []
           excepted = []
-          for result in report.get("Results", []) or []:
+          for result in report["Results"]:
               if not isinstance(result, dict):
-                  continue
+                  print("FAIL: vulns.json contains a non-object Result entry (incomplete scan)", file=sys.stderr)
+                  sys.exit(1)
+              if "Target" not in result:
+                  print("FAIL: vulns.json Result missing Target (incomplete scan)", file=sys.stderr)
+                  sys.exit(1)
               target = result.get("Target", "")
-              for vuln in result.get("Vulnerabilities") or []:
+              vulns_list = result.get("Vulnerabilities")
+              if vulns_list is not None and not isinstance(vulns_list, list):
+                  print("FAIL: vulns.json Vulnerabilities must be a list or null", file=sys.stderr)
+                  sys.exit(1)
+              for vuln in vulns_list or []:
                   if not isinstance(vuln, dict):
-                      continue
+                      print("FAIL: vulns.json contains a non-object Vulnerability entry (incomplete scan)", file=sys.stderr)
+                      sys.exit(1)
+                  if "VulnerabilityID" not in vuln or "Severity" not in vuln:
+                      print("FAIL: vulns.json Vulnerability missing required fields (incomplete scan)", file=sys.stderr)
+                      sys.exit(1)
                   sev = (vuln.get("Severity") or "UNKNOWN").upper()
                   if is_excepted(vuln, target):
                       excepted.append((target, vuln))

@@ -20,6 +20,12 @@ except Exception as e:
 if not isinstance(report, dict):
     print("FAIL: vulns.json must be a JSON object", file=sys.stderr)
     sys.exit(1)
+if "Results" not in report:
+    print("FAIL: vulns.json missing Results key (incomplete scan)", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(report["Results"], list):
+    print("FAIL: vulns.json Results must be a list", file=sys.stderr)
+    sys.exit(1)
 
 def has_fix(v):
     fv = (v.get("FixedVersion") or "").strip()
@@ -43,13 +49,25 @@ unfixable_high = []
 medium = []
 low = []
 excepted = []
-for result in report.get("Results", []) or []:
+for result in report["Results"]:
     if not isinstance(result, dict):
-        continue
+        print("FAIL: vulns.json contains a non-object Result entry (incomplete scan)", file=sys.stderr)
+        sys.exit(1)
+    if "Target" not in result:
+        print("FAIL: vulns.json Result missing Target (incomplete scan)", file=sys.stderr)
+        sys.exit(1)
     target = result.get("Target", "")
-    for vuln in result.get("Vulnerabilities") or []:
+    vulns_list = result.get("Vulnerabilities")
+    if vulns_list is not None and not isinstance(vulns_list, list):
+        print("FAIL: vulns.json Vulnerabilities must be a list or null", file=sys.stderr)
+        sys.exit(1)
+    for vuln in vulns_list or []:
         if not isinstance(vuln, dict):
-            continue
+            print("FAIL: vulns.json contains a non-object Vulnerability entry (incomplete scan)", file=sys.stderr)
+            sys.exit(1)
+        if "VulnerabilityID" not in vuln or "Severity" not in vuln:
+            print("FAIL: vulns.json Vulnerability missing required fields (incomplete scan)", file=sys.stderr)
+            sys.exit(1)
         sev = (vuln.get("Severity") or "UNKNOWN").upper()
         if is_excepted(vuln, target):
             excepted.append((target, vuln))
@@ -164,8 +182,89 @@ def test_malformed_json_fails_closed() -> None:
     assert r.returncode != 0
 
 
-def test_empty_results_passes_but_structure_ok() -> None:
-    report = {"Results": []}
+def test_valid_zero_findings_passes() -> None:
+    report = {"SchemaVersion": 2, "Results": []}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode == 0
+
+
+def test_missing_results_key_fails_closed() -> None:
+    report = {"SchemaVersion": 2}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_null_results_fails_closed() -> None:
+    report = {"Results": None}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_non_list_results_fails_closed() -> None:
+    report = {"Results": "not-a-list"}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_non_object_result_entry_fails_closed() -> None:
+    report = {"Results": ["not-an-object"]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_result_missing_target_fails_closed() -> None:
+    report = {"Results": [{"Vulnerabilities": []}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_non_list_vulnerabilities_fails_closed() -> None:
+    report = {"Results": [{"Target": "t", "Vulnerabilities": "not-a-list"}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_non_object_vulnerability_entry_fails_closed() -> None:
+    report = {"Results": [{"Target": "t", "Vulnerabilities": ["not-an-object"]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_vulnerability_missing_required_fields_fails_closed() -> None:
+    report = {"Results": [{"Target": "t", "Vulnerabilities": [{"PkgName": "x"}]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_valid_zero_findings_with_null_vulnerabilities_passes() -> None:
+    report = {"SchemaVersion": 2, "Results": [{"Target": "t", "Vulnerabilities": None}]}
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "vulns.json"
         p.write_text(json.dumps(report), encoding="utf-8")

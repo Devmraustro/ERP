@@ -27,7 +27,7 @@
 #    volume can be chowned predictably by the operator.
 #  * No secret is baked in. ERP_DB_PATH, the vault and any key material are
 #    mounted at run time; the image contains no database, no key and no log.
-FROM python:3.11.17-slim-bookworm
+FROM python:3.11-slim-bookworm
 
 # Runtime system libraries only. `libgl1`/`libglib2.0-0` are needed by the OCR
 # stack (opencv headless still links libGL on some builds); `openssl` is pinned
@@ -56,7 +56,7 @@ COPY requirements.lock.txt requirements.lock.hashes.txt ./
 RUN python -m pip install --no-cache-dir --upgrade pip \
  && python -m pip install --no-cache-dir --no-deps --require-hashes \
         -r requirements.lock.hashes.txt \
- && python -m pip install --no-cache-dir --upgrade 'jaraco.context>=6.1.1' 'setuptools>=78.1.1' 'wheel>=0.46.2' 2>&1 | tail -2
+ && python -m pip install --no-cache-dir --upgrade 'jaraco.context>=6.1.2' 'setuptools>=80.9.0' 'wheel>=0.46.3' 2>&1 | tail -2
 
 # Source. vendor/ is required: the SCF chart and the tax seed data are read from
 # it at runtime, and a frozen deployment can override the location with

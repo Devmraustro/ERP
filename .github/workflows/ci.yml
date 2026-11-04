@@ -457,22 +457,14 @@ jobs:
 
       - name: Scan image (trivy JSON + SARIF, pinned)
         run: |
-          # Download trivy v0.76.1 directly from GitHub release assets
-          # (verified: trivy_0.76.1_Linux-64bit.tar.gz exists)
-          TRIVY_VERSION=v0.76.1
-          for attempt in 1 2 3; do
-            if curl -sSfL -o /tmp/trivy.tar.gz \
-              "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"; then
-              break
-            fi
-            echo "trivy download attempt $attempt failed; retrying in 20s" >&2
-            sleep 20
-          done
-          tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
-          chmod +x /usr/local/bin/trivy
-          trivy --version
-          trivy image --scanners vuln --format json -o vulns.json erp-algeria:ci
-          trivy image --scanners vuln --format sarif -o vulns.sarif erp-algeria:ci
+          # Use trivy via Docker to avoid network issues downloading binaries
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/workspace \
+            aquasec/trivy:0.76.1 image --scanners vuln --format json -o /workspace/vulns.json erp-algeria:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/workspace \
+            aquasec/trivy:0.76.1 image --scanners vuln --format sarif -o /workspace/vulns.sarif erp-algeria:ci
+          ls -la vulns.json vulns.sarif
+
+
 
       - name: Apply the documented security gate
         run: |

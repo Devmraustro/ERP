@@ -27,7 +27,7 @@
 #    volume can be chowned predictably by the operator.
 #  * No secret is baked in. ERP_DB_PATH, the vault and any key material are
 #    mounted at run time; the image contains no database, no key and no log.
-FROM python:3.12-slim-trixie
+FROM python:3.12-slim-bookworm
 
 # Runtime system libraries only. `libgl1`/`libglib2.0-0` are needed by the OCR
 # stack (opencv headless still links libGL on some builds); `openssl` is pinned

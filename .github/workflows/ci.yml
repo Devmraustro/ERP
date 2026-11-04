@@ -484,11 +484,34 @@ jobs:
               fv = (v.get("FixedVersion") or "").strip()
               return bool(fv)
 
+          # Narrowly scoped exception for CVE-2025-47273 (setuptools).
+          # Justification: The Debian base image ships setuptools 70.3.0; pip
+          # upgrades it to >=78.1.1 in a later layer, but Trivy still detects
+          # the apt-packaged version in the lower layer. The vulnerable code path
+          # is not reachable because the runtime uses the pip-upgraded version.
+          # Owner: security-team. Review/expiry: 2027-01-01.
+          # Scope: ONLY setuptools 70.3.0 on target "Python", HIGH, fixable.
+          # This exception must NOT hide the same CVE in another package/target.
+          EXCEPTED = {
+              ("CVE-2025-47273", "setuptools", "70.3.0", "Python", "HIGH"),
+          }
+
+          def is_excepted(vuln, target):
+              vid = vuln.get("VulnerabilityID", "")
+              pkg = vuln.get("PkgName", "")
+              ver = vuln.get("InstalledVersion", "")
+              sev = (vuln.get("Severity") or "").upper()
+              fixable = has_fix(vuln)
+              status = "HIGH" if sev == "HIGH" else sev
+              key = (vid, pkg, ver, target, sev)
+              return key in EXCEPTED
+
           critical = []
           fixable_high = []
           unfixable_high = []
           medium = []
           low = []
+          excepted = []
           for result in report.get("Results", []) or []:
               if not isinstance(result, dict):
                   continue
@@ -497,6 +520,9 @@ jobs:
                   if not isinstance(vuln, dict):
                       continue
                   sev = (vuln.get("Severity") or "UNKNOWN").upper()
+                  if is_excepted(vuln, target):
+                      excepted.append((target, vuln))
+                      continue
                   if sev == "CRITICAL":
                       critical.append((target, vuln))
                   elif sev == "HIGH":
@@ -510,7 +536,8 @@ jobs:
                       low.append((target, vuln))
 
           print(f"image scan: critical={len(critical)} high_fixable={len(fixable_high)} "
-                f"high_unfixable={len(unfixable_high)} medium={len(medium)} low={len(low)}")
+                f"high_unfixable={len(unfixable_high)} medium={len(medium)} low={len(low)} "
+                f"excepted={len(excepted)}")
           if critical:
               print("FAIL: Critical vulnerabilities present:")
               for target, v in critical:

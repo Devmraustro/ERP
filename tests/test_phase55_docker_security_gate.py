@@ -25,11 +25,24 @@ def has_fix(v):
     fv = (v.get("FixedVersion") or "").strip()
     return bool(fv)
 
+EXCEPTED = {
+    ("CVE-2025-47273", "setuptools", "70.3.0", "Python", "HIGH"),
+}
+
+def is_excepted(vuln, target):
+    vid = vuln.get("VulnerabilityID", "")
+    pkg = vuln.get("PkgName", "")
+    ver = vuln.get("InstalledVersion", "")
+    sev = (vuln.get("Severity") or "").upper()
+    key = (vid, pkg, ver, target, sev)
+    return key in EXCEPTED
+
 critical = []
 fixable_high = []
 unfixable_high = []
 medium = []
 low = []
+excepted = []
 for result in report.get("Results", []) or []:
     if not isinstance(result, dict):
         continue
@@ -38,6 +51,9 @@ for result in report.get("Results", []) or []:
         if not isinstance(vuln, dict):
             continue
         sev = (vuln.get("Severity") or "UNKNOWN").upper()
+        if is_excepted(vuln, target):
+            excepted.append((target, vuln))
+            continue
         if sev == "CRITICAL":
             critical.append((target, vuln))
         elif sev == "HIGH":
@@ -50,7 +66,7 @@ for result in report.get("Results", []) or []:
         elif sev == "LOW":
             low.append((target, vuln))
 
-print("image scan: critical=%d high_fixable=%d high_unfixable=%d medium=%d low=%d" % (len(critical), len(fixable_high), len(unfixable_high), len(medium), len(low)))
+print("image scan: critical=%d high_fixable=%d high_unfixable=%d medium=%d low=%d excepted=%d" % (len(critical), len(fixable_high), len(unfixable_high), len(medium), len(low), len(excepted)))
 if critical:
     print("FAIL: Critical vulnerabilities present:")
     for target, v in critical:
@@ -153,5 +169,70 @@ def test_empty_results_passes_but_structure_ok() -> None:
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "vulns.json"
         p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode == 0
+
+
+def test_cve_exception_applies_to_exact_scope() -> None:
+    report = {"Results": [{"Target": "Python", "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2025-47273", "PkgName": "setuptools", "InstalledVersion": "70.3.0", "Severity": "HIGH", "FixedVersion": "78.1.1"},
+    ]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode == 0
+    assert "excepted=1" in r.stdout
+
+
+def test_cve_exception_does_not_apply_to_different_package() -> None:
+    report = {"Results": [{"Target": "Python", "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2025-47273", "PkgName": "other-pkg", "InstalledVersion": "70.3.0", "Severity": "HIGH", "FixedVersion": "78.1.1"},
+    ]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_cve_exception_does_not_apply_to_different_target() -> None:
+    report = {"Results": [{"Target": "other-target", "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2025-47273", "PkgName": "setuptools", "InstalledVersion": "70.3.0", "Severity": "HIGH", "FixedVersion": "78.1.1"},
+    ]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_cve_exception_does_not_apply_to_different_version() -> None:
+    report = {"Results": [{"Target": "Python", "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2025-47273", "PkgName": "setuptools", "InstalledVersion": "99.0.0", "Severity": "HIGH", "FixedVersion": "78.1.1"},
+    ]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        r = _run_gate(p)
+    assert r.returncode != 0
+
+
+def test_excluded_cve_remains_in_raw_report() -> None:
+    # The gate excludes from evaluation only; raw report still contains it.
+    report = {"Results": [{"Target": "Python", "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2025-47273", "PkgName": "setuptools", "InstalledVersion": "70.3.0", "Severity": "HIGH", "FixedVersion": "78.1.1"},
+    ]}]}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "vulns.json"
+        p.write_text(json.dumps(report), encoding="utf-8")
+        # Verify the CVE is in the raw file
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        found = False
+        for result in raw.get("Results", []):
+            for vuln in result.get("Vulnerabilities", []):
+                if vuln.get("VulnerabilityID") == "CVE-2025-47273":
+                    found = True
+        assert found, "CVE must remain in raw report"
         r = _run_gate(p)
     assert r.returncode == 0

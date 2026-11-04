@@ -35,10 +35,14 @@ FROM python:3.11.17-slim-bookworm
 # vulnerable revision). apt lists are dropped so the layer carries no package
 # index.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         openssl=3.0.22-1~deb12u2 \
+        libsqlite3-0 \
+        libxml2 \
+        zlib1g \
  && rm -rf /var/lib/apt/lists/*
 
 # Fixed, unprivileged runtime identity.
@@ -51,7 +55,8 @@ WORKDIR /app
 COPY requirements.lock.txt requirements.lock.hashes.txt ./
 RUN python -m pip install --no-cache-dir --upgrade pip \
  && python -m pip install --no-cache-dir --no-deps --require-hashes \
-        -r requirements.lock.hashes.txt
+        -r requirements.lock.hashes.txt \
+ && python -m pip install --no-cache-dir --upgrade 'jaraco.context>=6.1.1' 'setuptools>=78.1.1' 'wheel>=0.46.2' 2>&1 | tail -2
 
 # Source. vendor/ is required: the SCF chart and the tax seed data are read from
 # it at runtime, and a frozen deployment can override the location with

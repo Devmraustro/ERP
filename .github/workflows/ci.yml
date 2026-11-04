@@ -440,7 +440,7 @@ jobs:
               "user": d["Config"].get("User"),
               "entrypoint": d["Config"].get("Entrypoint"),
               "env_erp": [e for e in (d["Config"].get("Env") or []) if e.startswith("ERP_")],
-              "base_image": "python:3.12-slim-bookworm",
+              "base_image": "python:3.12-slim-trixie",
               "source_sha": "${{ github.sha }}",
           }
           json.dump(meta, open("image-metadata.json", "w"), indent=2)

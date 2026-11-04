@@ -41,7 +41,6 @@ RUN apt-get update \
         libgl1 \
         libglib2.0-0 \
         libsqlite3-0 \
-        libxml2 \
         zlib1g \
         openssl \
         python3-setuptools \

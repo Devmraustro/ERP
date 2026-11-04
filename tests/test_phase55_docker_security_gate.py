@@ -4,21 +4,18 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-
-def _run_gate(report_path: Path) -> subprocess.CompletedProcess:
-    code = r"""
+GATE_CODE = '''
 import json, sys
 try:
-    with open(%r, encoding="utf-8") as f:
+    with open(sys.argv[1], encoding="utf-8") as f:
         report = json.load(f)
 except Exception as e:
-    print(f"FAIL: missing or malformed vulns.json: {e}", file=sys.stderr)
+    print("FAIL: missing or malformed vulns.json: " + str(e), file=sys.stderr)
     sys.exit(1)
 if not isinstance(report, dict):
     print("FAIL: vulns.json must be a JSON object", file=sys.stderr)
@@ -53,20 +50,26 @@ for result in report.get("Results", []) or []:
         elif sev == "LOW":
             low.append((target, vuln))
 
-print(f"image scan: critical={len(critical)} high_fixable={len(fixable_high)} high_unfixable={len(unfixable_high)} medium={len(medium)} low={len(low)}")
+print("image scan: critical=%d high_fixable=%d high_unfixable=%d medium=%d low=%d" % (len(critical), len(fixable_high), len(unfixable_high), len(medium), len(low)))
 if critical:
     print("FAIL: Critical vulnerabilities present:")
     for target, v in critical:
-        print(f"  {v.get('VulnerabilityID')} {target} -> {v.get('FixedVersion')}")
+        print("  " + str(v.get("VulnerabilityID")) + " " + target + " -> " + str(v.get("FixedVersion")))
     sys.exit(1)
 if fixable_high:
     print("FAIL: High vulnerabilities with an available fix:")
     for target, v in fixable_high:
-        print(f"  {v.get('VulnerabilityID')} {target} -> {v.get('FixedVersion')}")
+        print("  " + str(v.get("VulnerabilityID")) + " " + target + " -> " + str(v.get("FixedVersion")))
     sys.exit(1)
 print("Gate: PASS (no Critical, no fixable High). %d High without a fix, %d Medium, %d Low are reported above and retained in vulns.json/vulns.sarif." % (len(unfixable_high), len(medium), len(low)))
-""" % str(report_path).replace("\\", "\\\\")
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+'''
+
+
+def _run_gate(report_path: Path) -> subprocess.CompletedProcess:
+    with tempfile.TemporaryDirectory() as d:
+        gate_file = Path(d) / "gate.py"
+        gate_file.write_text(GATE_CODE, encoding="utf-8")
+        return subprocess.run([sys.executable, str(gate_file), str(report_path)], capture_output=True, text=True)
 
 
 def test_unfixable_critical_fails() -> None:

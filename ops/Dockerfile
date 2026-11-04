@@ -43,7 +43,7 @@ RUN apt-get update \
         libsqlite3-0 \
         zlib1g \
         openssl \
- && apt-get remove -y --purge libxml2 2>/dev/null || true \
+ && apt-get remove -y --purge libxml2 python3-setuptools 2>/dev/null || true \
  && apt-get autoremove -y 2>/dev/null || true \
  && rm -rf /var/lib/apt/lists/*
 

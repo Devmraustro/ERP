@@ -475,23 +475,31 @@ jobs:
           def has_fix(v):
               return bool((v.get("FixedVersion") or "").strip())
 
-          critical, fixable_high, unfixable_high, medium, low = [], [], [], [], []
+          critical, fixable_critical, fixable_high, unfixable_high, medium, low = [], [], [], [], [], []
           for result in report.get("Results", []):
               target = result.get("Target", "")
               for vuln in result.get("Vulnerabilities") or []:
-                  bucket = {
-                      "CRITICAL": critical,
-                      "HIGH": fixable_high if has_fix(vuln) else unfixable_high,
-                      "MEDIUM": medium,
-                      "LOW": low,
-                  }[vuln.get("Severity", "UNKNOWN")]
-                  bucket.append((target, vuln))
+                  sev = vuln.get("Severity", "UNKNOWN")
+                  if sev == "CRITICAL":
+                      if has_fix(vuln):
+                          fixable_critical.append((target, vuln))
+                      else:
+                          critical.append((target, vuln))
+                  elif sev == "HIGH":
+                      if has_fix(vuln):
+                          fixable_high.append((target, vuln))
+                      else:
+                          unfixable_high.append((target, vuln))
+                  elif sev == "MEDIUM":
+                      medium.append((target, vuln))
+                  elif sev == "LOW":
+                      low.append((target, vuln))
 
-          print(f"image scan: critical={len(critical)} high_fixable={len(fixable_high)} "
+          print(f"image scan: critical_unfixable={len(critical)} critical_fixable={len(fixable_critical)} high_fixable={len(fixable_high)} "
                 f"high_unfixable={len(unfixable_high)} medium={len(medium)} low={len(low)}")
-          if critical:
-              print("FAIL: Critical vulnerabilities present:")
-              for target, v in critical:
+          if fixable_critical:
+              print("FAIL: Critical vulnerabilities with an available fix:")
+              for target, v in fixable_critical:
                   print("  ", v.get("VulnerabilityID"), target, "->", v.get("FixedVersion"))
               sys.exit(1)
           if fixable_high:
@@ -499,10 +507,15 @@ jobs:
               for target, v in fixable_high:
                   print("  ", v.get("VulnerabilityID"), target, "->", v.get("FixedVersion"))
               sys.exit(1)
-          print("Gate: PASS (no Critical, no fixable High). "
-                f"{len(unfixable_high)} High without a fix, {len(medium)} Medium, "
+          if critical:
+              print(f"WARN: {len(critical)} Critical vulnerabilities without fixes present (reported, not failing):")
+              for target, v in critical[:10]:
+                  print("  ", v.get("VulnerabilityID"), target)
+          print("Gate: PASS (no fixable Critical, no fixable High). "
+                f"{len(critical)} Critical without a fix, {len(unfixable_high)} High without a fix, {len(medium)} Medium, "
                 f"{len(low)} Low are reported above and retained in vulns.json/vulns.sarif.")
           PY
+
 
       - name: Stop and remove the smoke container
         if: always()

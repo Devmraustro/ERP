@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-3.0-only
+﻿# SPDX-License-Identifier: LGPL-3.0-only
 name: CI
 
 # Runs on pull requests, pushes to main, and manual dispatch. Feature branches
@@ -532,6 +532,3 @@ jobs:
             vulns.sarif
             image-metadata.json
             smoke-logs.txt
-#   t r i g g e r  
- #   t r i g g e r  
- 

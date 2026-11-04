@@ -54,10 +54,11 @@ WORKDIR /app
 
 # Dependency layer first: it changes rarely, so rebuilds of source stay cheap.
 COPY requirements.lock.txt requirements.lock.hashes.txt ./
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python -m pip install --no-cache-dir --upgrade pip \
  && python -m pip install --no-cache-dir --no-deps --require-hashes \
         -r requirements.lock.hashes.txt \
- && pip install --no-cache-dir --force-reinstall --ignore-installed 'setuptools>=78.1.1' 'wheel>=0.46.1' 'jaraco.context>=6.1.0' 2>&1 | tail -2
+ && pip install --no-cache-dir --force-reinstall 'setuptools>=78.1.1' 'wheel>=0.46.1' 'jaraco.context>=6.1.0' 2>&1 | tail -3
 
 # Source. vendor/ is required: the SCF chart and the tax seed data are read from
 # it at runtime, and a frozen deployment can override the location with

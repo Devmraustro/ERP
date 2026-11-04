@@ -44,6 +44,8 @@ RUN apt-get update \
         libxml2 \
         zlib1g \
         openssl \
+        python3-setuptools \
+ && apt-get install -y --only-upgrade python3-setuptools 2>/dev/null || true \
  && rm -rf /var/lib/apt/lists/*
 
 # Fixed, unprivileged runtime identity.
@@ -55,10 +57,10 @@ WORKDIR /app
 # Dependency layer first: it changes rarely, so rebuilds of source stay cheap.
 COPY requirements.lock.txt requirements.lock.hashes.txt ./
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
-RUN python -m pip install --no-cache-dir --upgrade pip \
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
  && python -m pip install --no-cache-dir --no-deps --require-hashes \
         -r requirements.lock.hashes.txt \
- && pip install --no-cache-dir --force-reinstall 'setuptools>=78.1.1' 'wheel>=0.46.1' 'jaraco.context>=6.1.0' 2>&1 | tail -3
+ && pip install --no-cache-dir --upgrade --force-reinstall 'setuptools>=78.1.1' 'wheel>=0.46.1' 'jaraco.context>=6.1.0' 2>&1 | tail -3
 
 # Source. vendor/ is required: the SCF chart and the tax seed data are read from
 # it at runtime, and a frozen deployment can override the location with

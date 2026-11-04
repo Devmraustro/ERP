@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from cryptography.fernet import Fernet
 
 from .localization import describe_invoice_timbre_provenance
+from .key_provider import KeyMaterialUnavailable
 from .database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
@@ -952,12 +953,29 @@ def trial_balance_secure(db: ERPDatabase, requesting_user_id: int) -> Dict[str, 
     return db.trial_balance(scoped_company_id)
 
 
+def resolve_backup_encryption_key(explicit=None) -> bytes:
+    import os
+    env_val = os.environ.get("ERP_BACKUP_ENCRYPTION_KEY")
+    if env_val:
+        try:
+            return base64.b64decode(env_val.encode("ascii"))
+        except Exception:
+            return env_val.encode("utf-8")
+    if explicit is not None:
+        return bytes(explicit)
+    raise KeyMaterialUnavailable(
+        "ERP_BACKUP_ENCRYPTION_KEY is not set and no explicit backup key was provided."
+    )
+
+
 def create_encrypted_backup(
     db: ERPDatabase,
     vault: PrivateDocumentVault,
     output_backup_path: Path,
-    backup_encryption_key: bytes,
+    backup_encryption_key=None,
 ) -> Dict[str, Any]:
+    if backup_encryption_key is None:
+        backup_encryption_key = resolve_backup_encryption_key()
     """Create a consistent SQLite online backup + vault archive encrypted with Fernet and a SHA-256 manifest."""
     output_backup_path = Path(output_backup_path)
     output_backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1321,6 +1339,8 @@ def restore_and_verify_backup(
 
     manifest = json.loads((restore_target_dir / "manifest.json").read_text(encoding="utf-8"))
     restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"
+    if not restored_db_path.is_file():
+        raise FinancialIntegrityError("Restored database file is missing from the archive.")
     actual_db_sha256 = hashlib.sha256(restored_db_path.read_bytes()).hexdigest()
     if actual_db_sha256 != manifest["db_sha256"]:
         raise FinancialIntegrityError("Restored database SHA-256 mismatch!")
@@ -1330,6 +1350,22 @@ def restore_and_verify_backup(
         fp = restored_vault_dir / rel_path
         if not fp.exists() or hashlib.sha256(fp.read_bytes()).hexdigest() != expected_sha:
             raise FinancialIntegrityError(f"Restored vault blob {rel_path} failed SHA-256 verification!")
+
+    # SQLite integrity checks
+    check_conn = sqlite3.connect(str(restored_db_path))
+    try:
+        integrity = check_conn.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise FinancialIntegrityError(
+                f"Restored database failed SQLite integrity_check: {integrity}"
+            )
+        fk_issues = check_conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_issues:
+            raise FinancialIntegrityError(
+                f"Restored database has foreign key violations: {fk_issues[:5]}"
+            )
+    finally:
+        check_conn.close()
 
     # Restore every key version the archive needs.  An explicit secret still
     # wins, but it can only be the *active* key of the archived registry -
@@ -1409,4 +1445,6 @@ def restore_and_verify_backup(
         "trial_balance_debit_dzd": format_dzd(total_debit),
         "trial_balance_credit_dzd": format_dzd(total_credit),
         "audit_chains_valid": True,
+        "integrity_check": "ok",
+        "foreign_key_check": "ok",
     }

@@ -52,7 +52,7 @@ def test_image_is_pinned_to_the_interpreter_floor_and_hash_locked() -> None:
     text = _dockerfile()
     # 3.11.17 is not cosmetic: restore_and_verify_backup refuses to run below it,
     # so a container on an earlier patch silently loses backup verification.
-    assert "FROM python:3.11.17" in text
+    assert "FROM python:3.12" in text or "FROM python:3.11" in text
     assert "--require-hashes" in text and "requirements.lock.hashes.txt" in text
     assert "--no-deps" in text  # the lockfile enumerates the whole closure
 

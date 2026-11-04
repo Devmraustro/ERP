@@ -27,7 +27,7 @@
 #    volume can be chowned predictably by the operator.
 #  * No secret is baked in. ERP_DB_PATH, the vault and any key material are
 #    mounted at run time; the image contains no database, no key and no log.
-FROM python:3.11-slim-bookworm
+FROM python:3.12-slim-trixie
 
 # Runtime system libraries only. `libgl1`/`libglib2.0-0` are needed by the OCR
 # stack (opencv headless still links libGL on some builds); `openssl` is pinned
@@ -39,10 +39,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
-        openssl=3.0.22-1~deb12u2 \
         libsqlite3-0 \
         libxml2 \
         zlib1g \
+        openssl \
  && rm -rf /var/lib/apt/lists/*
 
 # Fixed, unprivileged runtime identity.

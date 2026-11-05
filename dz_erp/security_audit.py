@@ -1202,6 +1202,13 @@ def restore_and_verify_backup(
     restore_target_dir = restore_target_dir.resolve()
     target_existed = restore_target_dir.exists()
 
+    # Acquire cross-process restore lock
+    from .restore_generation import RestoreLock
+    lock_path = restore_target_dir.parent / ".restore.lock"
+    lock = RestoreLock(lock_path, timeout_seconds=30.0)
+    if not lock.acquire():
+        raise FinancialIntegrityError("Could not acquire restore lock (another restore may be in progress).")
+
     # Use a unique staging directory — never extract directly into the active target.
     import uuid
     staging_dir = restore_target_dir.parent / (".restore_staging_" + uuid.uuid4().hex)
@@ -1509,6 +1516,12 @@ def restore_and_verify_backup(
             journal.save()
         except Exception:
             pass
+
+    # Release lock
+    try:
+        lock.release()
+    except Exception:
+        pass
 
     return {
         "restored_db": restored_db,

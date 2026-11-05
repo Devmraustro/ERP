@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -61,7 +64,7 @@ class PromotionJournal:
             "error": self.error,
         }
         tmp = self.journal_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.write_text(__import__("json").dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.journal_path)
 
     @classmethod
@@ -100,8 +103,8 @@ def create_promotion_journal(
     if journal_dir is None:
         journal_dir = active_dir.parent
     journal_dir.mkdir(parents=True, exist_ok=True)
-    gen_id = f"gen_{int(time.time() * 1000)}"
-    journal_path = journal_dir / f".restore_journal_{gen_id}.json"
+    gen_id = "gen_%d" % int(time.time() * 1000)
+    journal_path = journal_dir / (".restore_journal_" + gen_id + ".json")
     return PromotionJournal(
         journal_path=journal_path,
         generation_id=gen_id,
@@ -123,6 +126,62 @@ def detect_incomplete_promotions(journal_dir: Path) -> List[PromotionJournal]:
     return result
 
 
+class RestoreLock:
+    """Cross-process restore lock using OS-level file locking."""
+
+    def __init__(self, lock_path: Path, timeout_seconds: float = 30.0):
+        self.lock_path = lock_path
+        self.timeout = timeout_seconds
+        self._fd = None
+
+    def acquire(self) -> bool:
+        """Acquire the lock. Returns True on success, False on timeout."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = open(self.lock_path, "w")
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    if fcntl is not None:
+                        fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        # Windows: use msvcrt (already handled above)
+                        pass
+                return True
+            except (IOError, OSError, BlockingIOError):
+                if time.monotonic() >= deadline:
+                    self._fd.close()
+                    self._fd = None
+                    return False
+                time.sleep(0.1)
+
+    def release(self) -> None:
+        """Release the lock."""
+        if self._fd is not None:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    if fcntl is not None:
+                        fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+            except (IOError, OSError):
+                pass
+            self._fd.close()
+            self._fd = None
+
+    def __enter__(self):
+        if not self.acquire():
+            raise TimeoutError("Could not acquire restore lock within %s seconds" % self.timeout)
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
 def recover_promotion(journal: PromotionJournal) -> str:
     """Attempt to recover an interrupted promotion.
 
@@ -132,23 +191,19 @@ def recover_promotion(journal: PromotionJournal) -> str:
     active = Path(journal.active_dir)
 
     if journal.state == PromotionState.PROMOTING:
-        # Promotion was interrupted. Check if staging still exists.
         if staging.is_dir() and not active.exists():
-            # Staging exists but active doesn't — promotion didn't complete.
-            # Roll back: remove partial active, keep staging for retry.
             if active.exists():
+                import shutil
                 shutil.rmtree(active, ignore_errors=True)
             journal.state = PromotionState.FAILED
             journal.error = "Promotion interrupted; rolled back to previous state"
             journal.save()
             return "rollback: promotion interrupted, active restored"
         elif active.exists() and staging.exists():
-            # Both exist — promotion may have partially completed. Verify.
             journal.state = PromotionState.VERIFYING
             journal.save()
             return "verifying: both staging and active exist"
         elif not staging.exists() and active.exists():
-            # Staging gone, active exists — promotion likely completed.
             journal.state = PromotionState.COMPLETE
             journal.save()
             return "complete: promotion appears finished"
@@ -159,10 +214,9 @@ def recover_promotion(journal: PromotionJournal) -> str:
             return "failed: unknown state"
 
     if journal.state == PromotionState.VERIFYING:
-        # Verification was interrupted. Re-verify.
         return "re-verifying: verification was interrupted"
 
-    return f"no recovery needed: state={journal.state.value}"
+    return "no recovery needed: state=%s" % journal.state.value
 
 
 def cleanup_promotion(journal: PromotionJournal, keep_previous: bool = False) -> None:
@@ -175,10 +229,12 @@ def cleanup_promotion(journal: PromotionJournal, keep_previous: bool = False) ->
 
     # Clean staging
     if staging.exists():
+        import shutil
         shutil.rmtree(staging, ignore_errors=True)
 
     # Clean previous if not keeping
     if not keep_previous and previous.exists():
+        import shutil
         shutil.rmtree(previous, ignore_errors=True)
 
     # Remove journal

@@ -1509,6 +1509,16 @@ def restore_and_verify_backup(
     if not restored_db_path.is_file():
         raise FinancialIntegrityError("Promotion failed: database not found at active path.")
 
+    # Write active generation pointer (atomic)
+    try:
+        from .generation_resolver import set_active_generation
+        set_active_generation(
+            generation_id=journal.generation_id if journal else "restored",
+            generation_dir=restore_target_dir,
+        )
+    except Exception:
+        pass
+
     # Mark promotion as complete
     if journal is not None:
         try:

@@ -166,8 +166,14 @@ def build_app(
     # start-up here, never serve file-backed material under that label.
     configured_provider()
 
-    db_path = db_path or _required_path("ERP_DB_PATH")
-    vault_path = vault_path or _required_path("ERP_VAULT_PATH")
+    if db_path is None and vault_path is None:
+        from .generation_resolver import resolve_active_paths
+        resolved_db, resolved_vault = resolve_active_paths()
+        db_path = db_path or resolved_db
+        vault_path = vault_path or resolved_vault
+    else:
+        db_path = db_path or _required_path("ERP_DB_PATH")
+        vault_path = vault_path or _required_path("ERP_VAULT_PATH")
 
     db = ERPDatabase(str(db_path))
     # No encryption key is passed: the vault persists one beside itself on
@@ -215,7 +221,10 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("ERP_PORT", "8000")))
     args = parser.parse_args(argv)
 
-    db_path = _required_path("ERP_DB_PATH")
+    from .generation_resolver import resolve_active_paths
+    db_path, _ = resolve_active_paths()
+    if not db_path.exists():
+        db_path = _required_path("ERP_DB_PATH")
 
     # Open the database through ERPDatabase before touching it directly.  A
     # brand-new deployment points at a file that does not exist yet, and

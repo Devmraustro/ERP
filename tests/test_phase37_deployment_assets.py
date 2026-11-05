@@ -33,7 +33,7 @@ ENV_EXAMPLE = OPS / "erp.env.example"
 
 #: Variables that must never appear in a committed environment file; they are
 #: secrets and belong in the deployment's secret store.
-SECRET_VARS = {"ERP_VAULT_KEY", "ERP_AUDIT_HMAC_SECRET"}
+SECRET_VARS = {"ERP_VAULT_KEY", "ERP_AUDIT_HMAC_SECRET", "ERP_BACKUP_ENCRYPTION_KEY"}
 
 
 def _dockerfile() -> str:

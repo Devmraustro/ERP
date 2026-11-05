@@ -24,6 +24,9 @@ from cryptography.fernet import Fernet
 
 from .localization import describe_invoice_timbre_provenance
 from .key_provider import KeyMaterialUnavailable
+from .restore_generation import (
+    PromotionState,
+)
 from .database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
@@ -1015,6 +1018,7 @@ def create_encrypted_backup(
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "db_sha256": db_sha256,
+            "schema_version": 1,
             "vault_file_hashes": vault_hashes,
             # Human-readable requirement statement: which versions, and which
             # one is active. Contains no key material, so it is safe to surface
@@ -1200,6 +1204,22 @@ def restore_and_verify_backup(
     if target_existed and not restore_target_dir.is_dir():
         raise FinancialIntegrityError(f"Restore target is not a directory: {restore_target_dir}")
 
+    # Create promotion journal for recoverable restore
+    journal = None
+    try:
+        from .restore_generation import create_promotion_journal
+        journal_dir = restore_target_dir.parent
+        journal = create_promotion_journal(
+            staging_dir=restore_target_dir,
+            active_dir=restore_target_dir,
+            previous_dir=restore_target_dir.parent / (restore_target_dir.name + ".previous"),
+            journal_dir=journal_dir,
+        )
+        journal.state = PromotionState.VALIDATING
+        journal.save()
+    except Exception:
+        journal = None
+
     # The data filter is used as one boundary, not the only boundary.
     # Python 3.11 releases after 3.11.17 are source-only; Python 3.12.15 is also
     # source-only, while 3.12.10 is the last Windows binary installer. For 3.12.10+
@@ -1345,6 +1365,24 @@ def restore_and_verify_backup(
     if actual_db_sha256 != manifest["db_sha256"]:
         raise FinancialIntegrityError("Restored database SHA-256 mismatch!")
 
+    # Schema compatibility validation
+    schema_version = manifest.get("schema_version")
+    if schema_version is None:
+        raise FinancialIntegrityError("Restored backup is missing schema_version metadata.")
+    if not isinstance(schema_version, int):
+        raise FinancialIntegrityError("Restored backup has malformed schema_version: %r" % schema_version)
+    SUPPORTED_SCHEMA_VERSIONS = (1,)
+    if schema_version > max(SUPPORTED_SCHEMA_VERSIONS):
+        raise FinancialIntegrityError(
+            "Restored backup schema version %d is newer than supported (max %d). Upgrade the application first."
+            % (schema_version, max(SUPPORTED_SCHEMA_VERSIONS))
+        )
+    if schema_version < min(SUPPORTED_SCHEMA_VERSIONS):
+        raise FinancialIntegrityError(
+            "Restored backup schema version %d is too old (min %d). Migration required."
+            % (schema_version, min(SUPPORTED_SCHEMA_VERSIONS))
+        )
+
     restored_vault_dir = restore_target_dir / "vault"
     for rel_path, expected_sha in manifest["vault_file_hashes"].items():
         fp = restored_vault_dir / rel_path
@@ -1437,6 +1475,14 @@ def restore_and_verify_backup(
             )
         raise FinancialIntegrityError(f"Restored audit chain verification failed: {audit_verifications}")
 
+    # Mark promotion as complete (do NOT delete staging — it IS the restore target)
+    if journal is not None:
+        try:
+            journal.state = PromotionState.COMPLETE
+            journal.save()
+        except Exception:
+            pass
+
     return {
         "restored_db": restored_db,
         "restored_vault": restored_vault,
@@ -1447,4 +1493,5 @@ def restore_and_verify_backup(
         "audit_chains_valid": True,
         "integrity_check": "ok",
         "foreign_key_check": "ok",
+        "generation_id": journal.generation_id if journal else None,
     }

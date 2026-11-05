@@ -1201,6 +1201,11 @@ def restore_and_verify_backup(
     _lstat_restore_path(restore_target_dir)
     restore_target_dir = restore_target_dir.resolve()
     target_existed = restore_target_dir.exists()
+
+    # Use a unique staging directory — never extract directly into the active target.
+    import uuid
+    staging_dir = restore_target_dir.parent / (".restore_staging_" + uuid.uuid4().hex)
+    staging_dir.mkdir(parents=True, exist_ok=True)
     if target_existed and not restore_target_dir.is_dir():
         raise FinancialIntegrityError(f"Restore target is not a directory: {restore_target_dir}")
 
@@ -1346,8 +1351,8 @@ def restore_and_verify_backup(
                         f"Backup archive contains an unsafe tar entry; extraction was refused: {exc}"
                     ) from exc
 
-            restore_target_dir.mkdir(parents=True, exist_ok=True)
-            tar.extractall(path=restore_target_dir, filter=safe_data_filter)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            tar.extractall(path=staging_dir, filter=safe_data_filter)
     except FinancialIntegrityError:
         raise
     except (tarfile.TarError, OSError) as exc:
@@ -1357,8 +1362,8 @@ def restore_and_verify_backup(
             f"Backup archive contains an unsafe or invalid tar entry; extraction was refused: {exc}"
         ) from exc
 
-    manifest = json.loads((restore_target_dir / "manifest.json").read_text(encoding="utf-8"))
-    restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"
+    manifest = json.loads((staging_dir / "manifest.json").read_text(encoding="utf-8"))
+    restored_db_path = staging_dir / "erp_snapshot.sqlite3"
     if not restored_db_path.is_file():
         raise FinancialIntegrityError("Restored database file is missing from the archive.")
     actual_db_sha256 = hashlib.sha256(restored_db_path.read_bytes()).hexdigest()
@@ -1383,7 +1388,7 @@ def restore_and_verify_backup(
             % (schema_version, min(SUPPORTED_SCHEMA_VERSIONS))
         )
 
-    restored_vault_dir = restore_target_dir / "vault"
+    restored_vault_dir = staging_dir / "vault"
     for rel_path, expected_sha in manifest["vault_file_hashes"].items():
         fp = restored_vault_dir / rel_path
         if not fp.exists() or hashlib.sha256(fp.read_bytes()).hexdigest() != expected_sha:
@@ -1475,7 +1480,29 @@ def restore_and_verify_backup(
             )
         raise FinancialIntegrityError(f"Restored audit chain verification failed: {audit_verifications}")
 
-    # Mark promotion as complete (do NOT delete staging — it IS the restore target)
+    # === ATOMIC PROMOTION ===
+    # All validation passed. Promote staging -> active atomically.
+    previous_dir = restore_target_dir.parent / (restore_target_dir.name + ".previous")
+    if restore_target_dir.exists():
+        import shutil as _shutil
+        if previous_dir.exists():
+            _shutil.rmtree(previous_dir, ignore_errors=True)
+        os.rename(restore_target_dir, previous_dir)
+    os.rename(staging_dir, restore_target_dir)
+
+    # Update paths to point to the promoted (active) directory
+    restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"
+    restored_vault_dir = restore_target_dir / "vault"
+
+    # Re-create DB/vault objects pointing to promoted paths
+    restored_db = ERPDatabase(db_path=str(restored_db_path), hmac_secret=audit_ring.active_material)
+    restored_vault = PrivateDocumentVault(vault_root=restored_vault_dir, keyring=vault_ring)
+
+    # Verify promotion
+    if not restored_db_path.is_file():
+        raise FinancialIntegrityError("Promotion failed: database not found at active path.")
+
+    # Mark promotion as complete
     if journal is not None:
         try:
             journal.state = PromotionState.COMPLETE

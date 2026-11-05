@@ -1377,23 +1377,6 @@ def restore_and_verify_backup(
     if actual_db_sha256 != manifest["db_sha256"]:
         raise FinancialIntegrityError("Restored database SHA-256 mismatch!")
 
-    # Schema compatibility validation
-    schema_version = manifest.get("schema_version")
-    if schema_version is None:
-        raise FinancialIntegrityError("Restored backup is missing schema_version metadata.")
-    if not isinstance(schema_version, int):
-        raise FinancialIntegrityError("Restored backup has malformed schema_version: %r" % schema_version)
-    SUPPORTED_SCHEMA_VERSIONS = (1,)
-    if schema_version > max(SUPPORTED_SCHEMA_VERSIONS):
-        raise FinancialIntegrityError(
-            "Restored backup schema version %d is newer than supported (max %d). Upgrade the application first."
-            % (schema_version, max(SUPPORTED_SCHEMA_VERSIONS))
-        )
-    if schema_version < min(SUPPORTED_SCHEMA_VERSIONS):
-        raise FinancialIntegrityError(
-            "Restored backup schema version %d is too old (min %d). Migration required."
-            % (schema_version, min(SUPPORTED_SCHEMA_VERSIONS))
-        )
 
     restored_vault_dir = staging_dir / "vault"
     for rel_path, expected_sha in manifest["vault_file_hashes"].items():
@@ -1414,8 +1397,33 @@ def restore_and_verify_backup(
             raise FinancialIntegrityError(
                 f"Restored database has foreign key violations: {fk_issues[:5]}"
             )
+        # Read actual schema version from the database
+        actual_schema_version = check_conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
         check_conn.close()
+
+    # Schema compatibility: manifest vs actual DB vs application
+    schema_version = manifest.get("schema_version")
+    if schema_version is None:
+        raise FinancialIntegrityError("Restored backup is missing schema_version metadata.")
+    if not isinstance(schema_version, int):
+        raise FinancialIntegrityError("Restored backup has malformed schema_version: %r" % schema_version)
+    if actual_schema_version != schema_version:
+        raise FinancialIntegrityError(
+            "Schema version mismatch: manifest=%d, database=%d" % (schema_version, actual_schema_version)
+        )
+    SUPPORTED_SCHEMA_VERSIONS = (1,)
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        if schema_version > max(SUPPORTED_SCHEMA_VERSIONS):
+            raise FinancialIntegrityError(
+                "Restored backup schema version %d is newer than supported (max %d)."
+                % (schema_version, max(SUPPORTED_SCHEMA_VERSIONS))
+            )
+        else:
+            raise FinancialIntegrityError(
+                "Restored backup schema version %d is not supported (min %d)."
+                % (schema_version, min(SUPPORTED_SCHEMA_VERSIONS))
+            )
 
     # Restore every key version the archive needs.  An explicit secret still
     # wins, but it can only be the *active* key of the archived registry -

@@ -1165,6 +1165,9 @@ class ERPDatabase:
         # single write transaction opened by ``_migrate_schema``.
         self._migrate_ocr_confidence(conn)
         self._migrate_schema(conn)
+        # Record schema version for backup/restore compatibility
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         """Idempotently upgrade pre-existing databases, as one serialised unit.

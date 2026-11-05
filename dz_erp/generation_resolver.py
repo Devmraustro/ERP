@@ -21,6 +21,7 @@ def _data_dir() -> Path:
     db_path = os.environ.get("ERP_DB_PATH", "")
     if db_path:
         return Path(db_path).resolve().parent
+    # No default — return None-equivalent (caller must handle)
     return Path("/var/lib/erp")
 
 
@@ -47,8 +48,9 @@ def resolve_active_paths() -> Tuple[Path, Path]:
     Otherwise, fall back to ERP_DB_PATH / ERP_VAULT_PATH.
     """
     pp = _pointer_path()
-    if pp.is_file():
-        try:
+    # Only try pointer if the data dir exists and is readable
+    try:
+        if pp.is_file():
             data = json.loads(pp.read_text(encoding="utf-8"))
             gen_dir = Path(data["generation_dir"])
             if gen_dir.is_dir():
@@ -56,12 +58,14 @@ def resolve_active_paths() -> Tuple[Path, Path]:
                 vault_path = gen_dir / "vault"
                 if db_path.is_file():
                     return db_path, vault_path
-        except (json.JSONDecodeError, KeyError, OSError):
-            pass
+    except (json.JSONDecodeError, KeyError, OSError, PermissionError):
+        pass
     # Fallback to environment variables
-    db_path = Path(os.environ.get("ERP_DB_PATH", "/var/lib/erp/erp.sqlite3"))
-    vault_path = Path(os.environ.get("ERP_VAULT_PATH", "/var/lib/erp/vault"))
-    return db_path, vault_path
+    db_path_str = os.environ.get("ERP_DB_PATH")
+    vault_path_str = os.environ.get("ERP_VAULT_PATH")
+    if not db_path_str or not vault_path_str:
+        raise ValueError("ERP_DB_PATH and ERP_VAULT_PATH must be set")
+    return Path(db_path_str), Path(vault_path_str)
 
 
 def set_active_generation(

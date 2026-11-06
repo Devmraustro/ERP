@@ -1496,11 +1496,8 @@ def restore_and_verify_backup(
         raise FinancialIntegrityError(f"Restored audit chain verification failed: {audit_verifications}")
 
     # === GENERATION-BASED ACTIVATION ===
-    # All validation passed. The staging directory IS the generation directory.
-    # It has a unique name (uuid4) and is immutable after this point.
-    # Promote it to the active path via atomic rename.
+    # All validation passed. Promote staging -> active via rename, preserving previous.
     gen_id = journal.generation_id if journal else ("gen_" + __import__("uuid").uuid4().hex)
-    gen_dir = staging_dir  # staging IS the generation
 
     # Preserve previous generation
     previous_dir = restore_target_dir.parent / (restore_target_dir.name + ".previous")
@@ -1510,8 +1507,8 @@ def restore_and_verify_backup(
             _shutil.rmtree(previous_dir, ignore_errors=True)
         os.rename(restore_target_dir, previous_dir)
 
-    # Atomically promote generation to active path
-    os.rename(gen_dir, restore_target_dir)
+    # Promote staging to active path
+    os.rename(staging_dir, restore_target_dir)
 
     # Update paths to point to the promoted (active) directory
     restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"
@@ -1525,7 +1522,7 @@ def restore_and_verify_backup(
     if not restored_db_path.is_file():
         raise FinancialIntegrityError("Promotion failed: database not found at active path.")
 
-    # Atomically replace the active generation pointer
+    # Atomically replace the active generation pointer (single atomic operation)
     try:
         from .generation_resolver import set_active_generation
         set_active_generation(

@@ -185,36 +185,161 @@ class RestoreLock:
 def recover_promotion(journal: PromotionJournal) -> str:
     """Attempt to recover an interrupted promotion.
 
+    Performs actual filesystem operations to complete or roll back.
     Returns a description of the action taken.
     """
+    import shutil
     staging = Path(journal.staging_dir)
     active = Path(journal.active_dir)
+    previous = Path(journal.previous_dir)
+
+    if journal.state in (PromotionState.COMPLETE,):
+        return "no recovery needed: already complete"
+
+    if journal.state in (PromotionState.FAILED, PromotionState.ROLLBACK):
+        # Clean up staging if it exists
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        return "no recovery needed: state=%s" % journal.state.value
+
+    if journal.state == PromotionState.PENDING or journal.state == PromotionState.VALIDATING:
+        # Validation was interrupted. Clean up staging, keep active.
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        journal.state = PromotionState.FAILED
+        journal.error = "Validation interrupted; staging cleaned up"
+        journal.save()
+        return "rollback: validation interrupted, staging cleaned"
 
     if journal.state == PromotionState.PROMOTING:
+        # Promotion was interrupted. Determine current state.
         if staging.is_dir() and not active.exists():
-            if active.exists():
-                import shutil
-                shutil.rmtree(active, ignore_errors=True)
-            journal.state = PromotionState.FAILED
-            journal.error = "Promotion interrupted; rolled back to previous state"
+            # Staging exists but active doesn't — promotion didn't start.
+            # Keep staging for retry, mark as pending.
+            journal.state = PromotionState.PENDING
+            journal.error = "Promotion not started; staging preserved for retry"
             journal.save()
-            return "rollback: promotion interrupted, active restored"
+            return "pending: promotion not started, staging preserved"
         elif active.exists() and staging.exists():
-            journal.state = PromotionState.VERIFYING
-            journal.save()
-            return "verifying: both staging and active exist"
+            # Both exist — promotion was interrupted between renames.
+            # Verify active; if valid, keep it and clean up staging.
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(active / "erp_snapshot.sqlite3"))
+                integrity = conn.execute("PRAGMA integrity_check").fetchone()
+                conn.close()
+                if integrity and integrity[0] == "ok":
+                    # Active is valid — keep it, clean up staging
+                    shutil.rmtree(staging, ignore_errors=True)
+                    journal.state = PromotionState.COMPLETE
+                    journal.save()
+                    return "complete: active verified valid, staging cleaned"
+                else:
+                    # Active is invalid — roll back to previous
+                    if previous.exists():
+                        if active.exists():
+                            shutil.rmtree(active, ignore_errors=True)
+                        os.rename(previous, active)
+                    if staging.exists():
+                        shutil.rmtree(staging, ignore_errors=True)
+                    journal.state = PromotionState.ROLLBACK
+                    journal.error = "Active invalid; rolled back to previous"
+                    journal.save()
+                    return "rollback: active invalid, restored previous"
+            except Exception as exc:
+                # Can't verify — fail closed
+                journal.state = PromotionState.FAILED
+                journal.error = "Verification failed during recovery: %s" % type(exc).__name__
+                journal.save()
+                return "failed: verification error"
         elif not staging.exists() and active.exists():
-            journal.state = PromotionState.COMPLETE
-            journal.save()
-            return "complete: promotion appears finished"
+            # Staging gone, active exists — promotion likely completed.
+            # Verify active before marking complete.
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(active / "erp_snapshot.sqlite3"))
+                integrity = conn.execute("PRAGMA integrity_check").fetchone()
+                conn.close()
+                if integrity and integrity[0] == "ok":
+                    journal.state = PromotionState.COMPLETE
+                    journal.save()
+                    return "complete: promotion finished and verified"
+                else:
+                    # Active is invalid — try previous
+                    if previous.exists():
+                        if active.exists():
+                            shutil.rmtree(active, ignore_errors=True)
+                        os.rename(previous, active)
+                        journal.state = PromotionState.ROLLBACK
+                        journal.error = "Active invalid after promotion; rolled back"
+                        journal.save()
+                        return "rollback: active invalid, restored previous"
+                    else:
+                        journal.state = PromotionState.FAILED
+                        journal.error = "Active invalid and no previous generation"
+                        journal.save()
+                        return "failed: no recoverable generation"
+            except Exception as exc:
+                journal.state = PromotionState.FAILED
+                journal.error = "Verification failed: %s" % type(exc).__name__
+                journal.save()
+                return "failed: verification error"
         else:
-            journal.state = PromotionState.FAILED
-            journal.error = "Unknown state during recovery"
-            journal.save()
-            return "failed: unknown state"
+            # Neither staging nor active exists
+            if previous.exists():
+                os.rename(previous, active)
+                journal.state = PromotionState.ROLLBACK
+                journal.error = "Neither staging nor active existed; restored previous"
+                journal.save()
+                return "rollback: restored previous generation"
+            else:
+                journal.state = PromotionState.FAILED
+                journal.error = "No recoverable generation found"
+                journal.save()
+                return "failed: no recoverable generation"
 
     if journal.state == PromotionState.VERIFYING:
-        return "re-verifying: verification was interrupted"
+        # Verification was interrupted. Re-verify active.
+        if active.exists():
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(active / "erp_snapshot.sqlite3"))
+                integrity = conn.execute("PRAGMA integrity_check").fetchone()
+                conn.close()
+                if integrity and integrity[0] == "ok":
+                    journal.state = PromotionState.COMPLETE
+                    journal.save()
+                    return "complete: verification succeeded on retry"
+                else:
+                    if previous.exists():
+                        if active.exists():
+                            import shutil
+                            shutil.rmtree(active, ignore_errors=True)
+                        os.rename(previous, active)
+                        journal.state = PromotionState.ROLLBACK
+                        journal.error = "Verification failed on retry; rolled back"
+                        journal.save()
+                        return "rollback: verification failed, restored previous"
+                    journal.state = PromotionState.FAILED
+                    journal.error = "Verification failed and no previous generation"
+                    journal.save()
+                    return "failed: verification failed, no rollback available"
+            except Exception as exc:
+                journal.state = PromotionState.FAILED
+                journal.error = "Verification error: %s" % type(exc).__name__
+                journal.save()
+                return "failed: verification error"
+        else:
+            if previous.exists():
+                os.rename(previous, active)
+                journal.state = PromotionState.ROLLBACK
+                journal.error = "Active missing during verification; restored previous"
+                journal.save()
+                return "rollback: active missing, restored previous"
+            journal.state = PromotionState.FAILED
+            journal.error = "Active missing and no previous generation"
+            journal.save()
+            return "failed: no recoverable generation"
 
     return "no recovery needed: state=%s" % journal.state.value
 

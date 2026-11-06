@@ -167,17 +167,36 @@ def build_app(
     configured_provider()
 
     if db_path is None and vault_path is None:
-        try:
-            from .generation_resolver import resolve_active_paths
-            resolved_db, resolved_vault = resolve_active_paths()
-            db_path = resolved_db
-            vault_path = resolved_vault
-        except (ValueError, OSError):
+        # Check if env vars are set first (fail-closed)
+        db_env = os.environ.get("ERP_DB_PATH")
+        vault_env = os.environ.get("ERP_VAULT_PATH")
+        if not db_env or not vault_env:
             db_path = _required_path("ERP_DB_PATH")
             vault_path = _required_path("ERP_VAULT_PATH")
+        else:
+            try:
+                from .generation_resolver import resolve_active_paths
+                resolved_db, resolved_vault = resolve_active_paths()
+                db_path = resolved_db
+                vault_path = resolved_vault
+            except (ValueError, OSError):
+                db_path = _required_path("ERP_DB_PATH")
+                vault_path = _required_path("ERP_VAULT_PATH")
     else:
         db_path = db_path or _required_path("ERP_DB_PATH")
         vault_path = vault_path or _required_path("ERP_VAULT_PATH")
+
+    # Startup recovery gate: detect and recover from incomplete restores
+    # before any DB or Vault access.
+    try:
+        from .generation_resolver import startup_recovery_gate
+        data_dir = Path(db_path).resolve().parent
+        if not startup_recovery_gate(data_dir):
+            raise RuntimeError("Startup recovery failed: cannot establish a safe active generation.")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
 
     db = ERPDatabase(str(db_path))
     # No encryption key is passed: the vault persists one beside itself on
@@ -199,10 +218,6 @@ def build_app(
     )
 
 
-# ``uvicorn dz_erp.serve:app`` resolves this attribute at start-up, so the app
-# is built on first access rather than at import time.  That keeps
-# ``import dz_erp.serve`` usable from tests and tooling, while a real server
-# still fails loudly - and only then - when the environment is unconfigured.
 def __getattr__(name: str):
     if name == "app":
         return build_app()

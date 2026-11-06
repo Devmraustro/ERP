@@ -64,6 +64,11 @@ STATUS_PRESENT = "present"
 FLAG_UNMEASURED = "confidence_unmeasured"
 FLAG_LOW_CONFIDENCE = "low_confidence"
 FLAG_CONFLICT = "conflicting_extraction"
+# Phase 34: several *rows* claim the same logical field. This is a record
+# integrity problem, not a value conflict: the extra rows are separate evidence
+# and a decision must account for every one of them, or the field stays blocked.
+FLAG_DUPLICATE_ROWS = "duplicate_extraction_rows"
+BLOCK_DUPLICATE_ROWS = "DUPLICATE_EXTRACTION_ROWS"
 FLAG_OVERRIDDEN = "human_override"
 FLAG_STALE = "decision_stale"
 FLAG_NOT_PRESENT_STALE = "value_appeared_after_not_present"
@@ -295,12 +300,111 @@ def _line_payload(field_row: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], 
     return data, None
 
 
+def _row_sort_key(row: Dict[str, Any]) -> Tuple[int, int]:
+    """Deterministic order over an extraction group: page, then insertion order."""
+    try:
+        page = int(row.get("page_number") or 1)
+    except (TypeError, ValueError):
+        page = 1
+    return (page, int(row.get("id") or 0))
+
+
+def _row_group_ids(rows: List[Dict[str, Any]]) -> List[int]:
+    return [int(r["id"]) for r in sorted(rows, key=_row_sort_key)]
+
+
+def decision_evidence(decision: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The evidence binding stored on a review decision, or ``None``.
+
+    ``None`` means "recorded before Phase 34": the decision covered the single
+    row that existed then, and covers a multi-row group only if one remains.
+    """
+    if not decision:
+        return None
+    # ``decision`` may be a plain dict (tests, API callers) or a ``sqlite3.Row``
+    # (the decision service reading the latest row), so it is read defensively.
+    try:
+        raw = decision["evidence_json"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(str(raw))
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _covered_row_ids(decision: Optional[Dict[str, Any]]) -> Optional[set]:
+    """Which extraction row ids this decision explicitly reviewed (``None`` = unbound)."""
+    ev = decision_evidence(decision)
+    if ev is None:
+        return None
+    ids = ev.get("row_ids")
+    if not isinstance(ids, list):
+        return None
+    try:
+        return {int(i) for i in ids}
+    except (TypeError, ValueError):
+        return None
+
+
+def _selected_row_id(decision: Optional[Dict[str, Any]]) -> Optional[int]:
+    ev = decision_evidence(decision)
+    if ev is None:
+        return None
+    try:
+        selected = ev.get("selected_row_id")
+        return None if selected is None else int(selected)
+    except (TypeError, ValueError):
+        return None
+
+
 def _field_evaluation(
     rule: FieldRule,
     field_row: Optional[Dict[str, Any]],
     latest: Optional[Dict[str, Any]],
+    group: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Evaluate one header field (or one reviewable line element when ``rule`` is a line rule)."""
+    """Evaluate one header field (or one reviewable line element when ``rule`` is a line rule).
+
+    ``group`` is every extraction row that claims this logical field (the same
+    header name with ``line_index IS NULL``, or every row sharing one line
+    index). When it holds more than one row the group is a duplicate record
+    set: the flags carry ``duplicate_extraction_rows``, the evaluation names
+    the row ids, and the field cannot be satisfied until a decision explicitly
+    covers *all* of them. The first row is never silently adopted as "the"
+    value: an unresolved group selects the deterministically-first row for
+    display only, and stays unsatisfied.
+    """
+    rows = [r for r in (group if group is not None else ([field_row] if field_row is not None else [])) if r is not None]
+    rows = sorted(rows, key=_row_sort_key)
+    duplicate_row_ids = _row_group_ids(rows) if len(rows) > 1 else []
+    # Only a decision that actually resolves a *value* can close a duplicate
+    # group. FLAG and NOT_PRESENT are observations about the evidence, not
+    # selections from it, so neither may launder an unresolved group.
+    latest_decision_kind = None
+    if latest is not None:
+        try:
+            latest_decision_kind = latest["decision"]
+        except (KeyError, IndexError, TypeError):
+            latest_decision_kind = None
+    covered_ids = (
+        _covered_row_ids(latest)
+        if latest_decision_kind in (DECISION_CONFIRMED, DECISION_CORRECTED)
+        else None
+    )
+    selected_row_id = _selected_row_id(latest)
+    if len(rows) > 1 and selected_row_id is not None:
+        # A resolved group is read through the row the reviewer selected.
+        chosen = next((r for r in rows if int(r["id"]) == selected_row_id), None)
+        field_row = chosen if chosen is not None else rows[0]
+    else:
+        field_row = rows[0] if rows else field_row
+    duplicate_unresolved = bool(duplicate_row_ids) and (
+        covered_ids is None or covered_ids != set(duplicate_row_ids)
+    )
     line_index = None if field_row is None else field_row.get("line_index")
     if rule in (LINE_QTY_RULE, LINE_PRICE_RULE, LINE_DISCOUNT_RULE) and field_row is not None:
         payload, _parse_error = _line_payload(field_row)
@@ -353,6 +457,8 @@ def _field_evaluation(
                 flags.append(FLAG_CONFLICT)
         if overridden:
             flags.append(FLAG_OVERRIDDEN)
+    if duplicate_row_ids:
+        flags.append(FLAG_DUPLICATE_ROWS)
 
     decision_state: Optional[str] = None
     decided_value: Optional[str] = None
@@ -373,9 +479,18 @@ def _field_evaluation(
             if not satisfied:
                 flags.append(FLAG_STALE)
 
+    if duplicate_unresolved:
+        # Explicit and last: no decision, however recent, satisfies a field
+        # whose row set it did not review.
+        satisfied = False
+
     return {
         "field_name": rule.field_name,
         "line_index": line_index,
+        "row_id": None if field_row is None else int(field_row["id"]),
+        "duplicate_row_ids": duplicate_row_ids,
+        "duplicate_resolved": bool(duplicate_row_ids) and not duplicate_unresolved,
+        "duplicate_unresolved": duplicate_unresolved,
         "value": None if missing else value,
         "required": rule.required,
         "status": STATUS_MISSING if missing else STATUS_PRESENT,
@@ -413,74 +528,90 @@ def evaluate_document_review_policy(
     unmet_required: List[str] = []
     flagged: List[str] = []
 
+    duplicates: List[str] = []
     for rule in REVIEW_POLICY:
-        row = rows_by_name.get(rule.field_name)
-        # Multiple rows for one header field cannot happen through the intake
-        # path (first match wins; later different values become conflicts), but
-        # never silently pick one: treat extra rows as a conflict.
-        field_row = row[0] if row else None
+        group = rows_by_name.get(rule.field_name) or []
         latest = _latest_decision(decisions_by_key, rule.field_name, None)
-        ev = _field_evaluation(rule, field_row, latest)
-        if row and len(row) > 1:
-            ev["flags"].append(FLAG_CONFLICT)
-        if not ev["satisfied"]:
+        ev = _field_evaluation(rule, group[0] if group else None, latest, group=group)
+        if ev["duplicate_unresolved"]:
+            # A duplicate record set is its own blocking reason: it is a record
+            # integrity failure, not a value the reviewer merely has to look at.
+            duplicates.append(rule.field_name)
+        elif not ev["satisfied"]:
             if ev["decision"] == DECISION_FLAGGED or FLAG_STALE in ev["flags"] or FLAG_NOT_PRESENT_STALE in ev["flags"]:
                 flagged.append(rule.field_name)
             elif rule.required:
                 unmet_required.append(rule.field_name)
         field_evaluations.append(ev)
 
-    line_rows = sorted(rows_by_name.get(LINE_ITEM_FIELD, []), key=lambda r: r.get("line_index") or 0)
+    # Rows are grouped by their logical line index: two rows for one index are a
+    # duplicate record set, not two lines. Ordering is by page then insertion.
+    line_groups: Dict[int, List[Dict[str, Any]]] = {}
+    for line_row in rows_by_name.get(LINE_ITEM_FIELD, []):
+        line_groups.setdefault(int(line_row.get("line_index") or 0), []).append(line_row)
+    line_indices = sorted(line_groups)
+
     line_evaluations: List[Dict[str, Any]] = []
-    for line_row in line_rows:
-        latest = _latest_decision(decisions_by_key, LINE_ITEM_FIELD, line_row.get("line_index"))
-        ev = _field_evaluation(LINE_QTY_RULE, line_row, latest)
+    for index in line_indices:
+        group = line_groups[index]
+        latest = _latest_decision(decisions_by_key, LINE_ITEM_FIELD, index)
+        ev = _field_evaluation(LINE_QTY_RULE, group[0], latest, group=group)
         line_evaluations.append(ev)
-        if not ev["satisfied"]:
+        if ev["duplicate_unresolved"]:
+            duplicates.append(f"{LINE_ITEM_FIELD}[{index}]")
+        elif not ev["satisfied"]:
             if ev["decision"] == DECISION_FLAGGED or FLAG_STALE in ev["flags"]:
-                flagged.append(f"{LINE_ITEM_FIELD}[{line_row.get('line_index')}]")
+                flagged.append(f"{LINE_ITEM_FIELD}[{index}]")
             else:
-                unmet_required.append(f"{LINE_ITEM_FIELD}[{line_row.get('line_index')}]")
+                unmet_required.append(f"{LINE_ITEM_FIELD}[{index}]")
 
     # Same rows, second reviewable element: the unit price. Its decisions are
     # stored under ``line_unit_price`` keyed by the same line index, so a
     # quantity decision can never stand in for a price decision.
     line_price_evaluations: List[Dict[str, Any]] = []
-    for line_row in line_rows:
-        latest = _latest_decision(decisions_by_key, LINE_PRICE_FIELD, line_row.get("line_index"))
-        ev = _field_evaluation(LINE_PRICE_RULE, line_row, latest)
+    for index in line_indices:
+        group = line_groups[index]
+        latest = _latest_decision(decisions_by_key, LINE_PRICE_FIELD, index)
+        ev = _field_evaluation(LINE_PRICE_RULE, group[0], latest, group=group)
         line_price_evaluations.append(ev)
-        if not ev["satisfied"]:
+        if ev["duplicate_unresolved"]:
+            duplicates.append(f"{LINE_PRICE_FIELD}[{index}]")
+        elif not ev["satisfied"]:
             if ev["decision"] == DECISION_FLAGGED or FLAG_STALE in ev["flags"]:
-                flagged.append(f"{LINE_PRICE_FIELD}[{line_row.get('line_index')}]")
+                flagged.append(f"{LINE_PRICE_FIELD}[{index}]")
             else:
-                unmet_required.append(f"{LINE_PRICE_FIELD}[{line_row.get('line_index')}]")
+                unmet_required.append(f"{LINE_PRICE_FIELD}[{index}]")
 
     # Same rows, third reviewable element: the line discount. Its decisions
     # are stored under ``line_discount`` keyed by the same line index, so a
     # quantity or price decision can never stand in for a discount decision.
     line_discount_evaluations: List[Dict[str, Any]] = []
-    for line_row in line_rows:
-        latest = _latest_decision(decisions_by_key, LINE_DISCOUNT_FIELD, line_row.get("line_index"))
-        ev = _field_evaluation(LINE_DISCOUNT_RULE, line_row, latest)
+    for index in line_indices:
+        group = line_groups[index]
+        latest = _latest_decision(decisions_by_key, LINE_DISCOUNT_FIELD, index)
+        ev = _field_evaluation(LINE_DISCOUNT_RULE, group[0], latest, group=group)
         line_discount_evaluations.append(ev)
-        if not ev["satisfied"]:
+        if ev["duplicate_unresolved"]:
+            duplicates.append(f"{LINE_DISCOUNT_FIELD}[{index}]")
+        elif not ev["satisfied"]:
             if ev["decision"] == DECISION_FLAGGED or FLAG_STALE in ev["flags"]:
-                flagged.append(f"{LINE_DISCOUNT_FIELD}[{line_row.get('line_index')}]")
+                flagged.append(f"{LINE_DISCOUNT_FIELD}[{index}]")
             else:
-                unmet_required.append(f"{LINE_DISCOUNT_FIELD}[{line_row.get('line_index')}]")
+                unmet_required.append(f"{LINE_DISCOUNT_FIELD}[{index}]")
 
-    totals = _evaluate_totals(rows_by_name)
+    totals = _evaluate_totals(rows_by_name, decisions_by_key)
 
     satisfied = (
         not unmet_required
         and not flagged
+        and not duplicates
         and not totals["inconsistent"]
     )
 
     blocking: List[str] = []
     blocking.extend(f"REQUIRED_FIELD_NOT_DECIDED:{name}" for name in unmet_required)
     blocking.extend(f"FIELD_FLAGGED:{name}" for name in flagged)
+    blocking.extend(f"{BLOCK_DUPLICATE_ROWS}:{name}" for name in duplicates)
     if totals["inconsistent"]:
         blocking.append(f"INCONSISTENT_EXTRACTED_TOTALS:{totals['detail']}")
 
@@ -496,12 +627,16 @@ def evaluate_document_review_policy(
         "totals": totals,
         "unmet_required": unmet_required,
         "flagged": flagged,
+        "duplicate_rows": duplicates,
         "satisfied": satisfied,
         "blocking": blocking,
     }
 
 
-def _evaluate_totals(rows_by_name: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+def _evaluate_totals(
+    rows_by_name: Dict[str, List[Dict[str, Any]]],
+    decisions_by_key: Optional[Dict[Tuple[str, Optional[int]], List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
     """Arithmetic consistency of the *extracted* header totals, from current values.
 
     Recomputed from components and compared — never trusted from either side
@@ -511,10 +646,16 @@ def _evaluate_totals(rows_by_name: Dict[str, List[Dict[str, Any]]]) -> Dict[str,
     misread amount). Any inconsistency blocks approval: the paper and the
     extraction disagree about money.
     """
-    ht = _parse_amount(_current_value(rows_by_name, "amount_ht_dzd"))
-    tva = _parse_amount(_current_value(rows_by_name, "amount_tva_dzd"))
-    timbre = _parse_amount(_current_value(rows_by_name, "amount_timbre_dzd"))
-    ttc = _parse_amount(_current_value(rows_by_name, "amount_ttc_dzd"))
+    def value_of(name: str) -> Any:
+        latest = None
+        if decisions_by_key is not None:
+            latest = _latest_decision(decisions_by_key, name, None)
+        return _current_value(rows_by_name, name, latest)
+
+    ht = _parse_amount(value_of("amount_ht_dzd"))
+    tva = _parse_amount(value_of("amount_tva_dzd"))
+    timbre = _parse_amount(value_of("amount_timbre_dzd"))
+    ttc = _parse_amount(value_of("amount_ttc_dzd"))
 
     missing_parts = [name for name, v in (("ht", ht), ("tva", tva), ("ttc", ttc)) if v is None]
     if missing_parts:
@@ -541,6 +682,24 @@ def _evaluate_totals(rows_by_name: Dict[str, List[Dict[str, Any]]]) -> Dict[str,
     }
 
 
-def _current_value(rows_by_name: Dict[str, List[Dict[str, Any]]], field_name: str) -> Any:
-    row = rows_by_name.get(field_name)
-    return None if not row else row[0].get("normalized_value")
+def _current_value(
+    rows_by_name: Dict[str, List[Dict[str, Any]]],
+    field_name: str,
+    latest_decision: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """The value of a header field, read through the reviewer's selection.
+
+    A resolved duplicate set is read through the row the reviewer selected, so
+    the arithmetic is checked against the value that will actually be booked,
+    not against whichever row happened to be inserted first.
+    """
+    group = rows_by_name.get(field_name)
+    if not group:
+        return None
+    ordered = sorted(group, key=_row_sort_key)
+    selected = _selected_row_id(latest_decision)
+    if selected is not None:
+        for row in ordered:
+            if int(row["id"]) == selected:
+                return row.get("normalized_value")
+    return ordered[0].get("normalized_value")

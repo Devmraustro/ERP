@@ -1,0 +1,15 @@
+# Deliberately vulnerable fixture for the dependency-scan gate self-check.
+#
+# This file exists to prove the CI gate actually detects a known-vulnerable
+# dependency instead of passing vacuously (a scanner that always exits 0 is
+# worse than no scanner). Jinja2 2.11.0 predates the fixes for, among others,
+# CVE-2020-28493 (GHSA-pq67-6m6q-mj2v, SSTI/reDoS in the urlize filter, fixed
+# in 2.11.3) and CVE-2024-22195 / CVE-2024-34064 (xmlattr filter injection,
+# fixed in 3.1.3 / 3.1.4), so a pip-audit query against this pin MUST return
+# findings and the gate MUST exit nonzero.
+#
+# The fixture is never installed: the gate audits requirement *declarations*,
+# not the environment (--no-deps --disable-pip). It is consumed only by the
+# self-check step of the dependency-scan CI job.
+
+jinja2==2.11.0

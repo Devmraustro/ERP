@@ -59,28 +59,95 @@ def _has_any_user(db_path: Path) -> bool:
 
 
 def _bootstrap_admin(db_path: Path, username: str, company_name: str) -> int:
-    """Create the first company and an admin user, returning the user id."""
+    """Create the first company and an admin user, returning the user id.
+
+    **Nothing is written before the credentials are in hand.** This used to
+    insert and commit the company first and then prompt for the password, so an
+    operator who mistyped, hit Ctrl-C or ran the documented
+    ``docker compose run --rm bootstrap`` without a TTY was left with a company
+    row and no user — and every retry then died with a raw
+    ``sqlite3.IntegrityError: UNIQUE constraint failed: companies.code``
+    instead of an actionable message. Prompting first makes an aborted prompt a
+    no-op on the database.
+
+    The remaining failure window (the user insert after the company insert) is
+    closed by a compensating delete: ``AuthManager.create_user`` opens its own
+    transaction, so the two writes cannot share one (a nested transaction raises
+    ``database is locked`` by design).
+
+    An orphaned bootstrap company — the exact state the previous ordering could
+    leave, and the state an existing deployment may already be in — is **reused**
+    rather than treated as an error, so recovery needs no manual SQL and no
+    deletion of company rows. A company that already has users means the
+    deployment is bootstrapped, which is a refusal, not a crash.
+    """
     from .database import ERPDatabase
 
+    # Prompt before anything touches the disk (see the docstring).
+    password = getpass.getpass(f"Password for '{username}': ")
+
     db = ERPDatabase(str(db_path))
-    conn = db._create_connection()
-    try:
-        cur = conn.execute(
-            "INSERT INTO companies (code, name, nif, created_at) VALUES (?, ?, ?, ?)",
-            (f"BOOT-{username.upper()}", company_name, None, _utcnow().isoformat()),
+    company_code = f"BOOT-{username.upper()}"
+
+    created_company = False
+    existing_users = 0
+    with db.transaction() as conn:
+        existing = conn.execute(
+            "SELECT id FROM companies WHERE code = ?", (company_code,)
+        ).fetchone()
+        if existing:
+            company_id = int(existing["id"])
+            existing_users = conn.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE company_id = ?", (company_id,)
+            ).fetchone()["n"]
+        else:
+            cur = conn.execute(
+                "INSERT INTO companies (code, name, nif, created_at) VALUES (?, ?, ?, ?)",
+                (company_code, company_name, None, _utcnow().isoformat()),
+            )
+            company_id = int(cur.lastrowid)
+            created_company = True
+
+    # Outside the transaction on purpose: the context manager rolls back on
+    # Exception and closes the connection in `finally`, but a SystemExit is a
+    # BaseException that would leave the rollback to close-time semantics. The
+    # refusal belongs after the block, where the decision cannot interact with
+    # an open transaction at all.
+    if existing_users:
+        raise SystemExit(
+            f"Company '{company_code}' already exists with {existing_users} user(s): "
+            "this database is already bootstrapped. Use the existing admin "
+            "account, or pass a different --bootstrap-admin username."
         )
-        company_id = int(cur.lastrowid)
-    finally:
-        conn.close()
 
     auth = AuthManager(db)
-    user = auth.create_user(
-        username=username,
-        password=getpass.getpass(f"Password for '{username}': "),
-        role="admin",
-        company_id=company_id,
-        actor_user_id=None,
-    )
+    try:
+        user = auth.create_user(
+            username=username,
+            password=password,
+            role="admin",
+            company_id=company_id,
+            actor_user_id=None,
+        )
+    except Exception as exc:
+        if created_company:
+            # Compensate: leave no half-bootstrapped company behind.
+            with db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM companies WHERE id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM users WHERE company_id = ?)",
+                    (company_id, company_id),
+                )
+        raise SystemExit(
+            f"Could not create admin '{username}' in company {company_id}: {exc}. "
+            + (
+                "The company row created by this attempt was removed; fix the "
+                "cause and re-run the same command."
+                if created_company
+                else "The pre-existing company was left untouched; re-run with a "
+                "different --bootstrap-admin username or fix the cause."
+            )
+        ) from exc
     return int(user["user_id"])
 
 
@@ -99,8 +166,37 @@ def build_app(
     # start-up here, never serve file-backed material under that label.
     configured_provider()
 
-    db_path = db_path or _required_path("ERP_DB_PATH")
-    vault_path = vault_path or _required_path("ERP_VAULT_PATH")
+    if db_path is None and vault_path is None:
+        # Check if env vars are set first (fail-closed)
+        db_env = os.environ.get("ERP_DB_PATH")
+        vault_env = os.environ.get("ERP_VAULT_PATH")
+        if not db_env or not vault_env:
+            db_path = _required_path("ERP_DB_PATH")
+            vault_path = _required_path("ERP_VAULT_PATH")
+        else:
+            try:
+                from .generation_resolver import resolve_active_paths
+                resolved_db, resolved_vault = resolve_active_paths()
+                db_path = resolved_db
+                vault_path = resolved_vault
+            except (ValueError, OSError):
+                db_path = _required_path("ERP_DB_PATH")
+                vault_path = _required_path("ERP_VAULT_PATH")
+    else:
+        db_path = db_path or _required_path("ERP_DB_PATH")
+        vault_path = vault_path or _required_path("ERP_VAULT_PATH")
+
+    # Startup recovery gate: detect and recover from incomplete restores
+    # before any DB or Vault access.
+    try:
+        from .generation_resolver import startup_recovery_gate
+        data_dir = Path(db_path).resolve().parent
+        if not startup_recovery_gate(data_dir):
+            raise RuntimeError("Startup recovery failed: cannot establish a safe active generation.")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
 
     db = ERPDatabase(str(db_path))
     # No encryption key is passed: the vault persists one beside itself on
@@ -122,10 +218,6 @@ def build_app(
     )
 
 
-# ``uvicorn dz_erp.serve:app`` resolves this attribute at start-up, so the app
-# is built on first access rather than at import time.  That keeps
-# ``import dz_erp.serve`` usable from tests and tooling, while a real server
-# still fails loudly - and only then - when the environment is unconfigured.
 def __getattr__(name: str):
     if name == "app":
         return build_app()

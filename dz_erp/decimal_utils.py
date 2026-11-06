@@ -18,6 +18,21 @@ class FloatMonetaryError(TypeError):
     """Raised when a binary float is passed into a financial calculation."""
 
 
+def _require_finite(dec: Decimal, original: object) -> Decimal:
+    """Refuse NaN and ±Infinity, which ``Decimal`` would otherwise carry silently.
+
+    ``Decimal('NaN')`` propagates through ``quantize`` without signalling, so an
+    unchecked conversion lets a non-numeric string reach a money column (it is
+    accepted and stored as the TEXT ``'NaN'``) instead of being refused. A
+    financial value that is not a finite number is never a value: refuse it at
+    the single conversion point every arithmetic helper goes through, so callers
+    see the ordinary ``ValueError`` contract of this module.
+    """
+    if not dec.is_finite():
+        raise ValueError(f"Non-finite decimal is prohibited in financial calculations: {original!r}")
+    return dec
+
+
 def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
     """Convert value to exact Decimal, rejecting binary floats by default."""
     if isinstance(value, float):
@@ -27,7 +42,7 @@ def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
             )
         value = str(value)
     if isinstance(value, Decimal):
-        return value
+        return _require_finite(value, value)
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, str):
@@ -38,9 +53,10 @@ def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
         elif "," in cleaned and "." in cleaned:
             cleaned = cleaned.replace(",", "")
         try:
-            return Decimal(cleaned)
+            dec = Decimal(cleaned)
         except InvalidOperation as exc:
             raise ValueError(f"Invalid decimal string: {value!r}") from exc
+        return _require_finite(dec, value)
     raise TypeError(f"Unsupported type for Decimal conversion: {type(value).__name__}")
 
 

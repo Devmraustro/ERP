@@ -63,7 +63,25 @@ Implemented in both `dz_erp/localization.py` (`validate_algerian_identifiers`) a
    - Exempt if cash base $\le 300.00\text{ DZD}$.
    - $1.0\%$ for base $\le 30,000.00\text{ DZD}$ (minimum $5.00\text{ DZD}$).
    - $1.5\%$ for $30,000.00 < \text{base} \le 100,000.00\text{ DZD}$.
-   - $2.0\%$ for $\text{base} > 100,000.00\text{ DZD}$ (capped at $10,000.00\text{ DZD}$).
+   - $2.0\%$ for $\text{base} > 100,000.00\text{ DZD}$ — **no ceiling is applied by the
+     shipped seed.** Whether the top band is capped at all, and at what figure, is
+     **UNDETERMINED** (blocker **LB-1** in `docs/REMAINING_BLOCKERS.md`): the code
+     must not adopt a number this document cannot source. The seeded rule stores
+     `max_amount_dzd = NULL` as a deliberate declaration of "uncapped", and every
+     invoice's timbre provenance records that absence, so an auditor can see from
+     the invoice alone that no ceiling was applied. A ceiling enters force only
+     through the audited administration path, where `max_amount_dzd` must now be
+     declared explicitly — a decimal ceiling, or `none` to state that the rule is
+     deliberately uncapped (`TIMBRE_RULE_CAP_NOT_DECLARED` otherwise).
+   - These are **seeded defaults**, not a legal determination: the values in
+     force on an invoice date come from the effective-dated `timbre_rules`
+     table, and the values above are what the shipped seed inserts for
+     `LF-2025-CASH-TIMBRE`. A new Finance Law is adopted through the audited
+     administration path (`POST /api/v1/tax/timbre-rules` then `…/approve`,
+     two-person approval, overlap refused by default) — see
+     `docs/ACCOUNTING_VALIDATION_AND_TAX_ASSUMPTIONS.md` §3.1. Whether the
+     seeded brackets are the ones the law actually requires remains
+     `BLOCKED_EXTERNAL` pending an expert-comptable's review.
 
 ---
 

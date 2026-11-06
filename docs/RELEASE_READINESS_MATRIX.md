@@ -42,7 +42,35 @@ Related evidence: `docs/RISK_REGISTER.md` (risk IDs below),
 | R-LAW | Law 18-07 / ANPDP obligations discharged (C6) | Data protection owner (DPO) | Processing register, data-subject workflow, ANPDP authorization/filing as applicable, transfer assessment | Checklist structure is in-repo: `docs/ALGERIA_COMPLIANCE_GATE_CHECKLIST.md` §4; the filings themselves are external | **Blocked (external evidence required)** | ANPDP filings; DPO register; legal advice as needed | Register complete, data-subject workflow demonstrable end-to-end, ANPDP authorization obtained where required, transfers assessed and documented |
 | R-OPS | Deployed configuration is complete and its verification entry points work, at every release gate (S5, D6; local) | Release engineer | The operational readiness checker run against the deployment's actual environment | `python tools/operational_readiness.py --run-checks [--checkpoint <f> --max-checkpoint-age-days <n>] --report-json report.json`; exit 0 = configuration ready; exit 1 names every failure and its remediation | **Verified** | None for the checker itself; scheduler/alerting evidence is R-OFFHOST/R-ALERT | Exit code 0 on the deployment host, every failure item actionable, and the checker's *external evidence* section (never exit-code-affecting) acknowledged rather than claimed |
 
+| R-DUP | Duplicate OCR extraction rows cannot authorise an unreviewed value (integrity; `RISK_REGISTER.md` P6) | Engineering | A duplicate group blocks submission, approval and posting; a decision records exactly which rows it reviewed; a posting-time refusal does not dead-end the invoice | `python -m pytest tests/test_phase34_ocr_duplicate_row_integrity.py -q` (19 tests) | **Verified** | None | 19/19 pass on the current commit; a row appearing after a resolution re-opens the field; no evidence row is deleted or merged |
+| R-TAXCFG | Timbre and VAT are resolved from configured, effective-dated rules rather than compiled constants (C1, C2) | Engineering for the mechanism; expert-comptable for the values (R-SCF) | Configuration with an effective window governs the invoice's own date; a gap or future-only rule refuses instead of guessing; an unconfigured company is labelled `builtin-default-v1` | `python -m pytest tests/test_phase36_accounting_and_tax_configuration.py -q` (29 tests) | **Verified** | The legal values themselves remain R-SCF | 29/29 pass; a 9 % line on a 2026 invoice is refused when the configured 2026 table has no 9 % |
+| R-AUTH | Failed authentication is bounded and attributable (S2) | Engineering | Throttling per (client, account) before password verification, audited, with `Retry-After`; `X-Forwarded-For` cannot rotate around it unless a proxy is trusted | `python -m pytest tests/test_phase35_api_rate_limiting_and_request_logging.py -q` (16 tests) | **Verified** | Multi-replica ceiling is per process — a proxy limit is still needed (noted, not claimed) | 16/16 pass, including the untrusted-forwarded-header bypass test |
+| R-MIGR | In-place schema migration is safe on the only copy of the data (integrity) | Engineering | Additive, idempotent, interruption-recovering, atomic rebuild, never opening its own connection | `python -m pytest tests/test_phase38_migration_matrix.py -q` (24 tests) | **Verified** | Production-scale timing is R-DR/R-CONC | 24/24 pass; a second open leaves `sqlite_master` byte-identical |
+| R-IMG | The deployment artefacts are what they claim to be (S5) | Engineering for the properties; platform owner for the build | Pinned interpreter floor, hash-locked install, unprivileged user, read-only rootfs, dropped capabilities, single replica, documented environment | `python -m pytest tests/test_phase37_deployment_assets.py -q` (6 tests) | **Verified** | The image itself has **never been built or run**; that evidence belongs to R-DR/R-OPS on a real host, and the pass criteria here cover the artefact properties only | 6/6 pass; no build is claimed |
+| R-LIMIT | Throttling state is bounded, expires, and survives username flooding (**F-01**) | Engineering | Expired buckets deleted, hard bucket cap with observable eviction, no allocation on read-only probes, per-client aggregate that a successful login cannot reset, explicit failure policy for a shared backend | `python -m pytest tests/test_phase39_bounded_rate_limiting.py -q` (32 tests) | **Verified** | Multi-*database* / multi-replica coordination is not implemented; the default backend is per process | 32/32 pass; 5 000 usernames retain at most `ERP_AUTH_FAILURE_MAX_KEYS` buckets; a separate OS process sees a shared counter through `ERP_RATE_LIMIT_BACKEND=sqlite` |
+| R-TAXPROV | A posted invoice can prove which stamp-duty rule produced its amount, and that rule cannot be rewritten (**F-04**) | Engineering for the mechanism; expert-comptable for the values (R-SCF) | Rule identity, content hash, effective window and calculation snapshot on the invoice; append-only version ledger; triggers refusing mutation of a referenced rule; `TIMBRE_RULE_CHANGED_SINCE_VALIDATION` at posting; legacy invoices reported as unavailable | `python -m pytest tests/test_phase40_timbre_rule_provenance.py -q` (22 tests) | **Verified** | The legal correctness of the rule content remains R-SCF | 22/22 pass; a posted invoice is unchanged by a later rule version; a reversal cites the original identity |
+| R-MIGREV | Migration evidence across schema generations, not just single columns | Engineering | Four historical generations plus the oldest shape migrate with identical business checksums, valid chains, empty `foreign_key_check`, no duplicate objects, idempotent second open, recoverable interruption, bounded large-table timing | `python -m pytest tests/test_phase41_migration_evidence.py -q` (17 tests) | **Verified** | A real production dump and production timing stay R-DR/R-CONC | 16 pass locally; the backup→restore round trip runs in CI on 3.11.17/3.12.10 where safe extraction is available |
+
 ## 2. What "Verified" is allowed to mean here
+
+### 2.1 Open engineering findings recorded after the 2026-10-30 verification
+
+Two defects were found by the independent pass (full detail in
+`docs/FINAL_INDEPENDENT_VERIFICATION_REPORT.md` §10.1). Neither contradicts the
+row above it — the mechanisms are verified as described — but neither may be
+described as production-ready either:
+
+* **F-01** (`R-AUTH`) — the limiter never evicts keys. Measured: 5 000 distinct
+  usernames ⇒ 5 000 retained entries, still 5 000 after the window expired; 50
+  unauthenticated requests created 50 entries. The bound itself is correct; its
+  memory behaviour is not bounded. Fix and regression test are outstanding.
+* **F-04** (`R-TAXCFG`) — the resolved stamp-duty rule is computed correctly but
+  its identity is not stored on the invoice, so a posted invoice cannot prove
+  which configured rule produced the amount. Storing the rule id and making the
+  rule tables append-only are outstanding.
+
+Both are engineering work that can be closed inside this repository; they are
+tracked in `docs/REMAINING_BLOCKERS.md` §A, not in the external rows.
 
 Only R-OPS is locally verified, and only in its honest scope: it verifies
 *configuration presence* and that the *verification commands exist and are
@@ -63,3 +91,25 @@ owners supply evidence. The checker itself reports this split
 * When an external owner supplies evidence, the row's **Status** changes only
   with a citation to that evidence (where it is stored, who signed it, when) —
   never by rewording a procedure into a claim.
+
+---
+
+## 4. Remediation delta (Phase 45)
+
+The rows below changed with the R-01 … R-07 remediation. Nothing was promoted to
+`VERIFIED` on the strength of a code change alone; each row names what was
+actually executed.
+
+| Area | Before | After | Evidence |
+|---|---|---|---|
+| Throttle observability (R-01) | stale error mislabelled refusals | **VERIFIED** | 4 tests + fail-closed test, `test_phase43_limiter_hardening.py` |
+| Shared-backend concurrency (R-02) | untested | **VERIFIED at staging scale** (still not production scale) | multi-process writer/boundary/cleanup/lock/interruption tests |
+| Throttle read path (R-03) | write lock on every check | **VERIFIED**, contention reduced not removed | `read_probe()`; 0.794 ms vs 2.331 ms measured |
+| Request-id boundary (R-04) | unbounded | **VERIFIED** | `request_id.py` + 19 tests |
+| Tax-rule administration (R-05) | raw SQL only | **VERIFIED** mechanism / **BLOCKED_EXTERNAL** values | 35 tests, 3 endpoints |
+| Timbre documentation (R-06) | contradicted the code | **VERIFIED** | 3 documents corrected; docs-consistency test green |
+| Interpreter gate (R-07) | 4 copies, one wrong | **VERIFIED** rule / **BLOCKED_EXTERNAL** host | matrix tests + AST guard; drift case (3.12.0-3.12.9) now refused |
+| Production scale, DR, container, deployment | `BLOCKED_EXTERNAL` / `IMPLEMENTED_NOT_VERIFIED` | **unchanged** | not attempted here |
+
+This matrix still does **not** claim production readiness, and no row for legal
+or tax compliance moved.

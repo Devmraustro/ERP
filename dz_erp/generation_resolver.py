@@ -167,6 +167,13 @@ def startup_recovery_gate(data_dir: Optional[Path] = None) -> bool:
             try:
                 data = json.loads(pointer.read_text(encoding="utf-8"))
                 active_gen = data.get("generation_id")
+                # Validate the pointer points to an existing generation
+                if active_gen is not None:
+                    gen_dir = data_dir / "generations" / active_gen
+                    if not gen_dir.is_dir():
+                        gen_dir = data_dir / active_gen
+                    if not gen_dir.is_dir():
+                        active_gen = None  # Pointer is stale, treat as no pointer
             except (json.JSONDecodeError, OSError):
                 active_gen = None
 

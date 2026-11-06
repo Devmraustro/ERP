@@ -1197,6 +1197,12 @@ def restore_and_verify_backup(
     hmac_secret: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """Decrypt, unpack, and verify a backup archive in an isolated target directory."""
+    import os as _os
+    _crash_point = _os.environ.get("DR_CRASH_POINT", "")
+    def _crash_if(point: str) -> None:
+        if _crash_point == point and _os.environ.get("DR_TEST_MODE") == "1":
+            _os._exit(1)
+
     restore_target_dir = Path(restore_target_dir)
     _lstat_restore_path(restore_target_dir)
     restore_target_dir = restore_target_dir.resolve()
@@ -1232,6 +1238,7 @@ def restore_and_verify_backup(
     except Exception:
         journal = None
 
+    _crash_if("extraction")
     # The data filter is used as one boundary, not the only boundary.
     # Python 3.11 releases after 3.11.17 are source-only; Python 3.12.15 is also
     # source-only, while 3.12.10 is the last Windows binary installer. For 3.12.10+
@@ -1495,6 +1502,7 @@ def restore_and_verify_backup(
             )
         raise FinancialIntegrityError(f"Restored audit chain verification failed: {audit_verifications}")
 
+    _crash_if("before_pointer")
     # === GENERATION-BASED ACTIVATION ===
     # All validation passed. Promote staging -> active via rename, preserving previous.
     gen_id = journal.generation_id if journal else ("gen_" + __import__("uuid").uuid4().hex)
@@ -1532,6 +1540,7 @@ def restore_and_verify_backup(
     except Exception:
         pass
 
+    _crash_if("after_pointer")
     # Mark promotion as complete
     if journal is not None:
         try:

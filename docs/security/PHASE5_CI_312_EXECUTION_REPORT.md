@@ -72,6 +72,42 @@ Remaining skips (6, unchanged in nature, none added by this work):
 
 Zero restore/backup skips remain.
 
+## 1.1 Repository CI on the pushed commit — the authoritative gate record
+
+The commit produced by this phase (`2427fda`) was pushed to
+`arena/7f12d627-erp`, which triggered the repository's real CI
+(`.github/workflows/ci.yml`, run **42696335206**,
+<https://github.com/Devmraustro/ERP/actions/runs/42696335206>). **All five jobs
+passed** — this is the trusted-CI execution the release gate asked for, and it is
+independent of the sandbox build described in §0:
+
+| Job | Result | Notable steps |
+| :--- | :--- | :--- |
+| Test, coverage and static checks (**Python 3.11**) | **success** (5 m 30 s) | hash-verified dependency install, dependency-graph validation, `cv2` + RapidOCR import assertions, ruff, byte-compile, **complete suite with coverage**, **isolated synthetic staging acceptance**, risk-register validation |
+| Test, coverage and static checks (**Python 3.12**) | **success** (12 m 6 s) | same gate up to the full suite with coverage; this job skips the staging-acceptance and risk-register steps by workflow design (they run on 3.11) |
+| Key rotation, backup and recovery on **Windows** | **success** (3 m 22 s) | **Python 3.12.10 (last Windows installer, strict tar preflight)**, hash-verified install, ruff, byte-compile, **key rotation/migration/backup-restore/recovery tests**, isolated synthetic staging acceptance on Windows |
+| Dependency vulnerability scan (**pip-audit**, pinned) | **success** (14 s) | scans the committed dependency set **and self-checks that the gate rejects a deliberately vulnerable fixture** — the audit is proven non-vacuous |
+| Docker image build, smoke test and scan | **success** (2 m 13 s) | image build, **unprivileged runtime user verified**, container smoke test (bootstrap creates the first admin with synthetic data, `/healthz` answers, `X-Forwarded-For` honoured only from a trusted peer), SBOM (SPDX 2.3), trivy scan + documented security gate |
+
+Consequences for the gate:
+
+* the restore matrix now also runs **on Windows 3.12.10** in CI — the matrix is
+  no longer a Linux-only claim;
+* **SEC-11 is closed by an independent tool**: `pip-audit` passes on the committed
+  lockfile, and the job proves it would have caught a known-vulnerable pin;
+* the Docker job closes the "container image / OS package CVE gate not run here"
+  gap in the residual register;
+* the staging-acceptance procedure (`tools/staging_acceptance.py`) was executed in
+  CI against an **isolated synthetic environment** — B3 is reduced to "no real
+  staging host", not "procedure never run".
+
+Evidence: `phase5_ci_312/github_actions/` — `run.json`, `jobs.json`,
+`check_runs.json` and a readable `jobs_summary.txt` with every step and its
+conclusion. The raw job logs themselves are served from
+`results-receiver.actions.githubusercontent.com`, which this sandbox's egress
+policy blocks; the job/step conclusions returned by the GitHub API are the
+captured record, and they are attached to the commit on GitHub.
+
 ## 2. The six required scenario families, run explicitly
 
 Each family was run on its own so the evidence maps to the request
@@ -197,8 +233,10 @@ pinned version checked against each advisory's affected range.
 
 Limitations, stated plainly: GHSA coverage is not identical to OSV/pip-audit
 coverage, CVE-only entries without a GHSA record are not covered, and
-`pip-audit` could not run here because its advisory endpoint is unreachable from
-this sandbox. Repository CI must still run `pip-audit` as a blocking gate.
+`pip-audit` could not run in the sandbox because its advisory endpoint is
+unreachable there — but it **does** run as a blocking gate in repository CI and
+passed on this commit with a self-check that proves the gate rejects a vulnerable
+fixture (§1.1). The two methods agree.
 
 ## 9. B1 and B2 — status
 
@@ -223,8 +261,9 @@ Rationale: every security gate that can be executed in this environment passes o
 the release interpreter, with no unexplained failure and no silenced test. It is
 not "ready for production candidate" because:
 
-* staging acceptance (B3) has never been run against a real host;
-* SEC-11's audit here is GHSA-based; repository CI must run `pip-audit`;
+* staging acceptance (B3) has run only against **isolated synthetic** environments (CI), never a real host;
+* SEC-11 is closed by CI's `pip-audit` job, but the sandbox's own audit was
+  GHSA-based; keep the CI gate blocking;
 * B2 is open (packaging), and V1 depends on the source-tree route by decision;
 * AWS KMS / HSM remains out of V1 scope by decision (B4), so custody claims must
   stay at "file-based".
@@ -247,4 +286,5 @@ not "ready for production candidate" because:
 | `phase5_ci_312/deltas/phase5-phase58-restore-assertion-fix.patch` | the only change to a preserved test |
 | `phase5_ci_312/artefacts/` | copies of the two test files, hashed in `SHA256SUMS` |
 | `phase5_ci_312/probes/deployment_smoke.sh` | rerun the source-tree deployment verification |
+| `phase5_ci_312/github_actions/` | the real CI run on commit `2427fda`: run/jobs/check-run JSON and a step-by-step `jobs_summary.txt` |
 | `phase5_release_gate/` | **kept unchanged**: the 3.11.2 blocker evidence that B1 recorded |

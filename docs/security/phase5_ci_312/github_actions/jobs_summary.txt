@@ -1,0 +1,98 @@
+workflow    : CI (run id 42696335206)
+url         : https://github.com/Devmraustro/ERP/actions/runs/42696335206
+head commit : 2427fda1c28d1b5047c622325e3b4f7221995ee3
+branch      : arena/7f12d627-erp
+event       : pull_request
+status      : completed / success
+started     : 2026-11-09T20:47:40Z
+updated     : 2026-11-09T20:59:49Z
+
+JOB  Dependency vulnerability scan (pip-audit, pinned)
+     success   (2026-11-09T20:47:42Z -> 2026-11-09T20:47:56Z)
+       - Set up job: success
+       - Check out the repository: success
+       - Set up Python 3.12: success
+       - Install the pinned scanner: success
+       - Scan the committed dependency set: success
+       - Upload the scan report artifact: success
+       - Self-check - the gate must reject a deliberately vulnerable fixture: success
+       - Post Set up Python 3.12: success
+       - Post Check out the repository: success
+       - Complete job: success
+
+JOB  Docker image build, smoke test and scan
+     success   (2026-11-09T20:47:42Z -> 2026-11-09T20:49:55Z)
+       - Set up job: success
+       - Check out the repository: success
+       - Set up Docker Buildx: success
+       - Build the image: success
+       - Verify the runtime user is unprivileged: success
+       - Smoke test - bootstrap creates the first admin (synthetic data only): success
+       - Smoke test - container starts and /healthz answers: success
+       - Smoke test - X-Forwarded-For is honoured only from a trusted peer: success
+       - Record image metadata: success
+       - Generate SBOM (SPDX 2.3 JSON, syft pinned): success
+       - Scan image (trivy JSON + SARIF, pinned): success
+       - Apply the documented security gate: success
+       - Stop and remove the smoke container: success
+       - Upload Docker artifacts: success
+       - Post Set up Docker Buildx: success
+       - Post Check out the repository: success
+       - Complete job: success
+
+JOB  Key rotation, backup and recovery on Windows
+     success   (2026-11-09T20:47:42Z -> 2026-11-09T20:51:04Z)
+       - Set up job: success
+       - Check out the repository: success
+       - Set up Python 3.12.10 (last Windows installer; strict tar preflight): success
+       - Report the resolved toolchain: success
+       - Install the declared dependency set (hash-verified): success
+       - Validate the dependency graph explicitly: success
+       - Static check (ruff): success
+       - Byte-compile all sources: success
+       - Key rotation, migration, backup/restore, logging and recovery tests: success
+       - Run isolated synthetic staging acceptance on Windows: success
+       - Upload Windows test and staging reports: success
+       - Post Set up Python 3.12.10 (last Windows installer; strict tar preflight): success
+       - Post Check out the repository: success
+       - Complete job: success
+
+JOB  Test, coverage and static checks (Python 3.11)
+     success   (2026-11-09T20:47:43Z -> 2026-11-09T20:53:13Z)
+       - Set up job: success
+       - Check out the repository: success
+       - Set up Python 3.11: success
+       - Report the resolved toolchain: success
+       - Install the declared dependency set (hash-verified): success
+       - Validate the dependency graph explicitly: success
+       - Assert cv2 and RapidOCR import: success
+       - Static check (ruff): success
+       - Byte-compile all sources: success
+       - Run the complete test suite with coverage: success
+       - Run isolated synthetic staging acceptance: success
+       - Validate risk-register summary: success
+       - Summarise the results: success
+       - Upload test and coverage artifacts: success
+       - Post Set up Python 3.11: success
+       - Post Check out the repository: success
+       - Complete job: success
+
+JOB  Test, coverage and static checks (Python 3.12)
+     success   (2026-11-09T20:47:42Z -> 2026-11-09T20:59:48Z)
+       - Set up job: success
+       - Check out the repository: success
+       - Set up Python 3.12: success
+       - Report the resolved toolchain: success
+       - Install the declared dependency set (hash-verified): success
+       - Validate the dependency graph explicitly: success
+       - Assert cv2 and RapidOCR import: success
+       - Static check (ruff): success
+       - Byte-compile all sources: success
+       - Run the complete test suite with coverage: success
+       - Run isolated synthetic staging acceptance: skipped
+       - Validate risk-register summary: skipped
+       - Summarise the results: success
+       - Upload test and coverage artifacts: success
+       - Post Set up Python 3.12: success
+       - Post Check out the repository: success
+       - Complete job: success

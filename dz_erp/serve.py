@@ -268,8 +268,18 @@ def main(argv: Optional[list] = None) -> int:
 
     import uvicorn
 
+    # SEC-15: ``proxy_headers=False`` is deliberate. Uvicorn otherwise rewrites
+    # ``request.client`` from X-Forwarded-For for any peer listed in
+    # FORWARDED_ALLOW_IPS (loopback by default), which would bypass the
+    # application's own fail-closed policy in dz_erp/net.py and let a caller
+    # choose the address that lands in the audit trail. One trust layer, one
+    # source of truth: ERP_TRUSTED_PROXIES, read by the app, never by uvicorn.
     uvicorn.run(
-        build_app(), host=args.host, port=args.port, log_level=os.environ.get("ERP_LOG_LEVEL", "info")
+        build_app(),
+        host=args.host,
+        port=args.port,
+        log_level=os.environ.get("ERP_LOG_LEVEL", "info"),
+        proxy_headers=False,
     )
     return 0
 

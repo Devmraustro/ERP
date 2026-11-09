@@ -37,7 +37,7 @@ from .database import (
     FinancialIntegrityError,
     TenantIsolationError,
 )
-from .key_rotation import KeyConfigurationError, KeyRing
+from .key_rotation import KeyConfigurationError, KeyRing, atomic_write_bytes
 from .decimal_utils import format_dzd, to_decimal
 from .intake_ocr import VAULT_KEY_ENV, VAULT_KEY_SUFFIX, VAULT_KEYRING_SUFFIX, PrivateDocumentVault
 from .review_policy import evaluate_document_review_policy
@@ -805,6 +805,64 @@ def list_stock_quants_secure(
     return db.list_stock_quants(scoped_company_id, limit=limit)
 
 
+def require_role_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    allowed_roles: Tuple[str, ...],
+    *,
+    action: str,
+    target_model: str = "api",
+    target_id: str = "-",
+) -> Dict[str, Any]:
+    """Refuse an operation unless the caller's server-side role is allowed.
+
+    ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` grants "Upload Document" to
+    ``clerk``, ``approver``, ``accountant`` and ``admin`` and explicitly denies
+    it to ``warehouse``, ``auditor``, ``ocr_worker`` and ``treasury``. The
+    document-intake endpoints predate that rule and consulted no role at all, so
+    any authenticated principal of a company - including the roles the matrix
+    denies - could create documents and make the server stream, buffer, OCR and
+    vault a file.
+
+    The role is read from the ``users`` row bound to the verified credential,
+    never from the request, and the refusal is written to the tenant's audit
+    chain (and committed) before the error is raised, exactly like the read-side
+    denials in :func:`list_supplier_invoices_secure` and the review guards in
+    :mod:`dz_erp.intake_ocr`.
+
+    Returns the user row so a caller that needs more than a boolean does not
+    have to read it twice.
+    """
+    denial: Optional[AuthorizationError] = None
+    user: Optional[Any] = None
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            raise AuthorizationError("User is inactive or revoked.")
+        if user["role"] not in allowed_roles:
+            db.append_audit_event(
+                conn=conn,
+                company_id=int(user["company_id"]),
+                actor_user_id=requesting_user_id,
+                action_type="SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
+                target_model=target_model,
+                target_id=str(target_id),
+                after_state={
+                    "role": user["role"],
+                    "action": action,
+                    "required_roles": list(allowed_roles),
+                },
+            )
+            denial = AuthorizationError(
+                f"Role '{user['role']}' is not authorized for {action}; "
+                f"required one of {list(allowed_roles)}."
+            )
+    if denial is not None:
+        raise denial
+    assert user is not None
+    return dict(user)
+
+
 def _require_user_admin(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
     """Guard shared by every user-administration operation: active admin only.
 
@@ -876,6 +934,47 @@ def create_user_admin_secure(
         actor_user_id=int(admin["id"]),
     )
     return user
+
+
+def reset_password_admin_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    auth_manager: Any,
+    *,
+    target_user_id: int,
+    new_password: str,
+) -> Dict[str, Any]:
+    """Administratively reset another user's password (SEC-13 lifecycle).
+
+    Administrators only, and only inside the admin's own company. The reset
+    revokes every token the target holds, so a compromised session dies with the
+    old password; the credential mechanics (policy, hashing, audit event,
+    revocation) live in :meth:`dz_erp.auth.AuthManager.set_password`, which
+    records the event as ``administrative_reset`` and attributes it to the admin.
+
+    Cross-tenant and non-existent targets are conflated on purpose: a 404 that
+    distinguishes "no such user" from "not your user" would enumerate accounts.
+    """
+    admin = _require_user_admin(db, requesting_user_id)
+    company_id = int(admin["company_id"])
+    with db.transaction() as conn:
+        target = conn.execute(
+            "SELECT * FROM users WHERE id = ? AND company_id = ?",
+            (target_user_id, company_id),
+        ).fetchone()
+    if target is None:
+        raise ValueError(f"User {target_user_id} not found in target company.")
+    auth_manager.set_password(
+        target_user_id,
+        new_password,
+        actor_user_id=int(admin["id"]),
+    )
+    return {
+        "user_id": int(target["id"]),
+        "username": target["username"],
+        "company_id": company_id,
+        "tokens_revoked": True,
+    }
 
 
 def deactivate_user_secure(
@@ -983,7 +1082,15 @@ def create_encrypted_backup(
     output_backup_path = Path(output_backup_path)
     output_backup_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = output_backup_path.parent / f".tmp_backup_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # The staging directory holds the *plaintext* database snapshot, a copy of
+    # the encrypted vault and a manifest that carries the vault key, the audit
+    # HMAC secret and both key rings. Created with the process umask it would be
+    # 0755 and its files 0644 for the seconds it exists, which is readable by
+    # every local account; create it owner-only instead (best effort on
+    # platforms whose mode bits are synthetic).
+    os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(tmp_dir, 0o700)
 
     try:
         db_snap_path = tmp_dir / "erp_snapshot.sqlite3"
@@ -1041,7 +1148,12 @@ def create_encrypted_backup(
                 json.dumps(audit_ring.to_dict(), sort_keys=True).encode("utf-8")
             ).decode("ascii"),
         }
-        (tmp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        # The manifest carries key material, so it is written like every other
+        # key file: owner-only, atomically, never world-readable even briefly.
+        atomic_write_bytes(
+            tmp_dir / "manifest.json",
+            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
+        )
 
         tar_buf = io.BytesIO()
         with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
@@ -1051,7 +1163,14 @@ def create_encrypted_backup(
 
         fernet = Fernet(backup_encryption_key)
         encrypted_archive = fernet.encrypt(tar_buf.getvalue())
-        output_backup_path.write_bytes(encrypted_archive)
+        # The archive carries the vault and audit key rings inside the Fernet
+        # envelope - custody material either way - so it is published like every
+        # other key file in this project: created owner-only (0600), written to
+        # a temporary file in the same directory, fsynced and atomically renamed
+        # into place. That leaves no window in which it is group- or
+        # world-readable, and no partially written file that could later be
+        # mistaken for a good backup.
+        atomic_write_bytes(output_backup_path, encrypted_archive, mode=0o600)
 
         return {
             "backup_path": str(output_backup_path),

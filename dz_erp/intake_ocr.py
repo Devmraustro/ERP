@@ -1605,7 +1605,37 @@ def update_extracted_field_by_human(
     (``NeedsReview`` or ``Validated``) — once an approval exists, the document
     is evidence for a decided invoice and its values are closed. Refusals are
     audited before they are raised.
+
+    SEC-14: the value itself is validated against the field's class before it is
+    stored, using the very same validator the decision path
+    (:func:`dz_erp.review_policy.validate_corrected_value`) applies — this path
+    used to write any string into ``human_override_value`` *and*
+    ``normalized_value``, leaving the review policy to discover downstream that
+    the stored “correction” could not have appeared on any invoice. A rejected
+    value writes nothing and leaves its own audit record.
     """
+    from .review_policy import TEXT_FALLBACK_RULE, rule_for, validate_corrected_value
+
+    rule = rule_for(field_name) or TEXT_FALLBACK_RULE
+    try:
+        new_value = validate_corrected_value(rule, new_value)
+    except ValueError as policy_error:
+        with db.transaction() as conn:
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=user_id,
+                action_type="SECURITY_FIELD_EDIT_REJECTED",
+                target_model="ocr_extracted_fields",
+                target_id=document_id,
+                after_state={
+                    "field_name": field_name,
+                    "value_class": rule.value_class,
+                    "reason": str(policy_error)[:200],
+                },
+            )
+        raise FinancialIntegrityError(f"FIELD_VALUE_REJECTED:{policy_error}") from policy_error
+
     now_iso = datetime.now(timezone.utc).isoformat()
     denial: Optional[Exception] = None
     with db.transaction() as conn:

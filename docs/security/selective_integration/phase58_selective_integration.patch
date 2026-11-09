@@ -1,0 +1,575 @@
+diff --git a/dz_erp/api.py b/dz_erp/api.py
+index a4a394e..c88978a 100644
+--- a/dz_erp/api.py
++++ b/dz_erp/api.py
+@@ -47,6 +47,7 @@ from .auth import (
+ from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
+ from .intake_ocr import (
+     PrivateDocumentVault,
++    REVIEW_CAPABLE_ROLES,
+     decide_extracted_field_review,
+     update_extracted_field_by_human,
+     upload_and_process_supplier_document,
+@@ -91,6 +92,7 @@ from .security_audit import (
+     read_source_document_content_secure,
+     read_source_document_file_secure,
+     read_supplier_invoice_secure,
++    require_role_secure,
+     trial_balance_secure,
+ )
+ from .upload import (
+@@ -238,6 +240,62 @@ class RevokeRequest(BaseModel):
+     reason: str = "USER_LOGOUT"
+ 
+ 
++# ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` section 1 grants "Upload
++# Document / Edit OCR Draft" to clerk, approver, accountant and admin, and
++# denies it to warehouse, auditor, ocr_worker and treasury. The document-review
++# guards in :mod:`dz_erp.intake_ocr` already enforce it for field decisions via
++# ``REVIEW_CAPABLE_ROLES``; the upload endpoint did not consult any role, so it
++# reuses exactly that constant instead of defining a second copy of the matrix.
++DOCUMENT_INTAKE_ROLES = REVIEW_CAPABLE_ROLES
++
++# The upload endpoint bounds its own body while streaming (dz_erp/upload.py),
++# but every JSON endpoint - including the unauthenticated token endpoint -
++# accepted a body of any size, so a single request could make the process
++# buffer an arbitrary amount of memory before any rule ran. This is a
++# first-line, application-level cap read from the declared Content-Length; a
++# chunked request without that header still relies on the proxy limit and on
++# the upload reader's streaming bound (documented, not assumed).
++ENV_MAX_REQUEST_BYTES = "ERP_MAX_REQUEST_BYTES"
++DEFAULT_MAX_JSON_REQUEST_BYTES = 2 * 1024 * 1024  # ~10k invoice lines of JSON
++MULTIPART_FRAMING_ALLOWANCE = 1024 * 1024  # RFC 7578 framing is per part
++REQUEST_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
++UPLOAD_PATH = "/api/v1/documents/upload"
++
++# Baseline browser-facing hardening. The API is JSON-first, but two endpoints
++# return operator-supplied bytes (a stored document) and every response carries
++# tenant-scoped financial data, so: ``nosniff`` stops a browser re-interpreting
++# a stored document or an error body as an active type, ``DENY``/``no-referrer``
++# keep a rendered response from being framed or leaking its URL, and
++# ``no-store`` keeps authenticated financial data out of shared caches. No CSP
++# is set: this service returns no HTML, and a policy that permitted nothing
++# would only invite a future relaxation without a reason.
++SECURITY_RESPONSE_HEADERS = {
++    "X-Content-Type-Options": "nosniff",
++    "Referrer-Policy": "no-referrer",
++    "X-Frame-Options": "DENY",
++}
++
++
++def _configured_max_request_bytes(path: str) -> int:
++    """Body cap for *path*: the upload limit for uploads, else the JSON cap.
++
++    A malformed or non-positive ``ERP_MAX_REQUEST_BYTES`` override is ignored,
++    so a typo can never silently disable the limit (fail-closed, like
++    :func:`dz_erp.upload.configured_max_upload_bytes`).
++    """
++    if path == UPLOAD_PATH:
++        return configured_max_upload_bytes() + MULTIPART_FRAMING_ALLOWANCE
++    raw = os.environ.get(ENV_MAX_REQUEST_BYTES)
++    if raw is not None and raw.strip():
++        try:
++            override = int(raw.strip())
++        except ValueError:
++            override = 0
++        if override > 0:
++            return override
++    return DEFAULT_MAX_JSON_REQUEST_BYTES
++
++
+ def create_erp_fastapi_app(
+     db: ERPDatabase,
+     vault: PrivateDocumentVault,
+@@ -355,6 +413,62 @@ def create_erp_fastapi_app(
+         )
+         return response
+ 
++    # ------------------------------------------------------------------
++    # Bounded request bodies and browser-facing hardening headers
++    # ------------------------------------------------------------------
++    # Registered *after* ``_log_request``. Starlette wraps the stack with the
++    # most recently added middleware outermost, so this layer runs *first* on
++    # the way in (it can refuse a body before anything reads or binds it) and
++    # *last* on the way out (it decorates every response, including the
++    # 401/403/429 the inner layers produce, and the 413 it produces itself).
++    # The correlation id is derived from the same header through the same
++    # sanitiser as the inner layer, so both agree and a refused request still
++    # quotes the id an operator can search for. ``setdefault`` everywhere means
++    # a header the inner layer already set is never duplicated or overwritten.
++    @app.middleware("http")
++    async def _body_limit_and_security_headers(request: Request, call_next: Any) -> Any:
++        corr_id, _supplied_id_accepted = sanitize_request_id(
++            request.headers.get("X-Request-Id")
++        )
++        if request.method in REQUEST_BODY_METHODS:
++            limit = _configured_max_request_bytes(request.url.path)
++            declared = request.headers.get("content-length")
++            declared_bytes: Optional[int] = None
++            if declared is not None:
++                try:
++                    declared_bytes = int(declared)
++                except ValueError:
++                    declared_bytes = None
++            if declared_bytes is not None and declared_bytes > limit:
++                # Refuse before the body is read, before any router dependency
++                # runs (so before authentication) and before any side effect.
++                logger.log(
++                    "WARNING",
++                    "SECURITY_REQUEST_BODY_LIMIT_EXCEEDED",
++                    corr_id,
++                    method=request.method,
++                    path=request.url.path,
++                    limit_bytes=limit,
++                    declared_bytes=declared_bytes,
++                )
++                return JSONResponse(
++                    status_code=413,
++                    content={
++                        "detail": f"Request body exceeds the maximum of {limit} bytes."
++                    },
++                    headers={**SECURITY_RESPONSE_HEADERS, "X-Request-Id": corr_id},
++                )
++        response = await call_next(request)
++        for name, value in SECURITY_RESPONSE_HEADERS.items():
++            response.headers.setdefault(name, value)
++        # Authenticated responses carry tenant-scoped financial data: keep them
++        # out of shared caches. Unauthenticated responses (health, policy) are
++        # deliberately left cacheable.
++        if request.headers.get("authorization"):
++            response.headers.setdefault("Cache-Control", "no-store")
++        response.headers.setdefault("X-Request-Id", corr_id)
++        return response
++
+     def _authenticate(
+         request: Request,
+         authorization: Optional[str] = Header(default=None, alias="Authorization"),
+@@ -595,6 +709,29 @@ def create_erp_fastapi_app(
+         corr_id = str(uuid.uuid4())
+         content: Optional[bytes] = None
+         try:
++            # 0. Authorization before any bytes are parsed. A role the matrix
++            #    denies must not be able to make the server stream, buffer, OCR
++            #    or vault a document - and must not leave a stored file behind
++            #    once refused. The role comes from the credential's user row.
++            try:
++                require_role_secure(
++                    db,
++                    auth.user_id,
++                    DOCUMENT_INTAKE_ROLES,
++                    action="document upload",
++                    target_model="source_documents",
++                    target_id="upload",
++                )
++            except AuthorizationError as exc:
++                logger.log(
++                    "WARNING",
++                    "SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
++                    corr_id,
++                    role=auth.role,
++                    action="document upload",
++                )
++                raise HTTPException(status_code=403, detail=str(exc)) from exc
++
+             # 1. Type allowlist: filename extension and declared MIME must both be
+             #    allowed and must agree.  Neither is trusted on its own.
+             declared_mime = validate_upload_metadata(file.filename, file.content_type)
+@@ -1042,6 +1179,12 @@ def create_erp_fastapi_app(
+             rows = list_supplier_invoices_secure(db, auth.user_id, limit=limit)
+         except (AuthorizationError, TenantIsolationError) as exc:
+             raise HTTPException(status_code=403, detail=str(exc)) from exc
++        except ValueError as exc:
++            # A limit outside the documented 1..500 window is a request-contract
++            # error. Without this branch the clamp raised out of the handler as
++            # an unhandled 500, unlike every other list endpoint (the read API
++            # answers 422 for the same mistake).
++            raise HTTPException(status_code=422, detail=str(exc)) from exc
+         return {"company_id": auth.company_id, "invoices": rows, "count": len(rows)}
+ 
+     @app.get("/api/v1/accounting/trial-balance")
+@@ -1296,6 +1439,14 @@ def create_erp_fastapi_app(
+         username = body.username.strip()
+         if not username:
+             raise HTTPException(status_code=422, detail="Username is required.")
++        if len(username) > 64 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in username):
++            # A newline or other control character in a name forges log and
++            # audit lines, and an unbounded name bloats every event that
++            # attributes an action to it.
++            raise HTTPException(
++                status_code=422,
++                detail="Username must be at most 64 characters and contain no control characters.",
++            )
+         if len(body.password) < 8:
+             raise HTTPException(
+                 status_code=422,
+diff --git a/dz_erp/decimal_utils.py b/dz_erp/decimal_utils.py
+index 5aed97c..1fcd221 100644
+--- a/dz_erp/decimal_utils.py
++++ b/dz_erp/decimal_utils.py
+@@ -18,18 +18,35 @@ class FloatMonetaryError(TypeError):
+     """Raised when a binary float is passed into a financial calculation."""
+ 
+ 
+-def _require_finite(dec: Decimal, original: object) -> Decimal:
+-    """Refuse NaN and ±Infinity, which ``Decimal`` would otherwise carry silently.
++#: Largest decimal exponent accepted as a financial input. Algeria's annual GDP
++#: is of the order of 10**16 DZD, so no real amount or quantity in this system
++#: reaches 10**18; anything wider is either an attack or a client bug. It also
++#: keeps every quantize() inside the 28-digit decimal context: a value at this
++#: bound needs 18 integer + 2 fractional digits, comfortably below the width at
++#: which ``InvalidOperation`` starts escaping as an unhandled 500.
++MAX_ABSOLUTE_EXPONENT = 18
++
++
++def _require_supported_decimal(dec: Decimal, original: object) -> Decimal:
++    """Refuse values that are not finite or not representable as money.
+ 
+     ``Decimal('NaN')`` propagates through ``quantize`` without signalling, so an
+-    unchecked conversion lets a non-numeric string reach a money column (it is
+-    accepted and stored as the TEXT ``'NaN'``) instead of being refused. A
+-    financial value that is not a finite number is never a value: refuse it at
+-    the single conversion point every arithmetic helper goes through, so callers
+-    see the ordinary ``ValueError`` contract of this module.
++    unchecked conversion lets a non-numeric value reach a money column (it is
++    accepted and stored as the TEXT ``'NaN'``) instead of being refused;
++    ``sNaN``/``Infinity`` and magnitudes near or above the decimal context width
++    raise ``InvalidOperation`` instead, which is not a ``ValueError`` and used to
++    escape the API as an unhandled 500. Both are data-integrity defects in a
++    financial column, so both are refused here - at the single conversion point
++    every arithmetic helper goes through - and callers see this module's ordinary
++    ``ValueError`` contract.
+     """
+     if not dec.is_finite():
+         raise ValueError(f"Non-finite decimal is prohibited in financial calculations: {original!r}")
++    if dec != 0 and dec.adjusted() > MAX_ABSOLUTE_EXPONENT:
++        raise ValueError(
++            "Decimal magnitude exceeds the supported range "
++            f"(1e{MAX_ABSOLUTE_EXPONENT}): {original!r}"
++        )
+     return dec
+ 
+ 
+@@ -41,10 +58,14 @@ def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
+                 f"Binary float ({value!r}) is prohibited in financial calculations; pass Decimal or str."
+             )
+         value = str(value)
++    if isinstance(value, bool):
++        # bool is an int subclass: True would silently become the amount 1.00.
++        # A yes/no flag is not a financial value, so refuse it like a float.
++        raise TypeError("Boolean is not a valid decimal input.")
+     if isinstance(value, Decimal):
+-        return _require_finite(value, value)
++        return _require_supported_decimal(value, value)
+     if isinstance(value, int):
+-        return Decimal(value)
++        return _require_supported_decimal(Decimal(value), value)
+     if isinstance(value, str):
+         cleaned = value.strip().replace("\u00a0", "").replace(" ", "")
+         # Normalize French comma decimal separator if no dot is present
+@@ -56,7 +77,7 @@ def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
+             dec = Decimal(cleaned)
+         except InvalidOperation as exc:
+             raise ValueError(f"Invalid decimal string: {value!r}") from exc
+-        return _require_finite(dec, value)
++        return _require_supported_decimal(dec, value)
+     raise TypeError(f"Unsupported type for Decimal conversion: {type(value).__name__}")
+ 
+ 
+diff --git a/dz_erp/procurement_stock.py b/dz_erp/procurement_stock.py
+index d35e24a..73ce1bd 100644
+--- a/dz_erp/procurement_stock.py
++++ b/dz_erp/procurement_stock.py
+@@ -38,6 +38,97 @@ REVISABLE_INVOICE_STATES = ("NeedsReview", "DuplicateRejected", "Validated")
+ NON_LIVE_INVOICE_STATES = ("Rejected", "DuplicateRejected")
+ 
+ 
++#: The three methods the ``supplier_invoices.payment_method`` CHECK constraint
++#: accepts. Validating them here turns a rejected value into a clean 422
++#: instead of a ``sqlite3.IntegrityError`` escaping the API as a 500.
++VALID_PAYMENT_METHODS = ("CASH", "BANK_TRANSFER", "CHEQUE")
++MAX_SUPPLIER_INVOICE_NO_LENGTH = 128
++
++
++def _require_supplier_invoice_no(value: Any) -> str:
++    """Refuse a missing or oversized supplier reference before any write."""
++    if not isinstance(value, str) or not value.strip():
++        raise ValueError("supplier_invoice_no is required.")
++    if len(value.strip()) > MAX_SUPPLIER_INVOICE_NO_LENGTH:
++        raise ValueError(
++            f"supplier_invoice_no exceeds {MAX_SUPPLIER_INVOICE_NO_LENGTH} characters."
++        )
++    return value
++
++
++def _parse_invoice_date(value: Any) -> datetime:
++    """Parse an ISO ``YYYY-MM-DD`` calendar date, refusing anything else.
++
++    ``int(invoice_date[:4])`` never looked past the first four characters: an
++    empty value raised ``TypeError``, ``2026-13-45`` was silently accepted, and
++    the internal parser text ("invalid literal for int() ...") was echoed to the
++    caller as a 500 body. Parsing once here validates the whole date *and*
++    supplies the fiscal year the duplicate check keys on.
++    """
++    try:
++        return datetime.strptime(str(value).strip(), "%Y-%m-%d")
++    except (TypeError, ValueError) as exc:
++        raise ValueError(
++            "invoice_date must be a valid calendar date in YYYY-MM-DD form."
++        ) from exc
++
++
++def _require_valid_payment_method(value: Any) -> str:
++    if value not in VALID_PAYMENT_METHODS:
++        raise ValueError(
++            f"payment_method {value!r} is not supported; "
++            f"expected one of {sorted(VALID_PAYMENT_METHODS)}."
++        )
++    return str(value)
++
++
++def compute_line_ht_dzd(qty: Any, unit_price_dzd: Any, discount_pct: Any = "0.00") -> str:
++    """Line net (HT) implied by quantity, unit price and discount, formatted.
++
++    One definition of the arithmetic the validator compares a declared line
++    amount against, so a line that omits ``line_ht_dzd`` is derived with exactly
++    the rule it will be judged by rather than raising on ``None``.
++    """
++    qty_dec = round_qty(qty)
++    pu_dec = round_qty(unit_price_dzd)
++    disc_dec = to_decimal("0.00" if discount_pct is None else discount_pct)
++    expected = round_dzd(
++        qty_dec * pu_dec * ((Decimal("100.00") - disc_dec) / Decimal("100.00"))
++    )
++    return format_dzd(expected)
++
++
++def _materialise_line_ht(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Return copies of *lines* with an omitted or null ``line_ht_dzd`` filled in.
++
++    ``line_ht_dzd`` is optional in the request model (``InvoiceLineInput``), but
++    the payload digest and the arithmetic check both need a concrete value:
++    ``compute_invoice_payload_hash`` formats ``line["line_ht_dzd"]`` and the
++    validator rounds it. Deriving it here, before either runs, is what stops an
++    omitted amount from surfacing as an unhandled ``KeyError`` (or, before the
++    digest was reached, ``TypeError``) instead of a validated invoice.
++
++    A missing quantity or unit price cannot be derived from anything, so it is
++    reported as a ``ValueError`` - the documented request-contract error that the
++    API maps to 422 - rather than leaking a ``KeyError`` as a 500.
++    """
++    materialised: List[Dict[str, Any]] = []
++    for idx, line in enumerate(lines):
++        current = dict(line)
++        if current.get("qty") is None:
++            raise ValueError(f"LINE_{idx + 1}_QTY_REQUIRED:qty is required.")
++        if current.get("unit_price_dzd") is None:
++            raise ValueError(
++                f"LINE_{idx + 1}_UNIT_PRICE_REQUIRED:unit_price_dzd is required."
++            )
++        if current.get("line_ht_dzd") is None:
++            current["line_ht_dzd"] = compute_line_ht_dzd(
++                current["qty"], current["unit_price_dzd"], current.get("discount_pct")
++            )
++        materialised.append(current)
++    return materialised
++
++
+ def compute_invoice_payload_hash(
+     supplier_id: int,
+     supplier_invoice_no: str,
+@@ -1157,8 +1248,23 @@ def _create_and_validate_supplier_invoice(
+ ) -> Dict[str, Any]:
+     """The creating transaction (see the public wrapper for the refusal contract)."""
+     now_iso = datetime.now(timezone.utc).isoformat()
++    # SEC-05: ``line_ht_dzd`` is optional in the public request model, yet both
++    # the payload digest (``compute_invoice_payload_hash`` formats
++    # ``line["line_ht_dzd"]``) and ``_validate_invoice_lines`` consume it. Derive
++    # an omitted/null amount with the same rule the validator compares against,
++    # *before* the digest is computed, so that (a) the digest is stable for two
++    # payloads that mean the same thing, and (b) a value that cannot be derived
++    # is refused as a clean ValueError before any hash, audit row or invoice
++    # write exists.
++    lines = _materialise_line_ht(lines)
++    # Request-shape validation happens before any rule runs and before any
++    # write, so a malformed request is the documented 422 (ValueError) rather
++    # than a 500 from a string slice or a CHECK-constraint IntegrityError.
++    _require_supplier_invoice_no(supplier_invoice_no)
++    invoice_day = _parse_invoice_date(invoice_date)
++    _require_valid_payment_method(payment_method)
+     norm_ref = normalize_invoice_ref(supplier_invoice_no)
+-    fiscal_year = int(invoice_date[:4])
++    fiscal_year = invoice_day.year
+ 
+     ht_dec = round_dzd(amount_ht_dzd)
+     tva_dec = round_dzd(amount_tva_dzd)
+@@ -1449,7 +1555,12 @@ def revalidate_supplier_invoice(
+         if new_method not in ("CASH", "BANK_TRANSFER", "CHEQUE"):
+             raise ValueError(f"UNSUPPORTED_PAYMENT_METHOD:{new_method}")
+         norm_ref = normalize_invoice_ref(new_no)
+-        fiscal_year = int(new_date[:4])
++        # A correction goes through the same request-shape validation as a
++        # creation: a date that cannot be parsed is a 422, and the fiscal year
++        # comes from the parsed date rather than its first four characters.
++        _require_supplier_invoice_no(new_no)
++        fiscal_year = _parse_invoice_date(new_date).year
++        _require_valid_payment_method(new_method)
+ 
+         if lines is None:
+             # No new line set supplied: re-validate the stored lines as they are.
+@@ -1474,6 +1585,10 @@ def revalidate_supplier_invoice(
+             raise FinancialIntegrityError(
+                 "INVOICE_HAS_NO_LINES: an invoice without lines cannot be validated."
+             )
++        # SEC-05 applies to corrections too: ``InvoiceLineInput.line_ht_dzd`` is
++        # optional, so a corrected line can arrive without it and the payload
++        # digest would subscript a missing key.
++        lines = _materialise_line_ht(lines)
+ 
+         ht_dec = round_dzd(amount_ht_dzd if amount_ht_dzd is not None else inv["amount_ht_dzd"])
+         tva_dec = round_dzd(amount_tva_dzd if amount_tva_dzd is not None else inv["amount_tva_dzd"])
+diff --git a/dz_erp/security_audit.py b/dz_erp/security_audit.py
+index 3298869..3c42fab 100644
+--- a/dz_erp/security_audit.py
++++ b/dz_erp/security_audit.py
+@@ -37,7 +37,7 @@ from .database import (
+     FinancialIntegrityError,
+     TenantIsolationError,
+ )
+-from .key_rotation import KeyConfigurationError, KeyRing
++from .key_rotation import KeyConfigurationError, KeyRing, atomic_write_bytes
+ from .decimal_utils import format_dzd, to_decimal
+ from .intake_ocr import VAULT_KEY_ENV, VAULT_KEY_SUFFIX, VAULT_KEYRING_SUFFIX, PrivateDocumentVault
+ from .review_policy import evaluate_document_review_policy
+@@ -805,6 +805,64 @@ def list_stock_quants_secure(
+     return db.list_stock_quants(scoped_company_id, limit=limit)
+ 
+ 
++def require_role_secure(
++    db: ERPDatabase,
++    requesting_user_id: int,
++    allowed_roles: Tuple[str, ...],
++    *,
++    action: str,
++    target_model: str = "api",
++    target_id: str = "-",
++) -> Dict[str, Any]:
++    """Refuse an operation unless the caller's server-side role is allowed.
++
++    ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` grants "Upload Document" to
++    ``clerk``, ``approver``, ``accountant`` and ``admin`` and explicitly denies
++    it to ``warehouse``, ``auditor``, ``ocr_worker`` and ``treasury``. The
++    document-intake endpoints predate that rule and consulted no role at all, so
++    any authenticated principal of a company - including the roles the matrix
++    denies - could create documents and make the server stream, buffer, OCR and
++    vault a file.
++
++    The role is read from the ``users`` row bound to the verified credential,
++    never from the request, and the refusal is written to the tenant's audit
++    chain (and committed) before the error is raised, exactly like the read-side
++    denials in :func:`list_supplier_invoices_secure` and the review guards in
++    :mod:`dz_erp.intake_ocr`.
++
++    Returns the user row so a caller that needs more than a boolean does not
++    have to read it twice.
++    """
++    denial: Optional[AuthorizationError] = None
++    user: Optional[Any] = None
++    with db.transaction() as conn:
++        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
++        if not user or not user["is_active"]:
++            raise AuthorizationError("User is inactive or revoked.")
++        if user["role"] not in allowed_roles:
++            db.append_audit_event(
++                conn=conn,
++                company_id=int(user["company_id"]),
++                actor_user_id=requesting_user_id,
++                action_type="SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
++                target_model=target_model,
++                target_id=str(target_id),
++                after_state={
++                    "role": user["role"],
++                    "action": action,
++                    "required_roles": list(allowed_roles),
++                },
++            )
++            denial = AuthorizationError(
++                f"Role '{user['role']}' is not authorized for {action}; "
++                f"required one of {list(allowed_roles)}."
++            )
++    if denial is not None:
++        raise denial
++    assert user is not None
++    return dict(user)
++
++
+ def _require_user_admin(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
+     """Guard shared by every user-administration operation: active admin only.
+ 
+@@ -983,7 +1041,15 @@ def create_encrypted_backup(
+     output_backup_path = Path(output_backup_path)
+     output_backup_path.parent.mkdir(parents=True, exist_ok=True)
+     tmp_dir = output_backup_path.parent / f".tmp_backup_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+-    tmp_dir.mkdir(parents=True, exist_ok=True)
++    # The staging directory holds the *plaintext* database snapshot, a copy of
++    # the encrypted vault and a manifest that carries the vault key, the audit
++    # HMAC secret and both key rings. Created with the process umask it would be
++    # 0755 and its files 0644 for the seconds it exists, which is readable by
++    # every local account; create it owner-only instead (best effort on
++    # platforms whose mode bits are synthetic).
++    os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
++    with contextlib.suppress(OSError):
++        os.chmod(tmp_dir, 0o700)
+ 
+     try:
+         db_snap_path = tmp_dir / "erp_snapshot.sqlite3"
+@@ -1041,7 +1107,12 @@ def create_encrypted_backup(
+                 json.dumps(audit_ring.to_dict(), sort_keys=True).encode("utf-8")
+             ).decode("ascii"),
+         }
+-        (tmp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
++        # The manifest carries key material, so it is written like every other
++        # key file: owner-only, atomically, never world-readable even briefly.
++        atomic_write_bytes(
++            tmp_dir / "manifest.json",
++            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
++        )
+ 
+         tar_buf = io.BytesIO()
+         with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
+@@ -1051,7 +1122,14 @@ def create_encrypted_backup(
+ 
+         fernet = Fernet(backup_encryption_key)
+         encrypted_archive = fernet.encrypt(tar_buf.getvalue())
+-        output_backup_path.write_bytes(encrypted_archive)
++        # The archive carries the vault and audit key rings inside the Fernet
++        # envelope - custody material either way - so it is published like every
++        # other key file in this project: created owner-only (0600), written to
++        # a temporary file in the same directory, fsynced and atomically renamed
++        # into place. That leaves no window in which it is group- or
++        # world-readable, and no partially written file that could later be
++        # mistaken for a good backup.
++        atomic_write_bytes(output_backup_path, encrypted_archive, mode=0o600)
+ 
+         return {
+             "backup_path": str(output_backup_path),
+diff --git a/ops/erp.env.example b/ops/erp.env.example
+index 8d54565..4391656 100644
+--- a/ops/erp.env.example
++++ b/ops/erp.env.example
+@@ -72,6 +72,16 @@ ERP_DOCS_ENABLED=false
+ # --- Uploads ----------------------------------------------------------------
+ # ERP_MAX_UPLOAD_BYTES=20971520
+ 
++# --- Request bodies ---------------------------------------------------------
++# Application-level cap on any other JSON request body (bytes), checked from
++# the declared Content-Length before authentication, so one request cannot make
++# the process buffer an arbitrary amount of memory. The upload endpoint keeps
++# its own streaming bound above and allows this cap plus 1 MiB of multipart
++# framing. A malformed or non-positive value is ignored (the 2 MiB default
++# applies) so a typo cannot disable the limit. A chunked request without a
++# Content-Length is bounded by the reverse proxy, not here.
++# ERP_MAX_REQUEST_BYTES=2097152
++
+ # --- Security log rotation --------------------------------------------------
+ # The request log is written for every request (Phase 35), so rotation is not
+ # optional. These are the sizes the structured sink enforces; size them to the

@@ -1,0 +1,6 @@
+running interpreter: 3.11.2 (main, Apr  8 2026, 01:58:00) [GCC 12.2.0]
+SAFE_RESTORE_MINIMUMS: {(3, 11): (3, 11, 17), (3, 12): (3, 12, 10)}
+SAFE_RESTORE_MAX_EXCLUSIVE: (3, 13, 0)
+safe_restore_supported(current): False
+message: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+matrix 3.11.16 -> False | 3.11.17 -> True | 3.12.9 -> False | 3.12.10 -> True

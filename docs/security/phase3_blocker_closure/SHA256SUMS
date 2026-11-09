@@ -1,0 +1,6 @@
+# Artefacts stored in this directory. Verify with:  sha256sum -c SHA256SUMS
+2dfd77697ba3e726cf2ddf4f9a34766cdf81a093037f581ab71948f177c16b7e  security-selective-integration.patch
+527bcc991f9f088adaa5766a822fc7306cca625f5227863c5ade3d5d05492837  untracked-files/tests/test_phase58_security_selective_integration.py
+a73eacc3d1a9b8d2a56afbe05ed7361ea3843668251fb5e1c87f7af5d4141c4d  packaging-flat-layout.patch
+e01367536b9deb90ac7baecaf3c3373be1ef4e1c6173654ea6f5c7d670f90bc1  algerian_ai_erp-0.1.0-py3-none-any.whl
+4ccfb5eab30b49b644581b0c20a0cede3201e8be7a0ec39a16b480cb5bf1843b  wheel-contents.txt

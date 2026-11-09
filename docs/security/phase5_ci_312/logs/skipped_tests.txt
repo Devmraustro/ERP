@@ -1,0 +1,6 @@
+::tests.test_phase27_desktop_ui  [collection skipped]
+::tests.test_phase28_desktop_users_ui  [collection skipped]
+tests.test_phase12_key_migration_and_backup::test_restore_refuses_existing_windows_junction_prefix  [Windows junction regression]
+tests.test_phase17_key_providers::test_windows_provider_refuses_to_follow_a_symlinked_key  [exercises the Windows reparse-point open path]
+tests.test_phase17_key_providers::test_windows_provider_rejects_reparse_handle_without_symlink_privilege  [exercises the Windows reparse-point API path]
+tests.test_phase26_desktop::test_mainwindow_constructs_and_switches_to_rtl  [could not import 'PySide6.QtWidgets': No module named 'PySid]

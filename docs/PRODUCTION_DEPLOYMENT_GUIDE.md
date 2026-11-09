@@ -128,6 +128,80 @@ Scaling horizontally is a design change, not a compose edit.
 * Set a request body limit aligned with `ERP_MAX_UPLOAD_BYTES`.
 * Do not expose `/docs` even if `ERP_DOCS_ENABLED` is true.
 
+### 6.1 TLS and Host hardening (SEC-15)
+
+The service speaks plain HTTP and expects TLS to end in front of it. The
+application now validates the `Host` header itself: every request whose `Host`
+does not match `ERP_ALLOWED_HOSTS` is refused with `400 Invalid Host header.`
+before routing, and the refusal is logged as `SECURITY_HOST_HEADER_REJECTED`.
+When `ERP_ALLOWED_HOSTS` is unset only loopback/test names are accepted, so a
+public deployment **must** set it:
+
+```
+ERP_ALLOWED_HOSTS=erp.example.dz,*.erp.example.dz
+ERP_TRUSTED_PROXIES=<the proxy's own address>/32
+```
+
+Configuration rules, in order of how often they are got wrong:
+
+1. **One trust layer.** The server starts with `proxy_headers=False`, so uvicorn
+   never rewrites the peer address from a header; `ERP_TRUSTED_PROXIES` is the
+   only thing that decides whether `X-Forwarded-For` is believed. Do not set
+   `FORWARDED_ALLOW_IPS` — and never to `*` — in a wrapper script; that would
+   reintroduce the bypass this configuration exists to prevent.
+2. **Never trust a range you do not control.** `0.0.0.0/0` or `::/0` in
+   `ERP_TRUSTED_PROXIES` hands IP spoofing (and the audit trail) back to the
+   caller. Leave the variable unset when there is no proxy.
+3. **The proxy should enforce the same host list**, so an unknown name is
+   rejected before it reaches the application at all. The in-process check is the
+   backstop, not the primary control.
+4. **Headers the proxy must add**: `Strict-Transport-Security` (after the first
+   successful HTTPS deployment), `X-Content-Type-Options: nosniff`,
+   `X-Frame-Options: DENY` (or CSP `frame-ancestors 'none'`), and a body ceiling
+   (`client_max_body_size`) matching `ERP_MAX_REQUEST_BYTES`.
+5. **No cookies are used.** The API authenticates with a bearer token in the
+   `Authorization` header, which is not sent automatically by browsers, so there
+   is no CSRF surface to configure. If a cookie is ever introduced it must be
+   `Secure; HttpOnly; SameSite=Strict` and the CSRF story must be re-reviewed.
+
+### 6.2 Password policy (SEC-13)
+
+Every credential-creating path — the admin API, `--bootstrap-admin`, self-service
+change and administrative reset — applies the same policy in
+`dz_erp.auth.validate_password_policy`:
+
+* length floor `ERP_PASSWORD_MIN_LENGTH` (cannot be configured below 8; **12 is
+  the recommended value** for a deployment);
+* maximum 1024 characters (bounds the work per request);
+* no composition classes (NIST SP 800-63B favours length), but the password may
+  not equal the username or company name and a small weak-value list is refused;
+* hashing is PBKDF2-HMAC-SHA256 with 600,000 iterations; a credential created
+  under a lower iteration count is re-hashed automatically on its next
+  successful login (`AUTH_PASSWORD_REHASHED`).
+
+Lifecycle endpoints (both audit their outcome, both revoke live tokens):
+
+| Endpoint | Who | Effect |
+|---|---|---|
+| `POST /api/v1/auth/password` | the account holder | requires the current password; revokes **all** tokens, so the client re-authenticates |
+| `POST /api/v1/users/{id}/password-reset` | administrator, same company | sets a new password and revokes the target's tokens; cross-tenant targets answer 404 |
+
+There is no self-service "forgot password" flow in V1: an operator who cannot
+authenticate is reset by an administrator. A mailer-based reset is a separate
+feature with its own threat model (reset-link poisoning, which is why Host
+validation above matters).
+
+### 6.3 V1 scope: AWS KMS and MinIO/S3 are explicitly out
+
+| Capability | V1 status | Why |
+|---|---|---|
+| AWS KMS / HSM key custody | **not supported** | no KMS/HSM client is bundled; declaring `ERP_KEY_PROVIDER=kms|hsm` is refused at start-up instead of being served by file-backed material |
+| MinIO / S3-compatible backup storage | **not supported** | `dz_erp/backup_storage_s3.py` requires `boto3`, which is deliberately absent from the hash-locked `requirements.lock.txt` |
+
+Supported V1 configuration: local key custody (owner-only files, see
+`docs/KEY_CUSTODY_THREAT_MODEL.md`) and local backup storage. Anyone who enables
+either capability is running an untested, unverified configuration.
+
 ## 7. Verification after start (all of these are operator steps)
 
 ```bash

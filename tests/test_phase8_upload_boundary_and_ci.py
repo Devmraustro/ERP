@@ -1292,10 +1292,15 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # tax/timbre-rules, POST tax/timbre-rules/{version_code}/approve), added to
     # close finding R-05: without them the only way to adopt a new stamp-duty
     # rule was raw SQL, which produced no actor, reason or audit event.
+    # + the 2 SEC-13 password-lifecycle endpoints (POST auth/password for
+    # self-service rotation, POST users/{user_id}/password-reset for an
+    # administrative reset). Both are authenticated, both require a verified
+    # bearer token, and they exist because a credential could previously only
+    # be replaced by re-creating the account.
     # The count pin catches accidental surface changes; the desktop read
     # endpoints are authenticated like every other protected operation.
-    assert len(protected) == 33, (
-        f"expected 33 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert len(protected) == 35, (
+        f"expected 35 protected operations, got {len(protected)}: {sorted(protected)}"
     )
 
 

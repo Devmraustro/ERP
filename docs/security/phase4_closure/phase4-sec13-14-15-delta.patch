@@ -1,0 +1,938 @@
+diff --git a/docs/PRODUCTION_DEPLOYMENT_GUIDE.md b/docs/PRODUCTION_DEPLOYMENT_GUIDE.md
+--- a/docs/PRODUCTION_DEPLOYMENT_GUIDE.md
++++ b/docs/PRODUCTION_DEPLOYMENT_GUIDE.md
+@@ -128,6 +128,80 @@
+ * Set a request body limit aligned with `ERP_MAX_UPLOAD_BYTES`.
+ * Do not expose `/docs` even if `ERP_DOCS_ENABLED` is true.
+ 
++### 6.1 TLS and Host hardening (SEC-15)
++
++The service speaks plain HTTP and expects TLS to end in front of it. The
++application now validates the `Host` header itself: every request whose `Host`
++does not match `ERP_ALLOWED_HOSTS` is refused with `400 Invalid Host header.`
++before routing, and the refusal is logged as `SECURITY_HOST_HEADER_REJECTED`.
++When `ERP_ALLOWED_HOSTS` is unset only loopback/test names are accepted, so a
++public deployment **must** set it:
++
++```
++ERP_ALLOWED_HOSTS=erp.example.dz,*.erp.example.dz
++ERP_TRUSTED_PROXIES=<the proxy's own address>/32
++```
++
++Configuration rules, in order of how often they are got wrong:
++
++1. **One trust layer.** The server starts with `proxy_headers=False`, so uvicorn
++   never rewrites the peer address from a header; `ERP_TRUSTED_PROXIES` is the
++   only thing that decides whether `X-Forwarded-For` is believed. Do not set
++   `FORWARDED_ALLOW_IPS` — and never to `*` — in a wrapper script; that would
++   reintroduce the bypass this configuration exists to prevent.
++2. **Never trust a range you do not control.** `0.0.0.0/0` or `::/0` in
++   `ERP_TRUSTED_PROXIES` hands IP spoofing (and the audit trail) back to the
++   caller. Leave the variable unset when there is no proxy.
++3. **The proxy should enforce the same host list**, so an unknown name is
++   rejected before it reaches the application at all. The in-process check is the
++   backstop, not the primary control.
++4. **Headers the proxy must add**: `Strict-Transport-Security` (after the first
++   successful HTTPS deployment), `X-Content-Type-Options: nosniff`,
++   `X-Frame-Options: DENY` (or CSP `frame-ancestors 'none'`), and a body ceiling
++   (`client_max_body_size`) matching `ERP_MAX_REQUEST_BYTES`.
++5. **No cookies are used.** The API authenticates with a bearer token in the
++   `Authorization` header, which is not sent automatically by browsers, so there
++   is no CSRF surface to configure. If a cookie is ever introduced it must be
++   `Secure; HttpOnly; SameSite=Strict` and the CSRF story must be re-reviewed.
++
++### 6.2 Password policy (SEC-13)
++
++Every credential-creating path — the admin API, `--bootstrap-admin`, self-service
++change and administrative reset — applies the same policy in
++`dz_erp.auth.validate_password_policy`:
++
++* length floor `ERP_PASSWORD_MIN_LENGTH` (cannot be configured below 8; **12 is
++  the recommended value** for a deployment);
++* maximum 1024 characters (bounds the work per request);
++* no composition classes (NIST SP 800-63B favours length), but the password may
++  not equal the username or company name and a small weak-value list is refused;
++* hashing is PBKDF2-HMAC-SHA256 with 600,000 iterations; a credential created
++  under a lower iteration count is re-hashed automatically on its next
++  successful login (`AUTH_PASSWORD_REHASHED`).
++
++Lifecycle endpoints (both audit their outcome, both revoke live tokens):
++
++| Endpoint | Who | Effect |
++|---|---|---|
++| `POST /api/v1/auth/password` | the account holder | requires the current password; revokes **all** tokens, so the client re-authenticates |
++| `POST /api/v1/users/{id}/password-reset` | administrator, same company | sets a new password and revokes the target's tokens; cross-tenant targets answer 404 |
++
++There is no self-service "forgot password" flow in V1: an operator who cannot
++authenticate is reset by an administrator. A mailer-based reset is a separate
++feature with its own threat model (reset-link poisoning, which is why Host
++validation above matters).
++
++### 6.3 V1 scope: AWS KMS and MinIO/S3 are explicitly out
++
++| Capability | V1 status | Why |
++|---|---|---|
++| AWS KMS / HSM key custody | **not supported** | no KMS/HSM client is bundled; declaring `ERP_KEY_PROVIDER=kms|hsm` is refused at start-up instead of being served by file-backed material |
++| MinIO / S3-compatible backup storage | **not supported** | `dz_erp/backup_storage_s3.py` requires `boto3`, which is deliberately absent from the hash-locked `requirements.lock.txt` |
++
++Supported V1 configuration: local key custody (owner-only files, see
++`docs/KEY_CUSTODY_THREAT_MODEL.md`) and local backup storage. Anyone who enables
++either capability is running an untested, unverified configuration.
++
+ ## 7. Verification after start (all of these are operator steps)
+ 
+ ```bash
+diff --git a/dz_erp/api.py b/dz_erp/api.py
+--- a/dz_erp/api.py
++++ b/dz_erp/api.py
+@@ -20,7 +20,7 @@
+ import time
+ import uuid
+ from pathlib import Path
+-from typing import Any, Dict, List, Optional
++from typing import Any, Dict, List, Optional, Sequence
+ 
+ from fastapi import (
+     Depends,
+@@ -42,7 +42,11 @@
+     AuthManager,
+     AuthenticatedUser,
+     DEFAULT_TOKEN_TTL_SECONDS,
++    InvalidCredentialError,
++    PasswordPolicyError,
++    configured_password_min_length,
+     parse_bearer_token,
++    validate_password_policy,
+ )
+ from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
+ from .intake_ocr import (
+@@ -52,7 +56,14 @@
+     update_extracted_field_by_human,
+     upload_and_process_supplier_document,
+ )
+-from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
++from .net import (
++    TrustedProxyPolicy,
++    allowed_hosts_from_env,
++    describe_allowed_hosts,
++    describe_trusted_proxy_policy,
++    host_is_allowed,
++    trusted_proxy_policy_from_env,
++)
+ from .request_id import sanitize_request_id
+ from .localization import (
+     TimbreRuleAdministrationError,
+@@ -82,6 +93,7 @@
+     JsonlSecurityLog,
+     StructuredRedactingLogger,
+     create_user_admin_secure,
++    reset_password_admin_secure,
+     deactivate_user_secure,
+     evaluate_document_review_policy_secure,
+     list_extracted_fields_secure,
+@@ -236,6 +248,19 @@
+     password: str
+ 
+ 
++class PasswordChangeInput(BaseModel):
++    """Self-service rotation: prove the old credential, supply the new one."""
++
++    current_password: str
++    new_password: str
++
++
++class PasswordResetInput(BaseModel):
++    """Administrative reset: the admin supplies the target's new password."""
++
++    new_password: str
++
++
+ class RevokeRequest(BaseModel):
+     reason: str = "USER_LOGOUT"
+ 
+@@ -305,6 +330,7 @@
+     trusted_proxies: Optional[TrustedProxyPolicy] = None,
+     docs_enabled: bool = False,
+     throttle: Optional[RequestThrottle] = None,
++    allowed_hosts: Optional[Sequence[str]] = None,
+ ) -> FastAPI:
+     # Secure default: docs disabled unless explicitly enabled for local development
+     docs_url = "/docs" if docs_enabled else None
+@@ -338,6 +364,11 @@
+     # explicitly configured, X-Forwarded-For is ignored and the direct peer
+     # address is used.  See dz_erp/net.py.
+     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
++    # SEC-15: Host header validation. ``None`` means "read ERP_ALLOWED_HOSTS",
++    # whose fallback is the loopback/test set — never "accept anything".
++    app.state.allowed_hosts = (
++        tuple(allowed_hosts) if allowed_hosts is not None else allowed_hosts_from_env()
++    )
+     # Failed-authentication and (optionally) per-client request throttling.
+     # See dz_erp/rate_limit.py: fail-closed, audited, bounded, and either
+     # in-process (default) or shared through the application database when
+@@ -357,6 +388,34 @@
+     # (never the query string, never headers, never a body) and the outcome are
+     # recorded: the structured logger redacts anything secret-bearing that a
+     # caller passes to it explicitly.
++    # ------------------------------------------------------------------
++    # Host header validation (SEC-15)
++    # ------------------------------------------------------------------
++    # Registered first, so it sits *inside* the logging layer and a refusal is
++    # recorded like any other 4xx. The proxy is expected to reject unknown names
++    # too; this is the backstop that does not depend on the proxy's config.
++    @app.middleware("http")
++    async def _validate_host_header(request: Request, call_next: Any) -> Any:
++        host = request.headers.get("host")
++        if not host_is_allowed(host, app.state.allowed_hosts):
++            corr_id, _ = sanitize_request_id(request.headers.get("X-Request-Id"))
++            logger.log(
++                "WARNING",
++                "SECURITY_HOST_HEADER_REJECTED",
++                corr_id,
++                # The offending value is echoed only in a bounded, printable form
++                # and is never used for routing, attribution or audit identity.
++                host=str(host or "")[:255],
++                path=request.url.path,
++                method=request.method,
++            )
++            return JSONResponse(
++                status_code=400,
++                content={"detail": "Invalid Host header."},
++                headers={"X-Request-Id": corr_id},
++            )
++        return await call_next(request)
++
+     @app.middleware("http")
+     async def _log_request(request: Request, call_next: Any) -> Any:
+         # A client may propose a correlation id, but only a bounded, printable
+@@ -671,6 +730,75 @@
+             "expires_at": auth.expires_at,
+         }
+ 
++    @app.post("/api/v1/auth/password")
++    def api_change_password(
++        body: PasswordChangeInput,
++        auth: AuthenticatedUser = Depends(_authenticate),
++    ) -> Dict[str, Any]:
++        """Change the caller's own password (SEC-13 lifecycle).
++
++        The current password must verify, so a stolen session token alone cannot
++        take over the account's credential. Success revokes **every** token for
++        the account — including the one used for this call — because a password
++        change is exactly the moment an operator wants other sessions gone. The
++        client re-authenticates with the new password.
++        """
++        try:
++            app.state.auth_manager.change_own_password(
++                auth.user_id, body.current_password, body.new_password
++            )
++        except PasswordPolicyError as exc:
++            raise HTTPException(
++                status_code=422,
++                detail=exc.detail,
++                headers={"X-Error-Code": exc.code},
++            ) from exc
++        except InvalidCredentialError as exc:
++            raise HTTPException(
++                status_code=401,
++                detail="The current password is incorrect.",
++                headers={"WWW-Authenticate": 'Bearer realm="algerian-ai-erp"'},
++            ) from exc
++        return {
++            "user_id": auth.user_id,
++            "changed": True,
++            "tokens_revoked": True,
++            "reauthenticate": True,
++            "min_password_length": configured_password_min_length(),
++        }
++
++    @app.post("/api/v1/users/{user_id}/password-reset")
++    def api_reset_user_password(
++        user_id: int,
++        body: PasswordResetInput,
++        auth: AuthenticatedUser = Depends(_authenticate),
++    ) -> Dict[str, Any]:
++        """Administratively reset a user's password in the caller's company.
++
++        Administrators only. The reset revokes the target's live tokens, so a
++        compromised session ends with the old credential. Cross-tenant and
++        non-existent targets are deliberately indistinguishable (404).
++        """
++        try:
++            result = reset_password_admin_secure(
++                db,
++                auth.user_id,
++                app.state.auth_manager,
++                target_user_id=user_id,
++                new_password=body.new_password,
++            )
++        except AuthorizationError as exc:
++            raise HTTPException(status_code=403, detail=str(exc)) from exc
++        except PasswordPolicyError as exc:
++            raise HTTPException(
++                status_code=422,
++                detail=exc.detail,
++                headers={"X-Error-Code": exc.code},
++            ) from exc
++        except ValueError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        return {"company_id": auth.company_id, "reset": result}
++
+     @app.post("/api/v1/auth/revoke")
+     def api_revoke_token(
+         body: RevokeRequest,
+@@ -1322,7 +1450,13 @@
+             raise HTTPException(status_code=403, detail="Administrator role required")
+         described = describe_throttle_policy(app.state.throttle)
+         described["deployment_scope"] = format_rate_limit_scope(app.state.throttle)
+-        return {"company_id": auth.company_id, "rate_limit": described}
++        # SEC-15: the Host allow-list is a security knob an operator must be able
++        # to read back from the running process, not only from a config file.
++        return {
++            "company_id": auth.company_id,
++            "rate_limit": described,
++            "host_policy": describe_allowed_hosts(app.state.allowed_hosts),
++        }
+ 
+     # ------------------------------------------------------------------
+     # Timbre rule administration (Phase 46, finding R-05). The service refuses
+@@ -1447,11 +1581,19 @@
+                 status_code=422,
+                 detail="Username must be at most 64 characters and contain no control characters.",
+             )
+-        if len(body.password) < 8:
++        # SEC-13: the policy lives in one place (dz_erp.auth) so the CLI
++        # bootstrap, this route and any future provisioning path cannot drift.
++        # ``detail`` stays a human-readable string (the existing client contract);
++        # the stable machine code travels in a header so a client can branch on it
++        # without parsing English.
++        try:
++            validate_password_policy(body.password, username=username)
++        except PasswordPolicyError as exc:
+             raise HTTPException(
+                 status_code=422,
+-                detail="Password must be at least 8 characters long.",
+-            )
++                detail=exc.detail,
++                headers={"X-Error-Code": exc.code},
++            ) from exc
+         try:
+             user = create_user_admin_secure(
+                 db,
+diff --git a/dz_erp/auth.py b/dz_erp/auth.py
+--- a/dz_erp/auth.py
++++ b/dz_erp/auth.py
+@@ -48,6 +48,122 @@
+ MAX_PASSWORD_LENGTH = 1024  # bound PBKDF2 work per request
+ PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+ 
++# --------------------------------------------------------------------------
++# Password policy (SEC-13)
++# --------------------------------------------------------------------------
++# One chokepoint, used by every path that can create or change a credential:
++# the admin API, the CLI bootstrap (``--bootstrap-admin``), the secure
++# provisioning wrapper, and the self-service / admin reset endpoints. Before
++# this, the only length check lived in the ``POST /api/v1/users`` route, so a
++# provisioning script or the CLI could install a one-character password.
++#
++# The enforced floor stays at the documented 8 characters for V1 so existing
++# credentials and client contract are unchanged; deployments SHOULD raise
++# ``ERP_PASSWORD_MIN_LENGTH`` to the recommended 12 (NIST SP 800-63B rev.4
++# favours length over composition). The floor cannot be configured below 8.
++MIN_PASSWORD_LENGTH = 8
++RECOMMENDED_PASSWORD_MIN_LENGTH = 12
++MAX_PASSWORD_MIN_LENGTH = 64
++ENV_PASSWORD_MIN_LENGTH = "ERP_PASSWORD_MIN_LENGTH"
++
++# A deliberately short list of values that are guessed first in every
++# credential-stuffing corpus. It is an offline floor, not a substitute for a
++# breach-corpus check, and it never contains anything derived from user data.
++WEAK_PASSWORDS = frozenset(
++    {
++        "password",
++        "password1",
++        "passw0rd",
++        "12345678",
++        "123456789",
++        "1234567890",
++        "qwerty12",
++        "qwertyui",
++        "azertyui",
++        "motdepasse",
++        "changeme",
++        "letmein1",
++        "iloveyou",
++        "welcome1",
++        "admin123",
++        "administrateur",
++    }
++)
++
++
++class PasswordPolicyError(ValueError):
++    """A password that does not satisfy the policy.
++
++    Carries a stable machine-readable ``code`` so the API can answer 422 with
++    a reason a client (or the desktop UI) can act on, and so tests assert the
++    rule rather than an English sentence.
++    """
++
++    def __init__(self, code: str, message: str) -> None:
++        super().__init__(message)
++        self.code = code
++        self.detail = message
++
++
++def configured_password_min_length(env: Optional[dict] = None) -> int:
++    """The effective minimum length: ``ERP_PASSWORD_MIN_LENGTH``, floored at 8.
++
++    A malformed, empty or out-of-range value falls back to the floor instead of
++    raising: a typo in an operator's environment must never make credentials
++    weaker than the documented floor, and must not stop the API from starting.
++    """
++    source = os.environ if env is None else env
++    raw = str(source.get(ENV_PASSWORD_MIN_LENGTH) or "").strip()
++    if not raw:
++        return MIN_PASSWORD_LENGTH
++    try:
++        configured = int(raw)
++    except (TypeError, ValueError):
++        return MIN_PASSWORD_LENGTH
++    if configured < MIN_PASSWORD_LENGTH:
++        return MIN_PASSWORD_LENGTH
++    return min(configured, MAX_PASSWORD_MIN_LENGTH)
++
++
++def validate_password_policy(
++    password: str,
++    *,
++    username: Optional[str] = None,
++    company_name: Optional[str] = None,
++    env: Optional[dict] = None,
++) -> str:
++    """Validate a password against the policy; return it unchanged on success.
++
++    Raises :class:`PasswordPolicyError` with a stable code otherwise. The policy
++    is intentionally *not* compositional (no upper/lower/digit/symbol classes),
++    because composition rules push users towards predictable substitutions
++    without adding entropy; length, an equality check against the account's own
++    identifiers and a small weak-value list are the controls that pay.
++    """
++    if not isinstance(password, str) or not password:
++        raise PasswordPolicyError("PASSWORD_REQUIRED", "Password must be a non-empty string.")
++    if len(password) > MAX_PASSWORD_LENGTH:
++        raise PasswordPolicyError(
++            "PASSWORD_TOO_LONG",
++            f"Password exceeds the maximum accepted length of {MAX_PASSWORD_LENGTH} characters.",
++        )
++    minimum = configured_password_min_length(env)
++    if len(password) < minimum:
++        raise PasswordPolicyError(
++            "PASSWORD_TOO_SHORT",
++            f"Password must be at least {minimum} characters long.",
++        )
++    if not password.strip():
++        raise PasswordPolicyError("PASSWORD_WHITESPACE_ONLY", "Password must contain more than whitespace.")
++    folded = password.casefold()
++    for identifier, code in ((username, "PASSWORD_EQUALS_USERNAME"), (company_name, "PASSWORD_EQUALS_COMPANY_NAME")):
++        candidate = (identifier or "").strip().casefold()
++        if candidate and folded == candidate:
++            raise PasswordPolicyError(code, "Password must not be the account's own username or company name.")
++    if folded in WEAK_PASSWORDS:
++        raise PasswordPolicyError("PASSWORD_TOO_COMMON", "Password is a commonly-guessed value; choose another.")
++    return password
++
+ # Roles recognised by the schema CHECK constraint on users.role.
+ VALID_ROLES = (
+     "clerk",
+@@ -196,6 +312,24 @@
+     return hmac.compare_digest(actual, expected)
+ 
+ 
++def _stored_iterations(stored_hash: Optional[str]) -> Optional[int]:
++    """The PBKDF2 iteration count a stored hash was produced with, or ``None``.
++
++    Used only by the rehash-on-login migration: an unparseable value simply
++    means "do not try to upgrade it", never "assume it is current".
++    """
++    if not stored_hash or not isinstance(stored_hash, str):
++        return None
++    parts = stored_hash.split("$")
++    if len(parts) != 4 or parts[0] != PASSWORD_HASH_ALGORITHM:
++        return None
++    try:
++        iterations = int(parts[1])
++    except (TypeError, ValueError):
++        return None
++    return iterations if iterations >= 1 else None
++
++
+ # --------------------------------------------------------------------------
+ # Token primitives
+ # --------------------------------------------------------------------------
+@@ -280,6 +414,8 @@
+     ) -> Dict[str, Any]:
+         if role not in VALID_ROLES:
+             raise ValueError(f"Unknown role '{role}'. Expected one of {list(VALID_ROLES)}.")
++        # SEC-13: every credential-creation path passes through one policy.
++        validate_password_policy(password, username=username)
+         password_hash = hash_password(password, iterations=self._pbkdf2_iterations)
+         now = _utcnow()
+         with self._db.transaction() as conn:
+@@ -304,32 +440,82 @@
+                 )
+         return {"user_id": user_id, "username": username, "role": role, "company_id": company_id}
+ 
+-    def set_password(self, user_id: int, new_password: str, *, actor_user_id: Optional[int] = None) -> None:
+-        """Rotate a user's password and revoke every token already issued to them."""
+-        password_hash = hash_password(new_password, iterations=self._pbkdf2_iterations)
++    def set_password(
++        self,
++        user_id: int,
++        new_password: str,
++        *,
++        actor_user_id: Optional[int] = None,
++        current_password: Optional[str] = None,
++    ) -> None:
++        """Rotate a user's password and revoke every token already issued to them.
++
++        ``current_password`` turns this into a *self-service* change: when it is
++        supplied it must verify against the stored hash, and a wrong value is
++        refused before anything is written (SEC-13 lifecycle gap: an operator
++        whose password leaked had no in-product way to rotate it). Omitting it
++        is the administrative reset path, which is guarded by the caller's role
++        check — the credential mechanics stay identical, so there is no second
++        implementation of password storage.
++        """
+         now = _utcnow()
++        rejection: Optional[Exception] = None
+         with self._db.transaction() as conn:
+             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+             if not user:
+                 raise ValueError(f"User {user_id} does not exist.")
+-            conn.execute(
+-                "UPDATE users SET password_hash = ?, password_updated_at = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
+-                (password_hash, _iso(now), user_id),
+-            )
+-            conn.execute(
+-                "UPDATE auth_tokens SET revoked_at = ?, revocation_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
+-                (_iso(now), "PASSWORD_ROTATED", user_id),
+-            )
+-            if actor_user_id is not None:
++            if current_password is not None and not verify_password(current_password, user["password_hash"]):
++                # Recorded inside the transaction and raised *after* it commits:
++                # raising here would roll the evidence of the refusal back with
++                # the (empty) write it is refusing.
+                 self._db.append_audit_event(
+                     conn=conn,
+                     company_id=int(user["company_id"]),
+-                    actor_user_id=actor_user_id,
++                    actor_user_id=actor_user_id if actor_user_id is not None else user_id,
++                    action_type="AUTH_PASSWORD_CHANGE_REJECTED",
++                    target_model="users",
++                    target_id=str(user_id),
++                    after_state={"reason": "CURRENT_PASSWORD_INVALID"},
++                )
++                rejection = InvalidCredentialError("The current password is incorrect.")
++            if rejection is None:
++                # Policy is applied after the identity/credential checks so a
++                # wrong current password is never distinguishable from a policy
++                # refusal.
++                validate_password_policy(new_password, username=user["username"])
++                password_hash = hash_password(new_password, iterations=self._pbkdf2_iterations)
++                conn.execute(
++                    "UPDATE users SET password_hash = ?, password_updated_at = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
++                    (password_hash, _iso(now), user_id),
++                )
++                revoked = conn.execute(
++                    "UPDATE auth_tokens SET revoked_at = ?, revocation_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
++                    (_iso(now), "PASSWORD_ROTATED", user_id),
++                ).rowcount
++                self._db.append_audit_event(
++                    conn=conn,
++                    company_id=int(user["company_id"]),
++                    actor_user_id=actor_user_id if actor_user_id is not None else user_id,
+                     action_type="AUTH_PASSWORD_ROTATED",
+                     target_model="users",
+                     target_id=str(user_id),
+-                    after_state={"username": user["username"], "tokens_revoked": True},
++                    after_state={
++                        "username": user["username"],
++                        "tokens_revoked": int(revoked or 0),
++                        "mode": "self_service" if current_password is not None else "administrative_reset",
++                    },
+                 )
++        if rejection is not None:
++            raise rejection
++
++    def change_own_password(self, user_id: int, current_password: str, new_password: str) -> None:
++        """Self-service rotation: prove the old credential, then replace it."""
++        self.set_password(
++            user_id,
++            new_password,
++            actor_user_id=user_id,
++            current_password=current_password,
++        )
+ 
+     def deactivate_user(self, user_id: int, *, actor_user_id: Optional[int] = None, reason: str = "DEACTIVATED") -> int:
+         """Disable a user and immediately revoke all of their live tokens."""
+@@ -407,6 +593,16 @@
+             self._register_failed_login(account, username, now)
+             raise InvalidCredentialError("Invalid username or password.")
+ 
++        # SEC-13: migrate a credential created under an older iteration floor the
++        # first time its owner proves it. Without this, raising the floor later
++        # is a flag day; with it, stored hashes upgrade in the background and the
++        # cost is paid once per credential. The plaintext is already verified, so
++        # this never weakens the check that just succeeded.
++        upgraded_hash: Optional[str] = None
++        stored_iterations = _stored_iterations(account["password_hash"])
++        if stored_iterations is not None and stored_iterations < self._pbkdf2_iterations:
++            upgraded_hash = hash_password(password, iterations=self._pbkdf2_iterations)
++
+         # Phase 2 — mint the token and reset the failure counters atomically.
+         token = generate_session_token()
+         token_hash = hash_token(token)
+@@ -426,6 +622,21 @@
+                 "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?",
+                 (account["id"],),
+             )
++            if upgraded_hash is not None:
++                conn.execute(
++                    "UPDATE users SET password_hash = ?, password_updated_at = ? WHERE id = ?",
++                    (upgraded_hash, _iso(now), account["id"]),
++                )
++                self._audit(
++                    conn,
++                    account,
++                    "AUTH_PASSWORD_REHASHED",
++                    {
++                        "username": account["username"],
++                        "from_iterations": stored_iterations,
++                        "to_iterations": self._pbkdf2_iterations,
++                    },
++                )
+             self._audit(
+                 conn,
+                 account,
+diff --git a/dz_erp/intake_ocr.py b/dz_erp/intake_ocr.py
+--- a/dz_erp/intake_ocr.py
++++ b/dz_erp/intake_ocr.py
+@@ -1605,7 +1605,37 @@
+     (``NeedsReview`` or ``Validated``) — once an approval exists, the document
+     is evidence for a decided invoice and its values are closed. Refusals are
+     audited before they are raised.
++
++    SEC-14: the value itself is validated against the field's class before it is
++    stored, using the very same validator the decision path
++    (:func:`dz_erp.review_policy.validate_corrected_value`) applies — this path
++    used to write any string into ``human_override_value`` *and*
++    ``normalized_value``, leaving the review policy to discover downstream that
++    the stored “correction” could not have appeared on any invoice. A rejected
++    value writes nothing and leaves its own audit record.
+     """
++    from .review_policy import TEXT_FALLBACK_RULE, rule_for, validate_corrected_value
++
++    rule = rule_for(field_name) or TEXT_FALLBACK_RULE
++    try:
++        new_value = validate_corrected_value(rule, new_value)
++    except ValueError as policy_error:
++        with db.transaction() as conn:
++            db.append_audit_event(
++                conn=conn,
++                company_id=company_id,
++                actor_user_id=user_id,
++                action_type="SECURITY_FIELD_EDIT_REJECTED",
++                target_model="ocr_extracted_fields",
++                target_id=document_id,
++                after_state={
++                    "field_name": field_name,
++                    "value_class": rule.value_class,
++                    "reason": str(policy_error)[:200],
++                },
++            )
++        raise FinancialIntegrityError(f"FIELD_VALUE_REJECTED:{policy_error}") from policy_error
++
+     now_iso = datetime.now(timezone.utc).isoformat()
+     denial: Optional[Exception] = None
+     with db.transaction() as conn:
+diff --git a/dz_erp/net.py b/dz_erp/net.py
+--- a/dz_erp/net.py
++++ b/dz_erp/net.py
+@@ -29,8 +29,16 @@
+ from typing import Iterable, List, Optional, Tuple
+ 
+ ENV_TRUSTED_PROXIES = "ERP_TRUSTED_PROXIES"
++ENV_ALLOWED_HOSTS = "ERP_ALLOWED_HOSTS"
+ UNKNOWN_IP = "unknown"
+ 
++#: Hostnames accepted when ``ERP_ALLOWED_HOSTS`` is unset. They cover loopback
++#: development, the container on a private network and the test client, and are
++#: the *only* names an unconfigured deployment will answer to: a request with
++#: any other ``Host`` header is refused with 400. A production deployment sets
++#: its real name(s); see docs/PRODUCTION_DEPLOYMENT_GUIDE.md.
++DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]", "testserver")
++
+ 
+ class TrustedProxyPolicy:
+     """Decides whether a forwarded client IP may be believed."""
+@@ -152,3 +160,96 @@
+         ),
+         "env_override": ENV_TRUSTED_PROXIES,
+     }
++
++
++# ---------------------------------------------------------------------------
++# Host header validation (SEC-15)
++# ---------------------------------------------------------------------------
++# ``Host`` is caller-controlled, and the application never validated it. Behind a
++# proxy that routes by name (or a cache that keys on it) an attacker-chosen Host
++# is the ingredient of cache poisoning, absolute-URL generation and — once a
++# password-reset mailer exists — reset-link poisoning. The proxy SHOULD reject
++# unknown names first; this is the in-process backstop that makes the answer
++# independent of proxy configuration mistakes.
++
++
++def parse_allowed_hosts(raw: object) -> Tuple[str, ...]:
++    """Normalise a comma/space separated host list into comparable patterns.
++
++    Entries are lower-cased, port suffixes are dropped, and a leading ``*.`` is
++    preserved as a wildcard. Empty or nonsensical entries are ignored rather
++    than widening the list.
++    """
++    if isinstance(raw, (list, tuple)):
++        items = [str(item) for item in raw]
++    else:
++        items = str(raw or "").replace(",", " ").split()
++    result: List[str] = []
++    for item in items:
++        candidate = item.strip().lower()
++        if not candidate:
++            continue
++        wildcard = candidate.startswith("*.")
++        if wildcard:
++            candidate = candidate[2:]
++        candidate = _strip_port(candidate)
++        if not candidate or "/" in candidate or any(ch.isspace() for ch in candidate):
++            continue
++        result.append(f"*.{candidate}" if wildcard else candidate)
++    return tuple(dict.fromkeys(result))
++
++
++def _strip_port(host: str) -> str:
++    """Drop a trailing ``:port`` from a Host value, keeping IPv6 literals intact."""
++    if not host:
++        return ""
++    if host.startswith("["):
++        closing = host.find("]")
++        return host[: closing + 1] if closing != -1 else host
++    if host.count(":") == 1:
++        name, _, port = host.partition(":")
++        if port.isdigit():
++            return name
++    return host
++
++
++def allowed_hosts_from_env(env: Optional[dict] = None) -> Tuple[str, ...]:
++    """The effective allow-list: ``ERP_ALLOWED_HOSTS`` or the loopback defaults."""
++    source = os.environ if env is None else env
++    parsed = parse_allowed_hosts(source.get(ENV_ALLOWED_HOSTS) or "")
++    return parsed or DEFAULT_ALLOWED_HOSTS
++
++
++def host_is_allowed(host_header: Optional[str], allowed: Iterable[str]) -> bool:
++    """Whether a ``Host`` header value matches the allow-list.
++
++    A missing or empty header is refused: an HTTP/1.0 client that omits ``Host``
++    is not something this API supports, and “no name” must never mean “any
++    name”.
++    """
++    host = _strip_port(str(host_header or "").strip().lower())
++    if not host:
++        return False
++    for pattern in allowed:
++        if pattern.startswith("*."):
++            suffix = pattern[1:]  # ".example.dz"
++            if host.endswith(suffix) and len(host) > len(suffix):
++                return True
++        elif host == pattern:
++            return True
++    return False
++
++
++def describe_allowed_hosts(allowed: Iterable[str]) -> dict:
++    """Machine-readable description of the active Host policy (for operators)."""
++    entries = list(allowed)
++    return {
++        "allowed_hosts": entries,
++        "allowed_host_count": len(entries),
++        "wildcards": [entry for entry in entries if entry.startswith("*.")],
++        "env_override": ENV_ALLOWED_HOSTS,
++        "default_behaviour": (
++            "only the loopback/test names are accepted; set ERP_ALLOWED_HOSTS to the "
++            "deployment's public name(s) before exposing the API"
++        ),
++    }
+diff --git a/dz_erp/security_audit.py b/dz_erp/security_audit.py
+--- a/dz_erp/security_audit.py
++++ b/dz_erp/security_audit.py
+@@ -936,6 +936,47 @@
+     return user
+ 
+ 
++def reset_password_admin_secure(
++    db: ERPDatabase,
++    requesting_user_id: int,
++    auth_manager: Any,
++    *,
++    target_user_id: int,
++    new_password: str,
++) -> Dict[str, Any]:
++    """Administratively reset another user's password (SEC-13 lifecycle).
++
++    Administrators only, and only inside the admin's own company. The reset
++    revokes every token the target holds, so a compromised session dies with the
++    old password; the credential mechanics (policy, hashing, audit event,
++    revocation) live in :meth:`dz_erp.auth.AuthManager.set_password`, which
++    records the event as ``administrative_reset`` and attributes it to the admin.
++
++    Cross-tenant and non-existent targets are conflated on purpose: a 404 that
++    distinguishes "no such user" from "not your user" would enumerate accounts.
++    """
++    admin = _require_user_admin(db, requesting_user_id)
++    company_id = int(admin["company_id"])
++    with db.transaction() as conn:
++        target = conn.execute(
++            "SELECT * FROM users WHERE id = ? AND company_id = ?",
++            (target_user_id, company_id),
++        ).fetchone()
++    if target is None:
++        raise ValueError(f"User {target_user_id} not found in target company.")
++    auth_manager.set_password(
++        target_user_id,
++        new_password,
++        actor_user_id=int(admin["id"]),
++    )
++    return {
++        "user_id": int(target["id"]),
++        "username": target["username"],
++        "company_id": company_id,
++        "tokens_revoked": True,
++    }
++
++
+ def deactivate_user_secure(
+     db: ERPDatabase,
+     requesting_user_id: int,
+diff --git a/dz_erp/serve.py b/dz_erp/serve.py
+--- a/dz_erp/serve.py
++++ b/dz_erp/serve.py
+@@ -268,8 +268,18 @@
+ 
+     import uvicorn
+ 
++    # SEC-15: ``proxy_headers=False`` is deliberate. Uvicorn otherwise rewrites
++    # ``request.client`` from X-Forwarded-For for any peer listed in
++    # FORWARDED_ALLOW_IPS (loopback by default), which would bypass the
++    # application's own fail-closed policy in dz_erp/net.py and let a caller
++    # choose the address that lands in the audit trail. One trust layer, one
++    # source of truth: ERP_TRUSTED_PROXIES, read by the app, never by uvicorn.
+     uvicorn.run(
+-        build_app(), host=args.host, port=args.port, log_level=os.environ.get("ERP_LOG_LEVEL", "info")
++        build_app(),
++        host=args.host,
++        port=args.port,
++        log_level=os.environ.get("ERP_LOG_LEVEL", "info"),
++        proxy_headers=False,
+     )
+     return 0
+ 
+diff --git a/ops/erp.env.example b/ops/erp.env.example
+--- a/ops/erp.env.example
++++ b/ops/erp.env.example
+@@ -54,11 +54,31 @@
+ # only if the proxy in front cannot do it better.
+ ERP_RATE_LIMIT_PER_MINUTE=0
+ 
++# Minimum password length enforced for EVERY credential-creating path (admin
++# API, CLI --bootstrap-admin, self-service change, administrative reset).
++# The floor is 8 and cannot be configured lower; 12 is the recommended value
++# (NIST SP 800-63B favours length over composition). Raising it applies to new
++# and changed passwords only - existing credentials keep working until rotated.
++# ERP_PASSWORD_MIN_LENGTH=12
++
+ # --- Reverse proxy ----------------------------------------------------------
+ # Fail-closed: no entry means X-Forwarded-For is ignored entirely. Set this to
+ # the proxy's CIDR(s) if and only if every request really arrives through it.
++# NEVER list a range you do not control (0.0.0.0/0 hands IP spoofing back to
++# the caller). The application is the only layer that reads this: the server is
++# started with proxy_headers=False on purpose, so uvicorn never rewrites the
++# peer address from a header. Leave FORWARDED_ALLOW_IPS unset - it has no effect
++# here and setting it to "*" in a future wrapper would reintroduce the bypass.
+ # ERP_TRUSTED_PROXIES=10.0.0.0/8,127.0.0.1
+ 
++# --- Host header validation --------------------------------------------------
++# Every request's Host must match this list (exact names, or *.example.dz for a
++# subdomain wildcard); anything else is refused with 400 before routing. When
++# unset, only loopback/test names are accepted (localhost, 127.0.0.1, [::1],
++# testserver) - correct for a workstation, wrong for a public deployment, which
++# must set its real name(s). The proxy should enforce the same list.
++# ERP_ALLOWED_HOSTS=erp.example.dz,*.erp.example.dz
++
+ # --- API documentation ------------------------------------------------------
+ # /docs, /redoc and /openapi.json are 404 unless this is true. Keep false in
+ # staging and production.
+@@ -107,3 +127,11 @@
+ # application generates and persists the material beside the vault with
+ # owner-only permissions (docs/KEY_CUSTODY_THREAT_MODEL.md). Declaring
+ # ERP_KEY_PROVIDER=kms|hsm without a real provider makes start-up refuse.
++
++# --- V1 scope: not in this release ------------------------------------------
++# AWS KMS / HSM key custody and S3-compatible (MinIO/R2) backup storage are OUT
++# OF SCOPE for V1. No KMS client is bundled - declaring ERP_KEY_PROVIDER=kms|hsm
++# is refused at start-up rather than silently served by file-backed material -
++# and dz_erp/backup_storage_s3.py needs boto3, which is deliberately absent from
++# requirements.lock.txt. Local key custody and local backup storage are the
++# supported V1 configuration. See docs/PRODUCTION_DEPLOYMENT_GUIDE.md.
+diff --git a/tests/test_phase7_authentication_remediation.py b/tests/test_phase7_authentication_remediation.py
+--- a/tests/test_phase7_authentication_remediation.py
++++ b/tests/test_phase7_authentication_remediation.py
+@@ -981,7 +981,7 @@
+             "INSERT INTO companies (id, code, name, created_at) VALUES (1, 'DZ1', 'Tenant Alpha', '2026-01-01')"
+         )
+     auth = AuthManager(db, pbkdf2_iterations=FAST_ITERATIONS)
+-    auth.create_user(username="u1", password="P#2026x", role="clerk", company_id=1)
++    auth.create_user(username="u1", password="Prov#2026x", role="clerk", company_id=1)
+     del db, auth
+ 
+     db2 = ERPDatabase(db_path)  # must not raise on the second open
+@@ -1019,7 +1019,7 @@
+ 
+ def test_unknown_role_is_refused(env: SimpleNamespace) -> None:
+     with pytest.raises(ValueError):
+-        env.auth.create_user(username="x", password="P#2026x", role="superuser", company_id=1)
++        env.auth.create_user(username="x", password="Prov#2026x", role="superuser", company_id=1)
+ 
+ 
+ def test_empty_password_is_refused(env: SimpleNamespace) -> None:
+diff --git a/tests/test_phase8_upload_boundary_and_ci.py b/tests/test_phase8_upload_boundary_and_ci.py
+--- a/tests/test_phase8_upload_boundary_and_ci.py
++++ b/tests/test_phase8_upload_boundary_and_ci.py
+@@ -1292,10 +1292,15 @@
+     # tax/timbre-rules, POST tax/timbre-rules/{version_code}/approve), added to
+     # close finding R-05: without them the only way to adopt a new stamp-duty
+     # rule was raw SQL, which produced no actor, reason or audit event.
++    # + the 2 SEC-13 password-lifecycle endpoints (POST auth/password for
++    # self-service rotation, POST users/{user_id}/password-reset for an
++    # administrative reset). Both are authenticated, both require a verified
++    # bearer token, and they exist because a credential could previously only
++    # be replaced by re-creating the account.
+     # The count pin catches accidental surface changes; the desktop read
+     # endpoints are authenticated like every other protected operation.
+-    assert len(protected) == 33, (
+-        f"expected 33 protected operations, got {len(protected)}: {sorted(protected)}"
++    assert len(protected) == 35, (
++        f"expected 35 protected operations, got {len(protected)}: {sorted(protected)}"
+     )
+ 
+ 

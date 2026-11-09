@@ -1,0 +1,46 @@
+== changed files in the verified tree (code + tests + phase-5 docs) ==
+ M docs/PRODUCTION_DEPLOYMENT_GUIDE.md
+ M dz_erp/api.py
+ M dz_erp/auth.py
+ M dz_erp/decimal_utils.py
+ M dz_erp/intake_ocr.py
+ M dz_erp/net.py
+ M dz_erp/procurement_stock.py
+ M dz_erp/security_audit.py
+ M dz_erp/serve.py
+ M ops/erp.env.example
+ M tests/test_phase7_authentication_remediation.py
+ M tests/test_phase8_upload_boundary_and_ci.py
+?? docs/security/
+?? tests/test_phase58_security_selective_integration.py
+?? tests/test_phase59_sec13_14_15_closure.py
+
+== tracked modifications by area ==
+4
+test files changed (of which 2 modified, 2 new)
+
+== removed assertions / added skips in the cumulative patch ==
+removed-assert count: 1
+-    assert len(protected) == 33, (
+added-skip count: 0
+
+== untracked docs carried by the tree (docs/security was never tracked at this base) ==
+PHASE5_B1_LOCAL_VAULT_RELEASE_GATE_REPORT.md
+SECURITY_RESIDUAL_RISKS.md
+phase5_release_gate
+
+== diffstat (tracked files) ==
+ 12 files changed, 1057 insertions(+), 40 deletions(-)
+
+== environment ==
+Python 3.11.2 (main, Apr  8 2026, 01:58:00) [GCC 12.2.0]
+cryptography           50.0.0
+fastapi                0.133.0
+httpx                  0.28.1
+pydantic               2.11.1
+pytest                 9.0.3
+ruff                   0.14.0
+starlette              1.3.1
+uvicorn                0.34.0
+Linux 6.1.158+
+cores: 2

@@ -38,6 +38,97 @@ REVISABLE_INVOICE_STATES = ("NeedsReview", "DuplicateRejected", "Validated")
 NON_LIVE_INVOICE_STATES = ("Rejected", "DuplicateRejected")
 
 
+#: The three methods the ``supplier_invoices.payment_method`` CHECK constraint
+#: accepts. Validating them here turns a rejected value into a clean 422
+#: instead of a ``sqlite3.IntegrityError`` escaping the API as a 500.
+VALID_PAYMENT_METHODS = ("CASH", "BANK_TRANSFER", "CHEQUE")
+MAX_SUPPLIER_INVOICE_NO_LENGTH = 128
+
+
+def _require_supplier_invoice_no(value: Any) -> str:
+    """Refuse a missing or oversized supplier reference before any write."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("supplier_invoice_no is required.")
+    if len(value.strip()) > MAX_SUPPLIER_INVOICE_NO_LENGTH:
+        raise ValueError(
+            f"supplier_invoice_no exceeds {MAX_SUPPLIER_INVOICE_NO_LENGTH} characters."
+        )
+    return value
+
+
+def _parse_invoice_date(value: Any) -> datetime:
+    """Parse an ISO ``YYYY-MM-DD`` calendar date, refusing anything else.
+
+    ``int(invoice_date[:4])`` never looked past the first four characters: an
+    empty value raised ``TypeError``, ``2026-13-45`` was silently accepted, and
+    the internal parser text ("invalid literal for int() ...") was echoed to the
+    caller as a 500 body. Parsing once here validates the whole date *and*
+    supplies the fiscal year the duplicate check keys on.
+    """
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "invoice_date must be a valid calendar date in YYYY-MM-DD form."
+        ) from exc
+
+
+def _require_valid_payment_method(value: Any) -> str:
+    if value not in VALID_PAYMENT_METHODS:
+        raise ValueError(
+            f"payment_method {value!r} is not supported; "
+            f"expected one of {sorted(VALID_PAYMENT_METHODS)}."
+        )
+    return str(value)
+
+
+def compute_line_ht_dzd(qty: Any, unit_price_dzd: Any, discount_pct: Any = "0.00") -> str:
+    """Line net (HT) implied by quantity, unit price and discount, formatted.
+
+    One definition of the arithmetic the validator compares a declared line
+    amount against, so a line that omits ``line_ht_dzd`` is derived with exactly
+    the rule it will be judged by rather than raising on ``None``.
+    """
+    qty_dec = round_qty(qty)
+    pu_dec = round_qty(unit_price_dzd)
+    disc_dec = to_decimal("0.00" if discount_pct is None else discount_pct)
+    expected = round_dzd(
+        qty_dec * pu_dec * ((Decimal("100.00") - disc_dec) / Decimal("100.00"))
+    )
+    return format_dzd(expected)
+
+
+def _materialise_line_ht(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return copies of *lines* with an omitted or null ``line_ht_dzd`` filled in.
+
+    ``line_ht_dzd`` is optional in the request model (``InvoiceLineInput``), but
+    the payload digest and the arithmetic check both need a concrete value:
+    ``compute_invoice_payload_hash`` formats ``line["line_ht_dzd"]`` and the
+    validator rounds it. Deriving it here, before either runs, is what stops an
+    omitted amount from surfacing as an unhandled ``KeyError`` (or, before the
+    digest was reached, ``TypeError``) instead of a validated invoice.
+
+    A missing quantity or unit price cannot be derived from anything, so it is
+    reported as a ``ValueError`` - the documented request-contract error that the
+    API maps to 422 - rather than leaking a ``KeyError`` as a 500.
+    """
+    materialised: List[Dict[str, Any]] = []
+    for idx, line in enumerate(lines):
+        current = dict(line)
+        if current.get("qty") is None:
+            raise ValueError(f"LINE_{idx + 1}_QTY_REQUIRED:qty is required.")
+        if current.get("unit_price_dzd") is None:
+            raise ValueError(
+                f"LINE_{idx + 1}_UNIT_PRICE_REQUIRED:unit_price_dzd is required."
+            )
+        if current.get("line_ht_dzd") is None:
+            current["line_ht_dzd"] = compute_line_ht_dzd(
+                current["qty"], current["unit_price_dzd"], current.get("discount_pct")
+            )
+        materialised.append(current)
+    return materialised
+
+
 def compute_invoice_payload_hash(
     supplier_id: int,
     supplier_invoice_no: str,
@@ -1157,8 +1248,23 @@ def _create_and_validate_supplier_invoice(
 ) -> Dict[str, Any]:
     """The creating transaction (see the public wrapper for the refusal contract)."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    # SEC-05: ``line_ht_dzd`` is optional in the public request model, yet both
+    # the payload digest (``compute_invoice_payload_hash`` formats
+    # ``line["line_ht_dzd"]``) and ``_validate_invoice_lines`` consume it. Derive
+    # an omitted/null amount with the same rule the validator compares against,
+    # *before* the digest is computed, so that (a) the digest is stable for two
+    # payloads that mean the same thing, and (b) a value that cannot be derived
+    # is refused as a clean ValueError before any hash, audit row or invoice
+    # write exists.
+    lines = _materialise_line_ht(lines)
+    # Request-shape validation happens before any rule runs and before any
+    # write, so a malformed request is the documented 422 (ValueError) rather
+    # than a 500 from a string slice or a CHECK-constraint IntegrityError.
+    _require_supplier_invoice_no(supplier_invoice_no)
+    invoice_day = _parse_invoice_date(invoice_date)
+    _require_valid_payment_method(payment_method)
     norm_ref = normalize_invoice_ref(supplier_invoice_no)
-    fiscal_year = int(invoice_date[:4])
+    fiscal_year = invoice_day.year
 
     ht_dec = round_dzd(amount_ht_dzd)
     tva_dec = round_dzd(amount_tva_dzd)
@@ -1449,7 +1555,12 @@ def revalidate_supplier_invoice(
         if new_method not in ("CASH", "BANK_TRANSFER", "CHEQUE"):
             raise ValueError(f"UNSUPPORTED_PAYMENT_METHOD:{new_method}")
         norm_ref = normalize_invoice_ref(new_no)
-        fiscal_year = int(new_date[:4])
+        # A correction goes through the same request-shape validation as a
+        # creation: a date that cannot be parsed is a 422, and the fiscal year
+        # comes from the parsed date rather than its first four characters.
+        _require_supplier_invoice_no(new_no)
+        fiscal_year = _parse_invoice_date(new_date).year
+        _require_valid_payment_method(new_method)
 
         if lines is None:
             # No new line set supplied: re-validate the stored lines as they are.
@@ -1474,6 +1585,10 @@ def revalidate_supplier_invoice(
             raise FinancialIntegrityError(
                 "INVOICE_HAS_NO_LINES: an invoice without lines cannot be validated."
             )
+        # SEC-05 applies to corrections too: ``InvoiceLineInput.line_ht_dzd`` is
+        # optional, so a corrected line can arrive without it and the payload
+        # digest would subscript a missing key.
+        lines = _materialise_line_ht(lines)
 
         ht_dec = round_dzd(amount_ht_dzd if amount_ht_dzd is not None else inv["amount_ht_dzd"])
         tva_dec = round_dzd(amount_tva_dzd if amount_tva_dzd is not None else inv["amount_tva_dzd"])

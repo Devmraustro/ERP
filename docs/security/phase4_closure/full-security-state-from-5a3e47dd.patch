@@ -1,0 +1,1494 @@
+diff --git a/docs/PRODUCTION_DEPLOYMENT_GUIDE.md b/docs/PRODUCTION_DEPLOYMENT_GUIDE.md
+index b21bf6a..b5821c5 100644
+--- a/docs/PRODUCTION_DEPLOYMENT_GUIDE.md
++++ b/docs/PRODUCTION_DEPLOYMENT_GUIDE.md
+@@ -128,6 +128,80 @@ Scaling horizontally is a design change, not a compose edit.
+ * Set a request body limit aligned with `ERP_MAX_UPLOAD_BYTES`.
+ * Do not expose `/docs` even if `ERP_DOCS_ENABLED` is true.
+ 
++### 6.1 TLS and Host hardening (SEC-15)
++
++The service speaks plain HTTP and expects TLS to end in front of it. The
++application now validates the `Host` header itself: every request whose `Host`
++does not match `ERP_ALLOWED_HOSTS` is refused with `400 Invalid Host header.`
++before routing, and the refusal is logged as `SECURITY_HOST_HEADER_REJECTED`.
++When `ERP_ALLOWED_HOSTS` is unset only loopback/test names are accepted, so a
++public deployment **must** set it:
++
++```
++ERP_ALLOWED_HOSTS=erp.example.dz,*.erp.example.dz
++ERP_TRUSTED_PROXIES=<the proxy's own address>/32
++```
++
++Configuration rules, in order of how often they are got wrong:
++
++1. **One trust layer.** The server starts with `proxy_headers=False`, so uvicorn
++   never rewrites the peer address from a header; `ERP_TRUSTED_PROXIES` is the
++   only thing that decides whether `X-Forwarded-For` is believed. Do not set
++   `FORWARDED_ALLOW_IPS` — and never to `*` — in a wrapper script; that would
++   reintroduce the bypass this configuration exists to prevent.
++2. **Never trust a range you do not control.** `0.0.0.0/0` or `::/0` in
++   `ERP_TRUSTED_PROXIES` hands IP spoofing (and the audit trail) back to the
++   caller. Leave the variable unset when there is no proxy.
++3. **The proxy should enforce the same host list**, so an unknown name is
++   rejected before it reaches the application at all. The in-process check is the
++   backstop, not the primary control.
++4. **Headers the proxy must add**: `Strict-Transport-Security` (after the first
++   successful HTTPS deployment), `X-Content-Type-Options: nosniff`,
++   `X-Frame-Options: DENY` (or CSP `frame-ancestors 'none'`), and a body ceiling
++   (`client_max_body_size`) matching `ERP_MAX_REQUEST_BYTES`.
++5. **No cookies are used.** The API authenticates with a bearer token in the
++   `Authorization` header, which is not sent automatically by browsers, so there
++   is no CSRF surface to configure. If a cookie is ever introduced it must be
++   `Secure; HttpOnly; SameSite=Strict` and the CSRF story must be re-reviewed.
++
++### 6.2 Password policy (SEC-13)
++
++Every credential-creating path — the admin API, `--bootstrap-admin`, self-service
++change and administrative reset — applies the same policy in
++`dz_erp.auth.validate_password_policy`:
++
++* length floor `ERP_PASSWORD_MIN_LENGTH` (cannot be configured below 8; **12 is
++  the recommended value** for a deployment);
++* maximum 1024 characters (bounds the work per request);
++* no composition classes (NIST SP 800-63B favours length), but the password may
++  not equal the username or company name and a small weak-value list is refused;
++* hashing is PBKDF2-HMAC-SHA256 with 600,000 iterations; a credential created
++  under a lower iteration count is re-hashed automatically on its next
++  successful login (`AUTH_PASSWORD_REHASHED`).
++
++Lifecycle endpoints (both audit their outcome, both revoke live tokens):
++
++| Endpoint | Who | Effect |
++|---|---|---|
++| `POST /api/v1/auth/password` | the account holder | requires the current password; revokes **all** tokens, so the client re-authenticates |
++| `POST /api/v1/users/{id}/password-reset` | administrator, same company | sets a new password and revokes the target's tokens; cross-tenant targets answer 404 |
++
++There is no self-service "forgot password" flow in V1: an operator who cannot
++authenticate is reset by an administrator. A mailer-based reset is a separate
++feature with its own threat model (reset-link poisoning, which is why Host
++validation above matters).
++
++### 6.3 V1 scope: AWS KMS and MinIO/S3 are explicitly out
++
++| Capability | V1 status | Why |
++|---|---|---|
++| AWS KMS / HSM key custody | **not supported** | no KMS/HSM client is bundled; declaring `ERP_KEY_PROVIDER=kms|hsm` is refused at start-up instead of being served by file-backed material |
++| MinIO / S3-compatible backup storage | **not supported** | `dz_erp/backup_storage_s3.py` requires `boto3`, which is deliberately absent from the hash-locked `requirements.lock.txt` |
++
++Supported V1 configuration: local key custody (owner-only files, see
++`docs/KEY_CUSTODY_THREAT_MODEL.md`) and local backup storage. Anyone who enables
++either capability is running an untested, unverified configuration.
++
+ ## 7. Verification after start (all of these are operator steps)
+ 
+ ```bash
+diff --git a/dz_erp/api.py b/dz_erp/api.py
+index a4a394e..9d606d0 100644
+--- a/dz_erp/api.py
++++ b/dz_erp/api.py
+@@ -20,7 +20,7 @@ import sqlite3
+ import time
+ import uuid
+ from pathlib import Path
+-from typing import Any, Dict, List, Optional
++from typing import Any, Dict, List, Optional, Sequence
+ 
+ from fastapi import (
+     Depends,
+@@ -42,16 +42,28 @@ from .auth import (
+     AuthManager,
+     AuthenticatedUser,
+     DEFAULT_TOKEN_TTL_SECONDS,
++    InvalidCredentialError,
++    PasswordPolicyError,
++    configured_password_min_length,
+     parse_bearer_token,
++    validate_password_policy,
+ )
+ from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
+ from .intake_ocr import (
+     PrivateDocumentVault,
++    REVIEW_CAPABLE_ROLES,
+     decide_extracted_field_review,
+     update_extracted_field_by_human,
+     upload_and_process_supplier_document,
+ )
+-from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
++from .net import (
++    TrustedProxyPolicy,
++    allowed_hosts_from_env,
++    describe_allowed_hosts,
++    describe_trusted_proxy_policy,
++    host_is_allowed,
++    trusted_proxy_policy_from_env,
++)
+ from .request_id import sanitize_request_id
+ from .localization import (
+     TimbreRuleAdministrationError,
+@@ -81,6 +93,7 @@ from .security_audit import (
+     JsonlSecurityLog,
+     StructuredRedactingLogger,
+     create_user_admin_secure,
++    reset_password_admin_secure,
+     deactivate_user_secure,
+     evaluate_document_review_policy_secure,
+     list_extracted_fields_secure,
+@@ -91,6 +104,7 @@ from .security_audit import (
+     read_source_document_content_secure,
+     read_source_document_file_secure,
+     read_supplier_invoice_secure,
++    require_role_secure,
+     trial_balance_secure,
+ )
+ from .upload import (
+@@ -234,10 +248,79 @@ class LoginRequest(BaseModel):
+     password: str
+ 
+ 
++class PasswordChangeInput(BaseModel):
++    """Self-service rotation: prove the old credential, supply the new one."""
++
++    current_password: str
++    new_password: str
++
++
++class PasswordResetInput(BaseModel):
++    """Administrative reset: the admin supplies the target's new password."""
++
++    new_password: str
++
++
+ class RevokeRequest(BaseModel):
+     reason: str = "USER_LOGOUT"
+ 
+ 
++# ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` section 1 grants "Upload
++# Document / Edit OCR Draft" to clerk, approver, accountant and admin, and
++# denies it to warehouse, auditor, ocr_worker and treasury. The document-review
++# guards in :mod:`dz_erp.intake_ocr` already enforce it for field decisions via
++# ``REVIEW_CAPABLE_ROLES``; the upload endpoint did not consult any role, so it
++# reuses exactly that constant instead of defining a second copy of the matrix.
++DOCUMENT_INTAKE_ROLES = REVIEW_CAPABLE_ROLES
++
++# The upload endpoint bounds its own body while streaming (dz_erp/upload.py),
++# but every JSON endpoint - including the unauthenticated token endpoint -
++# accepted a body of any size, so a single request could make the process
++# buffer an arbitrary amount of memory before any rule ran. This is a
++# first-line, application-level cap read from the declared Content-Length; a
++# chunked request without that header still relies on the proxy limit and on
++# the upload reader's streaming bound (documented, not assumed).
++ENV_MAX_REQUEST_BYTES = "ERP_MAX_REQUEST_BYTES"
++DEFAULT_MAX_JSON_REQUEST_BYTES = 2 * 1024 * 1024  # ~10k invoice lines of JSON
++MULTIPART_FRAMING_ALLOWANCE = 1024 * 1024  # RFC 7578 framing is per part
++REQUEST_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
++UPLOAD_PATH = "/api/v1/documents/upload"
++
++# Baseline browser-facing hardening. The API is JSON-first, but two endpoints
++# return operator-supplied bytes (a stored document) and every response carries
++# tenant-scoped financial data, so: ``nosniff`` stops a browser re-interpreting
++# a stored document or an error body as an active type, ``DENY``/``no-referrer``
++# keep a rendered response from being framed or leaking its URL, and
++# ``no-store`` keeps authenticated financial data out of shared caches. No CSP
++# is set: this service returns no HTML, and a policy that permitted nothing
++# would only invite a future relaxation without a reason.
++SECURITY_RESPONSE_HEADERS = {
++    "X-Content-Type-Options": "nosniff",
++    "Referrer-Policy": "no-referrer",
++    "X-Frame-Options": "DENY",
++}
++
++
++def _configured_max_request_bytes(path: str) -> int:
++    """Body cap for *path*: the upload limit for uploads, else the JSON cap.
++
++    A malformed or non-positive ``ERP_MAX_REQUEST_BYTES`` override is ignored,
++    so a typo can never silently disable the limit (fail-closed, like
++    :func:`dz_erp.upload.configured_max_upload_bytes`).
++    """
++    if path == UPLOAD_PATH:
++        return configured_max_upload_bytes() + MULTIPART_FRAMING_ALLOWANCE
++    raw = os.environ.get(ENV_MAX_REQUEST_BYTES)
++    if raw is not None and raw.strip():
++        try:
++            override = int(raw.strip())
++        except ValueError:
++            override = 0
++        if override > 0:
++            return override
++    return DEFAULT_MAX_JSON_REQUEST_BYTES
++
++
+ def create_erp_fastapi_app(
+     db: ERPDatabase,
+     vault: PrivateDocumentVault,
+@@ -247,6 +330,7 @@ def create_erp_fastapi_app(
+     trusted_proxies: Optional[TrustedProxyPolicy] = None,
+     docs_enabled: bool = False,
+     throttle: Optional[RequestThrottle] = None,
++    allowed_hosts: Optional[Sequence[str]] = None,
+ ) -> FastAPI:
+     # Secure default: docs disabled unless explicitly enabled for local development
+     docs_url = "/docs" if docs_enabled else None
+@@ -280,6 +364,11 @@ def create_erp_fastapi_app(
+     # explicitly configured, X-Forwarded-For is ignored and the direct peer
+     # address is used.  See dz_erp/net.py.
+     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
++    # SEC-15: Host header validation. ``None`` means "read ERP_ALLOWED_HOSTS",
++    # whose fallback is the loopback/test set — never "accept anything".
++    app.state.allowed_hosts = (
++        tuple(allowed_hosts) if allowed_hosts is not None else allowed_hosts_from_env()
++    )
+     # Failed-authentication and (optionally) per-client request throttling.
+     # See dz_erp/rate_limit.py: fail-closed, audited, bounded, and either
+     # in-process (default) or shared through the application database when
+@@ -299,6 +388,34 @@ def create_erp_fastapi_app(
+     # (never the query string, never headers, never a body) and the outcome are
+     # recorded: the structured logger redacts anything secret-bearing that a
+     # caller passes to it explicitly.
++    # ------------------------------------------------------------------
++    # Host header validation (SEC-15)
++    # ------------------------------------------------------------------
++    # Registered first, so it sits *inside* the logging layer and a refusal is
++    # recorded like any other 4xx. The proxy is expected to reject unknown names
++    # too; this is the backstop that does not depend on the proxy's config.
++    @app.middleware("http")
++    async def _validate_host_header(request: Request, call_next: Any) -> Any:
++        host = request.headers.get("host")
++        if not host_is_allowed(host, app.state.allowed_hosts):
++            corr_id, _ = sanitize_request_id(request.headers.get("X-Request-Id"))
++            logger.log(
++                "WARNING",
++                "SECURITY_HOST_HEADER_REJECTED",
++                corr_id,
++                # The offending value is echoed only in a bounded, printable form
++                # and is never used for routing, attribution or audit identity.
++                host=str(host or "")[:255],
++                path=request.url.path,
++                method=request.method,
++            )
++            return JSONResponse(
++                status_code=400,
++                content={"detail": "Invalid Host header."},
++                headers={"X-Request-Id": corr_id},
++            )
++        return await call_next(request)
++
+     @app.middleware("http")
+     async def _log_request(request: Request, call_next: Any) -> Any:
+         # A client may propose a correlation id, but only a bounded, printable
+@@ -355,6 +472,62 @@ def create_erp_fastapi_app(
+         )
+         return response
+ 
++    # ------------------------------------------------------------------
++    # Bounded request bodies and browser-facing hardening headers
++    # ------------------------------------------------------------------
++    # Registered *after* ``_log_request``. Starlette wraps the stack with the
++    # most recently added middleware outermost, so this layer runs *first* on
++    # the way in (it can refuse a body before anything reads or binds it) and
++    # *last* on the way out (it decorates every response, including the
++    # 401/403/429 the inner layers produce, and the 413 it produces itself).
++    # The correlation id is derived from the same header through the same
++    # sanitiser as the inner layer, so both agree and a refused request still
++    # quotes the id an operator can search for. ``setdefault`` everywhere means
++    # a header the inner layer already set is never duplicated or overwritten.
++    @app.middleware("http")
++    async def _body_limit_and_security_headers(request: Request, call_next: Any) -> Any:
++        corr_id, _supplied_id_accepted = sanitize_request_id(
++            request.headers.get("X-Request-Id")
++        )
++        if request.method in REQUEST_BODY_METHODS:
++            limit = _configured_max_request_bytes(request.url.path)
++            declared = request.headers.get("content-length")
++            declared_bytes: Optional[int] = None
++            if declared is not None:
++                try:
++                    declared_bytes = int(declared)
++                except ValueError:
++                    declared_bytes = None
++            if declared_bytes is not None and declared_bytes > limit:
++                # Refuse before the body is read, before any router dependency
++                # runs (so before authentication) and before any side effect.
++                logger.log(
++                    "WARNING",
++                    "SECURITY_REQUEST_BODY_LIMIT_EXCEEDED",
++                    corr_id,
++                    method=request.method,
++                    path=request.url.path,
++                    limit_bytes=limit,
++                    declared_bytes=declared_bytes,
++                )
++                return JSONResponse(
++                    status_code=413,
++                    content={
++                        "detail": f"Request body exceeds the maximum of {limit} bytes."
++                    },
++                    headers={**SECURITY_RESPONSE_HEADERS, "X-Request-Id": corr_id},
++                )
++        response = await call_next(request)
++        for name, value in SECURITY_RESPONSE_HEADERS.items():
++            response.headers.setdefault(name, value)
++        # Authenticated responses carry tenant-scoped financial data: keep them
++        # out of shared caches. Unauthenticated responses (health, policy) are
++        # deliberately left cacheable.
++        if request.headers.get("authorization"):
++            response.headers.setdefault("Cache-Control", "no-store")
++        response.headers.setdefault("X-Request-Id", corr_id)
++        return response
++
+     def _authenticate(
+         request: Request,
+         authorization: Optional[str] = Header(default=None, alias="Authorization"),
+@@ -557,6 +730,75 @@ def create_erp_fastapi_app(
+             "expires_at": auth.expires_at,
+         }
+ 
++    @app.post("/api/v1/auth/password")
++    def api_change_password(
++        body: PasswordChangeInput,
++        auth: AuthenticatedUser = Depends(_authenticate),
++    ) -> Dict[str, Any]:
++        """Change the caller's own password (SEC-13 lifecycle).
++
++        The current password must verify, so a stolen session token alone cannot
++        take over the account's credential. Success revokes **every** token for
++        the account — including the one used for this call — because a password
++        change is exactly the moment an operator wants other sessions gone. The
++        client re-authenticates with the new password.
++        """
++        try:
++            app.state.auth_manager.change_own_password(
++                auth.user_id, body.current_password, body.new_password
++            )
++        except PasswordPolicyError as exc:
++            raise HTTPException(
++                status_code=422,
++                detail=exc.detail,
++                headers={"X-Error-Code": exc.code},
++            ) from exc
++        except InvalidCredentialError as exc:
++            raise HTTPException(
++                status_code=401,
++                detail="The current password is incorrect.",
++                headers={"WWW-Authenticate": 'Bearer realm="algerian-ai-erp"'},
++            ) from exc
++        return {
++            "user_id": auth.user_id,
++            "changed": True,
++            "tokens_revoked": True,
++            "reauthenticate": True,
++            "min_password_length": configured_password_min_length(),
++        }
++
++    @app.post("/api/v1/users/{user_id}/password-reset")
++    def api_reset_user_password(
++        user_id: int,
++        body: PasswordResetInput,
++        auth: AuthenticatedUser = Depends(_authenticate),
++    ) -> Dict[str, Any]:
++        """Administratively reset a user's password in the caller's company.
++
++        Administrators only. The reset revokes the target's live tokens, so a
++        compromised session ends with the old credential. Cross-tenant and
++        non-existent targets are deliberately indistinguishable (404).
++        """
++        try:
++            result = reset_password_admin_secure(
++                db,
++                auth.user_id,
++                app.state.auth_manager,
++                target_user_id=user_id,
++                new_password=body.new_password,
++            )
++        except AuthorizationError as exc:
++            raise HTTPException(status_code=403, detail=str(exc)) from exc
++        except PasswordPolicyError as exc:
++            raise HTTPException(
++                status_code=422,
++                detail=exc.detail,
++                headers={"X-Error-Code": exc.code},
++            ) from exc
++        except ValueError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        return {"company_id": auth.company_id, "reset": result}
++
+     @app.post("/api/v1/auth/revoke")
+     def api_revoke_token(
+         body: RevokeRequest,
+@@ -595,6 +837,29 @@ def create_erp_fastapi_app(
+         corr_id = str(uuid.uuid4())
+         content: Optional[bytes] = None
+         try:
++            # 0. Authorization before any bytes are parsed. A role the matrix
++            #    denies must not be able to make the server stream, buffer, OCR
++            #    or vault a document - and must not leave a stored file behind
++            #    once refused. The role comes from the credential's user row.
++            try:
++                require_role_secure(
++                    db,
++                    auth.user_id,
++                    DOCUMENT_INTAKE_ROLES,
++                    action="document upload",
++                    target_model="source_documents",
++                    target_id="upload",
++                )
++            except AuthorizationError as exc:
++                logger.log(
++                    "WARNING",
++                    "SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
++                    corr_id,
++                    role=auth.role,
++                    action="document upload",
++                )
++                raise HTTPException(status_code=403, detail=str(exc)) from exc
++
+             # 1. Type allowlist: filename extension and declared MIME must both be
+             #    allowed and must agree.  Neither is trusted on its own.
+             declared_mime = validate_upload_metadata(file.filename, file.content_type)
+@@ -1042,6 +1307,12 @@ def create_erp_fastapi_app(
+             rows = list_supplier_invoices_secure(db, auth.user_id, limit=limit)
+         except (AuthorizationError, TenantIsolationError) as exc:
+             raise HTTPException(status_code=403, detail=str(exc)) from exc
++        except ValueError as exc:
++            # A limit outside the documented 1..500 window is a request-contract
++            # error. Without this branch the clamp raised out of the handler as
++            # an unhandled 500, unlike every other list endpoint (the read API
++            # answers 422 for the same mistake).
++            raise HTTPException(status_code=422, detail=str(exc)) from exc
+         return {"company_id": auth.company_id, "invoices": rows, "count": len(rows)}
+ 
+     @app.get("/api/v1/accounting/trial-balance")
+@@ -1179,7 +1450,13 @@ def create_erp_fastapi_app(
+             raise HTTPException(status_code=403, detail="Administrator role required")
+         described = describe_throttle_policy(app.state.throttle)
+         described["deployment_scope"] = format_rate_limit_scope(app.state.throttle)
+-        return {"company_id": auth.company_id, "rate_limit": described}
++        # SEC-15: the Host allow-list is a security knob an operator must be able
++        # to read back from the running process, not only from a config file.
++        return {
++            "company_id": auth.company_id,
++            "rate_limit": described,
++            "host_policy": describe_allowed_hosts(app.state.allowed_hosts),
++        }
+ 
+     # ------------------------------------------------------------------
+     # Timbre rule administration (Phase 46, finding R-05). The service refuses
+@@ -1296,11 +1573,27 @@ def create_erp_fastapi_app(
+         username = body.username.strip()
+         if not username:
+             raise HTTPException(status_code=422, detail="Username is required.")
+-        if len(body.password) < 8:
++        if len(username) > 64 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in username):
++            # A newline or other control character in a name forges log and
++            # audit lines, and an unbounded name bloats every event that
++            # attributes an action to it.
+             raise HTTPException(
+                 status_code=422,
+-                detail="Password must be at least 8 characters long.",
++                detail="Username must be at most 64 characters and contain no control characters.",
+             )
++        # SEC-13: the policy lives in one place (dz_erp.auth) so the CLI
++        # bootstrap, this route and any future provisioning path cannot drift.
++        # ``detail`` stays a human-readable string (the existing client contract);
++        # the stable machine code travels in a header so a client can branch on it
++        # without parsing English.
++        try:
++            validate_password_policy(body.password, username=username)
++        except PasswordPolicyError as exc:
++            raise HTTPException(
++                status_code=422,
++                detail=exc.detail,
++                headers={"X-Error-Code": exc.code},
++            ) from exc
+         try:
+             user = create_user_admin_secure(
+                 db,
+diff --git a/dz_erp/auth.py b/dz_erp/auth.py
+index 4f120b3..38134a5 100644
+--- a/dz_erp/auth.py
++++ b/dz_erp/auth.py
+@@ -48,6 +48,122 @@ LOGIN_LOCKOUT_SECONDS = 15 * 60  # 15 minutes
+ MAX_PASSWORD_LENGTH = 1024  # bound PBKDF2 work per request
+ PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+ 
++# --------------------------------------------------------------------------
++# Password policy (SEC-13)
++# --------------------------------------------------------------------------
++# One chokepoint, used by every path that can create or change a credential:
++# the admin API, the CLI bootstrap (``--bootstrap-admin``), the secure
++# provisioning wrapper, and the self-service / admin reset endpoints. Before
++# this, the only length check lived in the ``POST /api/v1/users`` route, so a
++# provisioning script or the CLI could install a one-character password.
++#
++# The enforced floor stays at the documented 8 characters for V1 so existing
++# credentials and client contract are unchanged; deployments SHOULD raise
++# ``ERP_PASSWORD_MIN_LENGTH`` to the recommended 12 (NIST SP 800-63B rev.4
++# favours length over composition). The floor cannot be configured below 8.
++MIN_PASSWORD_LENGTH = 8
++RECOMMENDED_PASSWORD_MIN_LENGTH = 12
++MAX_PASSWORD_MIN_LENGTH = 64
++ENV_PASSWORD_MIN_LENGTH = "ERP_PASSWORD_MIN_LENGTH"
++
++# A deliberately short list of values that are guessed first in every
++# credential-stuffing corpus. It is an offline floor, not a substitute for a
++# breach-corpus check, and it never contains anything derived from user data.
++WEAK_PASSWORDS = frozenset(
++    {
++        "password",
++        "password1",
++        "passw0rd",
++        "12345678",
++        "123456789",
++        "1234567890",
++        "qwerty12",
++        "qwertyui",
++        "azertyui",
++        "motdepasse",
++        "changeme",
++        "letmein1",
++        "iloveyou",
++        "welcome1",
++        "admin123",
++        "administrateur",
++    }
++)
++
++
++class PasswordPolicyError(ValueError):
++    """A password that does not satisfy the policy.
++
++    Carries a stable machine-readable ``code`` so the API can answer 422 with
++    a reason a client (or the desktop UI) can act on, and so tests assert the
++    rule rather than an English sentence.
++    """
++
++    def __init__(self, code: str, message: str) -> None:
++        super().__init__(message)
++        self.code = code
++        self.detail = message
++
++
++def configured_password_min_length(env: Optional[dict] = None) -> int:
++    """The effective minimum length: ``ERP_PASSWORD_MIN_LENGTH``, floored at 8.
++
++    A malformed, empty or out-of-range value falls back to the floor instead of
++    raising: a typo in an operator's environment must never make credentials
++    weaker than the documented floor, and must not stop the API from starting.
++    """
++    source = os.environ if env is None else env
++    raw = str(source.get(ENV_PASSWORD_MIN_LENGTH) or "").strip()
++    if not raw:
++        return MIN_PASSWORD_LENGTH
++    try:
++        configured = int(raw)
++    except (TypeError, ValueError):
++        return MIN_PASSWORD_LENGTH
++    if configured < MIN_PASSWORD_LENGTH:
++        return MIN_PASSWORD_LENGTH
++    return min(configured, MAX_PASSWORD_MIN_LENGTH)
++
++
++def validate_password_policy(
++    password: str,
++    *,
++    username: Optional[str] = None,
++    company_name: Optional[str] = None,
++    env: Optional[dict] = None,
++) -> str:
++    """Validate a password against the policy; return it unchanged on success.
++
++    Raises :class:`PasswordPolicyError` with a stable code otherwise. The policy
++    is intentionally *not* compositional (no upper/lower/digit/symbol classes),
++    because composition rules push users towards predictable substitutions
++    without adding entropy; length, an equality check against the account's own
++    identifiers and a small weak-value list are the controls that pay.
++    """
++    if not isinstance(password, str) or not password:
++        raise PasswordPolicyError("PASSWORD_REQUIRED", "Password must be a non-empty string.")
++    if len(password) > MAX_PASSWORD_LENGTH:
++        raise PasswordPolicyError(
++            "PASSWORD_TOO_LONG",
++            f"Password exceeds the maximum accepted length of {MAX_PASSWORD_LENGTH} characters.",
++        )
++    minimum = configured_password_min_length(env)
++    if len(password) < minimum:
++        raise PasswordPolicyError(
++            "PASSWORD_TOO_SHORT",
++            f"Password must be at least {minimum} characters long.",
++        )
++    if not password.strip():
++        raise PasswordPolicyError("PASSWORD_WHITESPACE_ONLY", "Password must contain more than whitespace.")
++    folded = password.casefold()
++    for identifier, code in ((username, "PASSWORD_EQUALS_USERNAME"), (company_name, "PASSWORD_EQUALS_COMPANY_NAME")):
++        candidate = (identifier or "").strip().casefold()
++        if candidate and folded == candidate:
++            raise PasswordPolicyError(code, "Password must not be the account's own username or company name.")
++    if folded in WEAK_PASSWORDS:
++        raise PasswordPolicyError("PASSWORD_TOO_COMMON", "Password is a commonly-guessed value; choose another.")
++    return password
++
+ # Roles recognised by the schema CHECK constraint on users.role.
+ VALID_ROLES = (
+     "clerk",
+@@ -196,6 +312,24 @@ def verify_password(password: str, stored_hash: Optional[str]) -> bool:
+     return hmac.compare_digest(actual, expected)
+ 
+ 
++def _stored_iterations(stored_hash: Optional[str]) -> Optional[int]:
++    """The PBKDF2 iteration count a stored hash was produced with, or ``None``.
++
++    Used only by the rehash-on-login migration: an unparseable value simply
++    means "do not try to upgrade it", never "assume it is current".
++    """
++    if not stored_hash or not isinstance(stored_hash, str):
++        return None
++    parts = stored_hash.split("$")
++    if len(parts) != 4 or parts[0] != PASSWORD_HASH_ALGORITHM:
++        return None
++    try:
++        iterations = int(parts[1])
++    except (TypeError, ValueError):
++        return None
++    return iterations if iterations >= 1 else None
++
++
+ # --------------------------------------------------------------------------
+ # Token primitives
+ # --------------------------------------------------------------------------
+@@ -280,6 +414,8 @@ class AuthManager:
+     ) -> Dict[str, Any]:
+         if role not in VALID_ROLES:
+             raise ValueError(f"Unknown role '{role}'. Expected one of {list(VALID_ROLES)}.")
++        # SEC-13: every credential-creation path passes through one policy.
++        validate_password_policy(password, username=username)
+         password_hash = hash_password(password, iterations=self._pbkdf2_iterations)
+         now = _utcnow()
+         with self._db.transaction() as conn:
+@@ -304,32 +440,82 @@ class AuthManager:
+                 )
+         return {"user_id": user_id, "username": username, "role": role, "company_id": company_id}
+ 
+-    def set_password(self, user_id: int, new_password: str, *, actor_user_id: Optional[int] = None) -> None:
+-        """Rotate a user's password and revoke every token already issued to them."""
+-        password_hash = hash_password(new_password, iterations=self._pbkdf2_iterations)
++    def set_password(
++        self,
++        user_id: int,
++        new_password: str,
++        *,
++        actor_user_id: Optional[int] = None,
++        current_password: Optional[str] = None,
++    ) -> None:
++        """Rotate a user's password and revoke every token already issued to them.
++
++        ``current_password`` turns this into a *self-service* change: when it is
++        supplied it must verify against the stored hash, and a wrong value is
++        refused before anything is written (SEC-13 lifecycle gap: an operator
++        whose password leaked had no in-product way to rotate it). Omitting it
++        is the administrative reset path, which is guarded by the caller's role
++        check — the credential mechanics stay identical, so there is no second
++        implementation of password storage.
++        """
+         now = _utcnow()
++        rejection: Optional[Exception] = None
+         with self._db.transaction() as conn:
+             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+             if not user:
+                 raise ValueError(f"User {user_id} does not exist.")
+-            conn.execute(
+-                "UPDATE users SET password_hash = ?, password_updated_at = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
+-                (password_hash, _iso(now), user_id),
+-            )
+-            conn.execute(
+-                "UPDATE auth_tokens SET revoked_at = ?, revocation_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
+-                (_iso(now), "PASSWORD_ROTATED", user_id),
+-            )
+-            if actor_user_id is not None:
++            if current_password is not None and not verify_password(current_password, user["password_hash"]):
++                # Recorded inside the transaction and raised *after* it commits:
++                # raising here would roll the evidence of the refusal back with
++                # the (empty) write it is refusing.
+                 self._db.append_audit_event(
+                     conn=conn,
+                     company_id=int(user["company_id"]),
+-                    actor_user_id=actor_user_id,
++                    actor_user_id=actor_user_id if actor_user_id is not None else user_id,
++                    action_type="AUTH_PASSWORD_CHANGE_REJECTED",
++                    target_model="users",
++                    target_id=str(user_id),
++                    after_state={"reason": "CURRENT_PASSWORD_INVALID"},
++                )
++                rejection = InvalidCredentialError("The current password is incorrect.")
++            if rejection is None:
++                # Policy is applied after the identity/credential checks so a
++                # wrong current password is never distinguishable from a policy
++                # refusal.
++                validate_password_policy(new_password, username=user["username"])
++                password_hash = hash_password(new_password, iterations=self._pbkdf2_iterations)
++                conn.execute(
++                    "UPDATE users SET password_hash = ?, password_updated_at = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
++                    (password_hash, _iso(now), user_id),
++                )
++                revoked = conn.execute(
++                    "UPDATE auth_tokens SET revoked_at = ?, revocation_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
++                    (_iso(now), "PASSWORD_ROTATED", user_id),
++                ).rowcount
++                self._db.append_audit_event(
++                    conn=conn,
++                    company_id=int(user["company_id"]),
++                    actor_user_id=actor_user_id if actor_user_id is not None else user_id,
+                     action_type="AUTH_PASSWORD_ROTATED",
+                     target_model="users",
+                     target_id=str(user_id),
+-                    after_state={"username": user["username"], "tokens_revoked": True},
++                    after_state={
++                        "username": user["username"],
++                        "tokens_revoked": int(revoked or 0),
++                        "mode": "self_service" if current_password is not None else "administrative_reset",
++                    },
+                 )
++        if rejection is not None:
++            raise rejection
++
++    def change_own_password(self, user_id: int, current_password: str, new_password: str) -> None:
++        """Self-service rotation: prove the old credential, then replace it."""
++        self.set_password(
++            user_id,
++            new_password,
++            actor_user_id=user_id,
++            current_password=current_password,
++        )
+ 
+     def deactivate_user(self, user_id: int, *, actor_user_id: Optional[int] = None, reason: str = "DEACTIVATED") -> int:
+         """Disable a user and immediately revoke all of their live tokens."""
+@@ -407,6 +593,16 @@ class AuthManager:
+             self._register_failed_login(account, username, now)
+             raise InvalidCredentialError("Invalid username or password.")
+ 
++        # SEC-13: migrate a credential created under an older iteration floor the
++        # first time its owner proves it. Without this, raising the floor later
++        # is a flag day; with it, stored hashes upgrade in the background and the
++        # cost is paid once per credential. The plaintext is already verified, so
++        # this never weakens the check that just succeeded.
++        upgraded_hash: Optional[str] = None
++        stored_iterations = _stored_iterations(account["password_hash"])
++        if stored_iterations is not None and stored_iterations < self._pbkdf2_iterations:
++            upgraded_hash = hash_password(password, iterations=self._pbkdf2_iterations)
++
+         # Phase 2 — mint the token and reset the failure counters atomically.
+         token = generate_session_token()
+         token_hash = hash_token(token)
+@@ -426,6 +622,21 @@ class AuthManager:
+                 "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?",
+                 (account["id"],),
+             )
++            if upgraded_hash is not None:
++                conn.execute(
++                    "UPDATE users SET password_hash = ?, password_updated_at = ? WHERE id = ?",
++                    (upgraded_hash, _iso(now), account["id"]),
++                )
++                self._audit(
++                    conn,
++                    account,
++                    "AUTH_PASSWORD_REHASHED",
++                    {
++                        "username": account["username"],
++                        "from_iterations": stored_iterations,
++                        "to_iterations": self._pbkdf2_iterations,
++                    },
++                )
+             self._audit(
+                 conn,
+                 account,
+diff --git a/dz_erp/decimal_utils.py b/dz_erp/decimal_utils.py
+index 5aed97c..1fcd221 100644
+--- a/dz_erp/decimal_utils.py
++++ b/dz_erp/decimal_utils.py
+@@ -18,18 +18,35 @@ class FloatMonetaryError(TypeError):
+     """Raised when a binary float is passed into a financial calculation."""
+ 
+ 
+-def _require_finite(dec: Decimal, original: object) -> Decimal:
+-    """Refuse NaN and ±Infinity, which ``Decimal`` would otherwise carry silently.
++#: Largest decimal exponent accepted as a financial input. Algeria's annual GDP
++#: is of the order of 10**16 DZD, so no real amount or quantity in this system
++#: reaches 10**18; anything wider is either an attack or a client bug. It also
++#: keeps every quantize() inside the 28-digit decimal context: a value at this
++#: bound needs 18 integer + 2 fractional digits, comfortably below the width at
++#: which ``InvalidOperation`` starts escaping as an unhandled 500.
++MAX_ABSOLUTE_EXPONENT = 18
++
++
++def _require_supported_decimal(dec: Decimal, original: object) -> Decimal:
++    """Refuse values that are not finite or not representable as money.
+ 
+     ``Decimal('NaN')`` propagates through ``quantize`` without signalling, so an
+-    unchecked conversion lets a non-numeric string reach a money column (it is
+-    accepted and stored as the TEXT ``'NaN'``) instead of being refused. A
+-    financial value that is not a finite number is never a value: refuse it at
+-    the single conversion point every arithmetic helper goes through, so callers
+-    see the ordinary ``ValueError`` contract of this module.
++    unchecked conversion lets a non-numeric value reach a money column (it is
++    accepted and stored as the TEXT ``'NaN'``) instead of being refused;
++    ``sNaN``/``Infinity`` and magnitudes near or above the decimal context width
++    raise ``InvalidOperation`` instead, which is not a ``ValueError`` and used to
++    escape the API as an unhandled 500. Both are data-integrity defects in a
++    financial column, so both are refused here - at the single conversion point
++    every arithmetic helper goes through - and callers see this module's ordinary
++    ``ValueError`` contract.
+     """
+     if not dec.is_finite():
+         raise ValueError(f"Non-finite decimal is prohibited in financial calculations: {original!r}")
++    if dec != 0 and dec.adjusted() > MAX_ABSOLUTE_EXPONENT:
++        raise ValueError(
++            "Decimal magnitude exceeds the supported range "
++            f"(1e{MAX_ABSOLUTE_EXPONENT}): {original!r}"
++        )
+     return dec
+ 
+ 
+@@ -41,10 +58,14 @@ def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
+                 f"Binary float ({value!r}) is prohibited in financial calculations; pass Decimal or str."
+             )
+         value = str(value)
++    if isinstance(value, bool):
++        # bool is an int subclass: True would silently become the amount 1.00.
++        # A yes/no flag is not a financial value, so refuse it like a float.
++        raise TypeError("Boolean is not a valid decimal input.")
+     if isinstance(value, Decimal):
+-        return _require_finite(value, value)
++        return _require_supported_decimal(value, value)
+     if isinstance(value, int):
+-        return Decimal(value)
++        return _require_supported_decimal(Decimal(value), value)
+     if isinstance(value, str):
+         cleaned = value.strip().replace("\u00a0", "").replace(" ", "")
+         # Normalize French comma decimal separator if no dot is present
+@@ -56,7 +77,7 @@ def to_decimal(value: DecimalInput, allow_float: bool = False) -> Decimal:
+             dec = Decimal(cleaned)
+         except InvalidOperation as exc:
+             raise ValueError(f"Invalid decimal string: {value!r}") from exc
+-        return _require_finite(dec, value)
++        return _require_supported_decimal(dec, value)
+     raise TypeError(f"Unsupported type for Decimal conversion: {type(value).__name__}")
+ 
+ 
+diff --git a/dz_erp/intake_ocr.py b/dz_erp/intake_ocr.py
+index 89bff21..7661ea1 100644
+--- a/dz_erp/intake_ocr.py
++++ b/dz_erp/intake_ocr.py
+@@ -1605,7 +1605,37 @@ def update_extracted_field_by_human(
+     (``NeedsReview`` or ``Validated``) — once an approval exists, the document
+     is evidence for a decided invoice and its values are closed. Refusals are
+     audited before they are raised.
++
++    SEC-14: the value itself is validated against the field's class before it is
++    stored, using the very same validator the decision path
++    (:func:`dz_erp.review_policy.validate_corrected_value`) applies — this path
++    used to write any string into ``human_override_value`` *and*
++    ``normalized_value``, leaving the review policy to discover downstream that
++    the stored “correction” could not have appeared on any invoice. A rejected
++    value writes nothing and leaves its own audit record.
+     """
++    from .review_policy import TEXT_FALLBACK_RULE, rule_for, validate_corrected_value
++
++    rule = rule_for(field_name) or TEXT_FALLBACK_RULE
++    try:
++        new_value = validate_corrected_value(rule, new_value)
++    except ValueError as policy_error:
++        with db.transaction() as conn:
++            db.append_audit_event(
++                conn=conn,
++                company_id=company_id,
++                actor_user_id=user_id,
++                action_type="SECURITY_FIELD_EDIT_REJECTED",
++                target_model="ocr_extracted_fields",
++                target_id=document_id,
++                after_state={
++                    "field_name": field_name,
++                    "value_class": rule.value_class,
++                    "reason": str(policy_error)[:200],
++                },
++            )
++        raise FinancialIntegrityError(f"FIELD_VALUE_REJECTED:{policy_error}") from policy_error
++
+     now_iso = datetime.now(timezone.utc).isoformat()
+     denial: Optional[Exception] = None
+     with db.transaction() as conn:
+diff --git a/dz_erp/net.py b/dz_erp/net.py
+index 799d3fa..d283735 100644
+--- a/dz_erp/net.py
++++ b/dz_erp/net.py
+@@ -29,8 +29,16 @@ import os
+ from typing import Iterable, List, Optional, Tuple
+ 
+ ENV_TRUSTED_PROXIES = "ERP_TRUSTED_PROXIES"
++ENV_ALLOWED_HOSTS = "ERP_ALLOWED_HOSTS"
+ UNKNOWN_IP = "unknown"
+ 
++#: Hostnames accepted when ``ERP_ALLOWED_HOSTS`` is unset. They cover loopback
++#: development, the container on a private network and the test client, and are
++#: the *only* names an unconfigured deployment will answer to: a request with
++#: any other ``Host`` header is refused with 400. A production deployment sets
++#: its real name(s); see docs/PRODUCTION_DEPLOYMENT_GUIDE.md.
++DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]", "testserver")
++
+ 
+ class TrustedProxyPolicy:
+     """Decides whether a forwarded client IP may be believed."""
+@@ -152,3 +160,96 @@ def describe_trusted_proxy_policy(policy: TrustedProxyPolicy) -> dict:
+         ),
+         "env_override": ENV_TRUSTED_PROXIES,
+     }
++
++
++# ---------------------------------------------------------------------------
++# Host header validation (SEC-15)
++# ---------------------------------------------------------------------------
++# ``Host`` is caller-controlled, and the application never validated it. Behind a
++# proxy that routes by name (or a cache that keys on it) an attacker-chosen Host
++# is the ingredient of cache poisoning, absolute-URL generation and — once a
++# password-reset mailer exists — reset-link poisoning. The proxy SHOULD reject
++# unknown names first; this is the in-process backstop that makes the answer
++# independent of proxy configuration mistakes.
++
++
++def parse_allowed_hosts(raw: object) -> Tuple[str, ...]:
++    """Normalise a comma/space separated host list into comparable patterns.
++
++    Entries are lower-cased, port suffixes are dropped, and a leading ``*.`` is
++    preserved as a wildcard. Empty or nonsensical entries are ignored rather
++    than widening the list.
++    """
++    if isinstance(raw, (list, tuple)):
++        items = [str(item) for item in raw]
++    else:
++        items = str(raw or "").replace(",", " ").split()
++    result: List[str] = []
++    for item in items:
++        candidate = item.strip().lower()
++        if not candidate:
++            continue
++        wildcard = candidate.startswith("*.")
++        if wildcard:
++            candidate = candidate[2:]
++        candidate = _strip_port(candidate)
++        if not candidate or "/" in candidate or any(ch.isspace() for ch in candidate):
++            continue
++        result.append(f"*.{candidate}" if wildcard else candidate)
++    return tuple(dict.fromkeys(result))
++
++
++def _strip_port(host: str) -> str:
++    """Drop a trailing ``:port`` from a Host value, keeping IPv6 literals intact."""
++    if not host:
++        return ""
++    if host.startswith("["):
++        closing = host.find("]")
++        return host[: closing + 1] if closing != -1 else host
++    if host.count(":") == 1:
++        name, _, port = host.partition(":")
++        if port.isdigit():
++            return name
++    return host
++
++
++def allowed_hosts_from_env(env: Optional[dict] = None) -> Tuple[str, ...]:
++    """The effective allow-list: ``ERP_ALLOWED_HOSTS`` or the loopback defaults."""
++    source = os.environ if env is None else env
++    parsed = parse_allowed_hosts(source.get(ENV_ALLOWED_HOSTS) or "")
++    return parsed or DEFAULT_ALLOWED_HOSTS
++
++
++def host_is_allowed(host_header: Optional[str], allowed: Iterable[str]) -> bool:
++    """Whether a ``Host`` header value matches the allow-list.
++
++    A missing or empty header is refused: an HTTP/1.0 client that omits ``Host``
++    is not something this API supports, and “no name” must never mean “any
++    name”.
++    """
++    host = _strip_port(str(host_header or "").strip().lower())
++    if not host:
++        return False
++    for pattern in allowed:
++        if pattern.startswith("*."):
++            suffix = pattern[1:]  # ".example.dz"
++            if host.endswith(suffix) and len(host) > len(suffix):
++                return True
++        elif host == pattern:
++            return True
++    return False
++
++
++def describe_allowed_hosts(allowed: Iterable[str]) -> dict:
++    """Machine-readable description of the active Host policy (for operators)."""
++    entries = list(allowed)
++    return {
++        "allowed_hosts": entries,
++        "allowed_host_count": len(entries),
++        "wildcards": [entry for entry in entries if entry.startswith("*.")],
++        "env_override": ENV_ALLOWED_HOSTS,
++        "default_behaviour": (
++            "only the loopback/test names are accepted; set ERP_ALLOWED_HOSTS to the "
++            "deployment's public name(s) before exposing the API"
++        ),
++    }
+diff --git a/dz_erp/procurement_stock.py b/dz_erp/procurement_stock.py
+index d35e24a..73ce1bd 100644
+--- a/dz_erp/procurement_stock.py
++++ b/dz_erp/procurement_stock.py
+@@ -38,6 +38,97 @@ REVISABLE_INVOICE_STATES = ("NeedsReview", "DuplicateRejected", "Validated")
+ NON_LIVE_INVOICE_STATES = ("Rejected", "DuplicateRejected")
+ 
+ 
++#: The three methods the ``supplier_invoices.payment_method`` CHECK constraint
++#: accepts. Validating them here turns a rejected value into a clean 422
++#: instead of a ``sqlite3.IntegrityError`` escaping the API as a 500.
++VALID_PAYMENT_METHODS = ("CASH", "BANK_TRANSFER", "CHEQUE")
++MAX_SUPPLIER_INVOICE_NO_LENGTH = 128
++
++
++def _require_supplier_invoice_no(value: Any) -> str:
++    """Refuse a missing or oversized supplier reference before any write."""
++    if not isinstance(value, str) or not value.strip():
++        raise ValueError("supplier_invoice_no is required.")
++    if len(value.strip()) > MAX_SUPPLIER_INVOICE_NO_LENGTH:
++        raise ValueError(
++            f"supplier_invoice_no exceeds {MAX_SUPPLIER_INVOICE_NO_LENGTH} characters."
++        )
++    return value
++
++
++def _parse_invoice_date(value: Any) -> datetime:
++    """Parse an ISO ``YYYY-MM-DD`` calendar date, refusing anything else.
++
++    ``int(invoice_date[:4])`` never looked past the first four characters: an
++    empty value raised ``TypeError``, ``2026-13-45`` was silently accepted, and
++    the internal parser text ("invalid literal for int() ...") was echoed to the
++    caller as a 500 body. Parsing once here validates the whole date *and*
++    supplies the fiscal year the duplicate check keys on.
++    """
++    try:
++        return datetime.strptime(str(value).strip(), "%Y-%m-%d")
++    except (TypeError, ValueError) as exc:
++        raise ValueError(
++            "invoice_date must be a valid calendar date in YYYY-MM-DD form."
++        ) from exc
++
++
++def _require_valid_payment_method(value: Any) -> str:
++    if value not in VALID_PAYMENT_METHODS:
++        raise ValueError(
++            f"payment_method {value!r} is not supported; "
++            f"expected one of {sorted(VALID_PAYMENT_METHODS)}."
++        )
++    return str(value)
++
++
++def compute_line_ht_dzd(qty: Any, unit_price_dzd: Any, discount_pct: Any = "0.00") -> str:
++    """Line net (HT) implied by quantity, unit price and discount, formatted.
++
++    One definition of the arithmetic the validator compares a declared line
++    amount against, so a line that omits ``line_ht_dzd`` is derived with exactly
++    the rule it will be judged by rather than raising on ``None``.
++    """
++    qty_dec = round_qty(qty)
++    pu_dec = round_qty(unit_price_dzd)
++    disc_dec = to_decimal("0.00" if discount_pct is None else discount_pct)
++    expected = round_dzd(
++        qty_dec * pu_dec * ((Decimal("100.00") - disc_dec) / Decimal("100.00"))
++    )
++    return format_dzd(expected)
++
++
++def _materialise_line_ht(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Return copies of *lines* with an omitted or null ``line_ht_dzd`` filled in.
++
++    ``line_ht_dzd`` is optional in the request model (``InvoiceLineInput``), but
++    the payload digest and the arithmetic check both need a concrete value:
++    ``compute_invoice_payload_hash`` formats ``line["line_ht_dzd"]`` and the
++    validator rounds it. Deriving it here, before either runs, is what stops an
++    omitted amount from surfacing as an unhandled ``KeyError`` (or, before the
++    digest was reached, ``TypeError``) instead of a validated invoice.
++
++    A missing quantity or unit price cannot be derived from anything, so it is
++    reported as a ``ValueError`` - the documented request-contract error that the
++    API maps to 422 - rather than leaking a ``KeyError`` as a 500.
++    """
++    materialised: List[Dict[str, Any]] = []
++    for idx, line in enumerate(lines):
++        current = dict(line)
++        if current.get("qty") is None:
++            raise ValueError(f"LINE_{idx + 1}_QTY_REQUIRED:qty is required.")
++        if current.get("unit_price_dzd") is None:
++            raise ValueError(
++                f"LINE_{idx + 1}_UNIT_PRICE_REQUIRED:unit_price_dzd is required."
++            )
++        if current.get("line_ht_dzd") is None:
++            current["line_ht_dzd"] = compute_line_ht_dzd(
++                current["qty"], current["unit_price_dzd"], current.get("discount_pct")
++            )
++        materialised.append(current)
++    return materialised
++
++
+ def compute_invoice_payload_hash(
+     supplier_id: int,
+     supplier_invoice_no: str,
+@@ -1157,8 +1248,23 @@ def _create_and_validate_supplier_invoice(
+ ) -> Dict[str, Any]:
+     """The creating transaction (see the public wrapper for the refusal contract)."""
+     now_iso = datetime.now(timezone.utc).isoformat()
++    # SEC-05: ``line_ht_dzd`` is optional in the public request model, yet both
++    # the payload digest (``compute_invoice_payload_hash`` formats
++    # ``line["line_ht_dzd"]``) and ``_validate_invoice_lines`` consume it. Derive
++    # an omitted/null amount with the same rule the validator compares against,
++    # *before* the digest is computed, so that (a) the digest is stable for two
++    # payloads that mean the same thing, and (b) a value that cannot be derived
++    # is refused as a clean ValueError before any hash, audit row or invoice
++    # write exists.
++    lines = _materialise_line_ht(lines)
++    # Request-shape validation happens before any rule runs and before any
++    # write, so a malformed request is the documented 422 (ValueError) rather
++    # than a 500 from a string slice or a CHECK-constraint IntegrityError.
++    _require_supplier_invoice_no(supplier_invoice_no)
++    invoice_day = _parse_invoice_date(invoice_date)
++    _require_valid_payment_method(payment_method)
+     norm_ref = normalize_invoice_ref(supplier_invoice_no)
+-    fiscal_year = int(invoice_date[:4])
++    fiscal_year = invoice_day.year
+ 
+     ht_dec = round_dzd(amount_ht_dzd)
+     tva_dec = round_dzd(amount_tva_dzd)
+@@ -1449,7 +1555,12 @@ def revalidate_supplier_invoice(
+         if new_method not in ("CASH", "BANK_TRANSFER", "CHEQUE"):
+             raise ValueError(f"UNSUPPORTED_PAYMENT_METHOD:{new_method}")
+         norm_ref = normalize_invoice_ref(new_no)
+-        fiscal_year = int(new_date[:4])
++        # A correction goes through the same request-shape validation as a
++        # creation: a date that cannot be parsed is a 422, and the fiscal year
++        # comes from the parsed date rather than its first four characters.
++        _require_supplier_invoice_no(new_no)
++        fiscal_year = _parse_invoice_date(new_date).year
++        _require_valid_payment_method(new_method)
+ 
+         if lines is None:
+             # No new line set supplied: re-validate the stored lines as they are.
+@@ -1474,6 +1585,10 @@ def revalidate_supplier_invoice(
+             raise FinancialIntegrityError(
+                 "INVOICE_HAS_NO_LINES: an invoice without lines cannot be validated."
+             )
++        # SEC-05 applies to corrections too: ``InvoiceLineInput.line_ht_dzd`` is
++        # optional, so a corrected line can arrive without it and the payload
++        # digest would subscript a missing key.
++        lines = _materialise_line_ht(lines)
+ 
+         ht_dec = round_dzd(amount_ht_dzd if amount_ht_dzd is not None else inv["amount_ht_dzd"])
+         tva_dec = round_dzd(amount_tva_dzd if amount_tva_dzd is not None else inv["amount_tva_dzd"])
+diff --git a/dz_erp/security_audit.py b/dz_erp/security_audit.py
+index 3298869..754e004 100644
+--- a/dz_erp/security_audit.py
++++ b/dz_erp/security_audit.py
+@@ -37,7 +37,7 @@ from .database import (
+     FinancialIntegrityError,
+     TenantIsolationError,
+ )
+-from .key_rotation import KeyConfigurationError, KeyRing
++from .key_rotation import KeyConfigurationError, KeyRing, atomic_write_bytes
+ from .decimal_utils import format_dzd, to_decimal
+ from .intake_ocr import VAULT_KEY_ENV, VAULT_KEY_SUFFIX, VAULT_KEYRING_SUFFIX, PrivateDocumentVault
+ from .review_policy import evaluate_document_review_policy
+@@ -805,6 +805,64 @@ def list_stock_quants_secure(
+     return db.list_stock_quants(scoped_company_id, limit=limit)
+ 
+ 
++def require_role_secure(
++    db: ERPDatabase,
++    requesting_user_id: int,
++    allowed_roles: Tuple[str, ...],
++    *,
++    action: str,
++    target_model: str = "api",
++    target_id: str = "-",
++) -> Dict[str, Any]:
++    """Refuse an operation unless the caller's server-side role is allowed.
++
++    ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` grants "Upload Document" to
++    ``clerk``, ``approver``, ``accountant`` and ``admin`` and explicitly denies
++    it to ``warehouse``, ``auditor``, ``ocr_worker`` and ``treasury``. The
++    document-intake endpoints predate that rule and consulted no role at all, so
++    any authenticated principal of a company - including the roles the matrix
++    denies - could create documents and make the server stream, buffer, OCR and
++    vault a file.
++
++    The role is read from the ``users`` row bound to the verified credential,
++    never from the request, and the refusal is written to the tenant's audit
++    chain (and committed) before the error is raised, exactly like the read-side
++    denials in :func:`list_supplier_invoices_secure` and the review guards in
++    :mod:`dz_erp.intake_ocr`.
++
++    Returns the user row so a caller that needs more than a boolean does not
++    have to read it twice.
++    """
++    denial: Optional[AuthorizationError] = None
++    user: Optional[Any] = None
++    with db.transaction() as conn:
++        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
++        if not user or not user["is_active"]:
++            raise AuthorizationError("User is inactive or revoked.")
++        if user["role"] not in allowed_roles:
++            db.append_audit_event(
++                conn=conn,
++                company_id=int(user["company_id"]),
++                actor_user_id=requesting_user_id,
++                action_type="SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
++                target_model=target_model,
++                target_id=str(target_id),
++                after_state={
++                    "role": user["role"],
++                    "action": action,
++                    "required_roles": list(allowed_roles),
++                },
++            )
++            denial = AuthorizationError(
++                f"Role '{user['role']}' is not authorized for {action}; "
++                f"required one of {list(allowed_roles)}."
++            )
++    if denial is not None:
++        raise denial
++    assert user is not None
++    return dict(user)
++
++
+ def _require_user_admin(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
+     """Guard shared by every user-administration operation: active admin only.
+ 
+@@ -878,6 +936,47 @@ def create_user_admin_secure(
+     return user
+ 
+ 
++def reset_password_admin_secure(
++    db: ERPDatabase,
++    requesting_user_id: int,
++    auth_manager: Any,
++    *,
++    target_user_id: int,
++    new_password: str,
++) -> Dict[str, Any]:
++    """Administratively reset another user's password (SEC-13 lifecycle).
++
++    Administrators only, and only inside the admin's own company. The reset
++    revokes every token the target holds, so a compromised session dies with the
++    old password; the credential mechanics (policy, hashing, audit event,
++    revocation) live in :meth:`dz_erp.auth.AuthManager.set_password`, which
++    records the event as ``administrative_reset`` and attributes it to the admin.
++
++    Cross-tenant and non-existent targets are conflated on purpose: a 404 that
++    distinguishes "no such user" from "not your user" would enumerate accounts.
++    """
++    admin = _require_user_admin(db, requesting_user_id)
++    company_id = int(admin["company_id"])
++    with db.transaction() as conn:
++        target = conn.execute(
++            "SELECT * FROM users WHERE id = ? AND company_id = ?",
++            (target_user_id, company_id),
++        ).fetchone()
++    if target is None:
++        raise ValueError(f"User {target_user_id} not found in target company.")
++    auth_manager.set_password(
++        target_user_id,
++        new_password,
++        actor_user_id=int(admin["id"]),
++    )
++    return {
++        "user_id": int(target["id"]),
++        "username": target["username"],
++        "company_id": company_id,
++        "tokens_revoked": True,
++    }
++
++
+ def deactivate_user_secure(
+     db: ERPDatabase,
+     requesting_user_id: int,
+@@ -983,7 +1082,15 @@ def create_encrypted_backup(
+     output_backup_path = Path(output_backup_path)
+     output_backup_path.parent.mkdir(parents=True, exist_ok=True)
+     tmp_dir = output_backup_path.parent / f".tmp_backup_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+-    tmp_dir.mkdir(parents=True, exist_ok=True)
++    # The staging directory holds the *plaintext* database snapshot, a copy of
++    # the encrypted vault and a manifest that carries the vault key, the audit
++    # HMAC secret and both key rings. Created with the process umask it would be
++    # 0755 and its files 0644 for the seconds it exists, which is readable by
++    # every local account; create it owner-only instead (best effort on
++    # platforms whose mode bits are synthetic).
++    os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
++    with contextlib.suppress(OSError):
++        os.chmod(tmp_dir, 0o700)
+ 
+     try:
+         db_snap_path = tmp_dir / "erp_snapshot.sqlite3"
+@@ -1041,7 +1148,12 @@ def create_encrypted_backup(
+                 json.dumps(audit_ring.to_dict(), sort_keys=True).encode("utf-8")
+             ).decode("ascii"),
+         }
+-        (tmp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
++        # The manifest carries key material, so it is written like every other
++        # key file: owner-only, atomically, never world-readable even briefly.
++        atomic_write_bytes(
++            tmp_dir / "manifest.json",
++            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
++        )
+ 
+         tar_buf = io.BytesIO()
+         with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
+@@ -1051,7 +1163,14 @@ def create_encrypted_backup(
+ 
+         fernet = Fernet(backup_encryption_key)
+         encrypted_archive = fernet.encrypt(tar_buf.getvalue())
+-        output_backup_path.write_bytes(encrypted_archive)
++        # The archive carries the vault and audit key rings inside the Fernet
++        # envelope - custody material either way - so it is published like every
++        # other key file in this project: created owner-only (0600), written to
++        # a temporary file in the same directory, fsynced and atomically renamed
++        # into place. That leaves no window in which it is group- or
++        # world-readable, and no partially written file that could later be
++        # mistaken for a good backup.
++        atomic_write_bytes(output_backup_path, encrypted_archive, mode=0o600)
+ 
+         return {
+             "backup_path": str(output_backup_path),
+diff --git a/dz_erp/serve.py b/dz_erp/serve.py
+index 5ffa5df..f5e3dab 100644
+--- a/dz_erp/serve.py
++++ b/dz_erp/serve.py
+@@ -268,8 +268,18 @@ def main(argv: Optional[list] = None) -> int:
+ 
+     import uvicorn
+ 
++    # SEC-15: ``proxy_headers=False`` is deliberate. Uvicorn otherwise rewrites
++    # ``request.client`` from X-Forwarded-For for any peer listed in
++    # FORWARDED_ALLOW_IPS (loopback by default), which would bypass the
++    # application's own fail-closed policy in dz_erp/net.py and let a caller
++    # choose the address that lands in the audit trail. One trust layer, one
++    # source of truth: ERP_TRUSTED_PROXIES, read by the app, never by uvicorn.
+     uvicorn.run(
+-        build_app(), host=args.host, port=args.port, log_level=os.environ.get("ERP_LOG_LEVEL", "info")
++        build_app(),
++        host=args.host,
++        port=args.port,
++        log_level=os.environ.get("ERP_LOG_LEVEL", "info"),
++        proxy_headers=False,
+     )
+     return 0
+ 
+diff --git a/ops/erp.env.example b/ops/erp.env.example
+index 8d54565..4e6ce10 100644
+--- a/ops/erp.env.example
++++ b/ops/erp.env.example
+@@ -54,11 +54,31 @@ ERP_RATE_LIMIT_FAILURE_MODE=fail_closed
+ # only if the proxy in front cannot do it better.
+ ERP_RATE_LIMIT_PER_MINUTE=0
+ 
++# Minimum password length enforced for EVERY credential-creating path (admin
++# API, CLI --bootstrap-admin, self-service change, administrative reset).
++# The floor is 8 and cannot be configured lower; 12 is the recommended value
++# (NIST SP 800-63B favours length over composition). Raising it applies to new
++# and changed passwords only - existing credentials keep working until rotated.
++# ERP_PASSWORD_MIN_LENGTH=12
++
+ # --- Reverse proxy ----------------------------------------------------------
+ # Fail-closed: no entry means X-Forwarded-For is ignored entirely. Set this to
+ # the proxy's CIDR(s) if and only if every request really arrives through it.
++# NEVER list a range you do not control (0.0.0.0/0 hands IP spoofing back to
++# the caller). The application is the only layer that reads this: the server is
++# started with proxy_headers=False on purpose, so uvicorn never rewrites the
++# peer address from a header. Leave FORWARDED_ALLOW_IPS unset - it has no effect
++# here and setting it to "*" in a future wrapper would reintroduce the bypass.
+ # ERP_TRUSTED_PROXIES=10.0.0.0/8,127.0.0.1
+ 
++# --- Host header validation --------------------------------------------------
++# Every request's Host must match this list (exact names, or *.example.dz for a
++# subdomain wildcard); anything else is refused with 400 before routing. When
++# unset, only loopback/test names are accepted (localhost, 127.0.0.1, [::1],
++# testserver) - correct for a workstation, wrong for a public deployment, which
++# must set its real name(s). The proxy should enforce the same list.
++# ERP_ALLOWED_HOSTS=erp.example.dz,*.erp.example.dz
++
+ # --- API documentation ------------------------------------------------------
+ # /docs, /redoc and /openapi.json are 404 unless this is true. Keep false in
+ # staging and production.
+@@ -72,6 +92,16 @@ ERP_DOCS_ENABLED=false
+ # --- Uploads ----------------------------------------------------------------
+ # ERP_MAX_UPLOAD_BYTES=20971520
+ 
++# --- Request bodies ---------------------------------------------------------
++# Application-level cap on any other JSON request body (bytes), checked from
++# the declared Content-Length before authentication, so one request cannot make
++# the process buffer an arbitrary amount of memory. The upload endpoint keeps
++# its own streaming bound above and allows this cap plus 1 MiB of multipart
++# framing. A malformed or non-positive value is ignored (the 2 MiB default
++# applies) so a typo cannot disable the limit. A chunked request without a
++# Content-Length is bounded by the reverse proxy, not here.
++# ERP_MAX_REQUEST_BYTES=2097152
++
+ # --- Security log rotation --------------------------------------------------
+ # The request log is written for every request (Phase 35), so rotation is not
+ # optional. These are the sizes the structured sink enforces; size them to the
+@@ -97,3 +127,11 @@ ERP_SECURITY_LOG_MAX_FILES=10
+ # application generates and persists the material beside the vault with
+ # owner-only permissions (docs/KEY_CUSTODY_THREAT_MODEL.md). Declaring
+ # ERP_KEY_PROVIDER=kms|hsm without a real provider makes start-up refuse.
++
++# --- V1 scope: not in this release ------------------------------------------
++# AWS KMS / HSM key custody and S3-compatible (MinIO/R2) backup storage are OUT
++# OF SCOPE for V1. No KMS client is bundled - declaring ERP_KEY_PROVIDER=kms|hsm
++# is refused at start-up rather than silently served by file-backed material -
++# and dz_erp/backup_storage_s3.py needs boto3, which is deliberately absent from
++# requirements.lock.txt. Local key custody and local backup storage are the
++# supported V1 configuration. See docs/PRODUCTION_DEPLOYMENT_GUIDE.md.
+diff --git a/tests/test_phase7_authentication_remediation.py b/tests/test_phase7_authentication_remediation.py
+index 26b89ec..172adfd 100644
+--- a/tests/test_phase7_authentication_remediation.py
++++ b/tests/test_phase7_authentication_remediation.py
+@@ -981,7 +981,7 @@ def test_reopening_a_migrated_database_is_idempotent(tmp_path: Path) -> None:
+             "INSERT INTO companies (id, code, name, created_at) VALUES (1, 'DZ1', 'Tenant Alpha', '2026-01-01')"
+         )
+     auth = AuthManager(db, pbkdf2_iterations=FAST_ITERATIONS)
+-    auth.create_user(username="u1", password="P#2026x", role="clerk", company_id=1)
++    auth.create_user(username="u1", password="Prov#2026x", role="clerk", company_id=1)
+     del db, auth
+ 
+     db2 = ERPDatabase(db_path)  # must not raise on the second open
+@@ -1019,7 +1019,7 @@ def test_list_active_tokens_exposes_no_secrets(env: SimpleNamespace) -> None:
+ 
+ def test_unknown_role_is_refused(env: SimpleNamespace) -> None:
+     with pytest.raises(ValueError):
+-        env.auth.create_user(username="x", password="P#2026x", role="superuser", company_id=1)
++        env.auth.create_user(username="x", password="Prov#2026x", role="superuser", company_id=1)
+ 
+ 
+ def test_empty_password_is_refused(env: SimpleNamespace) -> None:
+diff --git a/tests/test_phase8_upload_boundary_and_ci.py b/tests/test_phase8_upload_boundary_and_ci.py
+index f33e025..afddd94 100644
+--- a/tests/test_phase8_upload_boundary_and_ci.py
++++ b/tests/test_phase8_upload_boundary_and_ci.py
+@@ -1292,10 +1292,15 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
+     # tax/timbre-rules, POST tax/timbre-rules/{version_code}/approve), added to
+     # close finding R-05: without them the only way to adopt a new stamp-duty
+     # rule was raw SQL, which produced no actor, reason or audit event.
++    # + the 2 SEC-13 password-lifecycle endpoints (POST auth/password for
++    # self-service rotation, POST users/{user_id}/password-reset for an
++    # administrative reset). Both are authenticated, both require a verified
++    # bearer token, and they exist because a credential could previously only
++    # be replaced by re-creating the account.
+     # The count pin catches accidental surface changes; the desktop read
+     # endpoints are authenticated like every other protected operation.
+-    assert len(protected) == 33, (
+-        f"expected 33 protected operations, got {len(protected)}: {sorted(protected)}"
++    assert len(protected) == 35, (
++        f"expected 35 protected operations, got {len(protected)}: {sorted(protected)}"
+     )
+ 
+ 

@@ -1,0 +1,34 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index dd7894f..7b4dd6c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -53,6 +53,29 @@ desktop = [
+ [project.scripts]
+ dz-erp = "dz_erp.desktop.app:main"
+ 
++[tool.setuptools.packages.find]
++# This repository is a *source tree*, not a flat collection of importable
++# packages. Explicit discovery keeps `pip install .` / metadata generation
++# working without shipping directories that are not packages at all:
++#   * `ops/`    - deployment assets (Dockerfile, systemd unit, env example);
++#   * `vendor/` - vendored Odoo module sources, read from disk by
++#                 dz_erp.localization via REPO_ROOT, never imported;
++#   * `odoo_addons/` - an Odoo addon tree (no `__init__.py` at its root), loaded
++#                 by Odoo from an addons path, not by Python.
++# Without this, setuptools' flat-layout auto-discovery aborts with
++# "Multiple top-level packages discovered in a flat-layout".
++# NOTE: a wheel is a metadata/packaging artefact, not a supported deployment:
++# dz_erp.localization and dz_erp.odoo_test_adapter resolve `vendor/` relative to
++# the repository root, so the supported runtime remains the source tree
++# (ops/Dockerfile, PYTHONPATH=.).
++include = ["dz_erp*"]
++
++[tool.setuptools.package-data]
++# The vendored DejaVu font is resolved at runtime by dz_erp/benchmark.py through
++# Path(__file__).parent / "assets" / "fonts"; a wheel without it would fall back
++# to a system font or fail to synthesise documents on a host that has none.
++dz_erp = ["assets/fonts/*"]
++
+ [tool.pytest.ini_options]
+ pythonpath = ["."]
+ testpaths = ["tests"]

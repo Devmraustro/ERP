@@ -1,0 +1,12 @@
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================== 38 passed, 1 skipped, 5 warnings in 6.20s ===================
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================== 60 passed, 2 skipped, 2 warnings in 3.16s ===================
+
+============================= 65 passed in 21.84s ==============================
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 120 passed, 2 warnings in 19.55s =======================
+
+======================= 3 passed, 35 deselected in 0.70s =======================
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================ 30 passed, 85 deselected, 2 warnings in 2.21s =================

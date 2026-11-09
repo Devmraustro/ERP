@@ -1,0 +1,21 @@
+== ruff ==
+All checks passed!
+ruff_exit=0
+
+== compileall ==
+compileall OK
+
+== dependency graph ==
+Dependency graph validation
+===========================
+  documented substitution: opencv-python -> opencv-python-headless==4.11.0.86
+  installed distributions: 56
+
+OK - the environment matches the declared dependency graph.
+     The only deviation from upstream metadata is the documented
+     substitution opencv-python -> opencv-python-headless.
+depgraph_exit=0
+
+== lock/hash consistency ==
+56
+1304

@@ -144,18 +144,23 @@ def _service_with_fixtures(tmp_path: Path):
             "'CLEAN', 'NeedsReview', 1, '2026-10-27T10:00:00+00:00')",
             (len(_DOC_BYTES), _SHA, blob_path),
         )
+        # line_index stays NULL on non-line fields: extraction writes it only
+        # for line_item_json rows (see the ingest INSERT in intake_ocr). A
+        # hand-written line_index here would be a state extraction cannot
+        # produce, and the decision service would then create a second,
+        # duplicate evidence row instead of binding to this one.
         conn.execute(
             "INSERT INTO ocr_extracted_fields (company_id, document_id, page_number, line_index, "
             "field_name, raw_text, normalized_value, confidence, confidence_kind, "
             "confidence_calibrated, bbox_json, ocr_model_version, created_at) "
-            "VALUES (1, 'doc-1', 1, 0, 'supplier_invoice_no', 'FAC-UI-001', 'FAC-UI-001', "
+            "VALUES (1, 'doc-1', 1, NULL, 'supplier_invoice_no', 'FAC-UI-001', 'FAC-UI-001', "
             "0.42, 'engine_line', 0, '{}', 'synthetic-ocr-1', '2026-10-27T10:00:01+00:00')"
         )
         conn.execute(
             "INSERT INTO ocr_extracted_fields (company_id, document_id, page_number, line_index, "
             "field_name, raw_text, normalized_value, confidence, confidence_kind, "
             "confidence_calibrated, bbox_json, ocr_model_version, created_at) "
-            "VALUES (1, 'doc-1', 1, 1, 'amount_ttc_dzd', '11 9OO DD', NULL, "
+            "VALUES (1, 'doc-1', 1, NULL, 'amount_ttc_dzd', '11 9OO DD', NULL, "
             "NULL, 'not_measured', 0, '{}', 'synthetic-ocr-1', '2026-10-27T10:00:01+00:00')"
         )
     service = EmbeddedErpService(
@@ -308,18 +313,20 @@ def test_review_dialog_full_cycle_with_correction_and_audit(
         # workflow) and the fields with honest confidence display.
         assert "Validated" in dialog.state_badge.text()
         assert dialog.fields_table.rowCount() == 2
+        # Field order is page_number, COALESCE(line_index, 0), field_name; both
+        # fixture rows have a NULL line_index, so amount_ttc_dzd sorts first.
         # amount_ttc_dzd: no confidence measured — displayed, never invented.
-        assert dialog.fields_table.item(1, 3).text() == "non mesurée"
+        assert dialog.fields_table.item(0, 3).text() == "non mesurée"
         # supplier_invoice_no: engine line confidence shown as measured.
-        assert dialog.fields_table.item(0, 3).text().startswith("0.42")
-        assert dialog.fields_table.item(0, 1).text() == "FAC-UI-001"  # raw OCR
+        assert dialog.fields_table.item(1, 3).text().startswith("0.42")
+        assert dialog.fields_table.item(1, 1).text() == "FAC-UI-001"  # raw OCR
 
         # Correction through the authorized API, on the uncertain field.
-        dialog.fields_table.selectRow(1)
+        dialog.fields_table.selectRow(0)
         dialog.correction_edit.setText("11900.00")
         dialog._correct_selected_field()
         _drain_until_idle(dialog)
-        row = [dialog.fields_table.item(1, c).text() for c in range(dialog.fields_table.columnCount())]
+        row = [dialog.fields_table.item(0, c).text() for c in range(dialog.fields_table.columnCount())]
         assert row[4] != "—"  # an override is now displayed
         assert row[1] == "11 9OO DD"  # raw OCR text is preserved
         assert row[2] == "11900.00"  # corrected current value

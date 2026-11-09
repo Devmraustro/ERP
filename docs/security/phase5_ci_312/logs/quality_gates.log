@@ -1,0 +1,36 @@
+== interpreter ==
+Python 3.12.10 (main, Nov  9 2026, 20:23:09) [GCC 12.2.0]
+
+== ruff ==
+RUF100 [*] Unused `noqa` directive (non-enabled: `BLE001`)
+   --> tests/test_phase60_backup_failure_modes.py:109:39
+    |
+107 |             resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+108 |             action()
+109 |         except BaseException as exc:  # noqa: BLE001 - the type is recorded, not swallowed
+    |                                       ^^^^^^^^^^^^^^
+110 |             try:
+111 |                 report_path.write_text(f"{type(exc).__module__}.{type(exc).__name__}: {exc}")
+    |
+help: Remove unused `noqa` directive
+
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+ruff_exit=1
+
+== compileall ==
+compileall OK
+
+== dependency graph ==
+Dependency graph validation
+===========================
+  documented substitution: opencv-python -> opencv-python-headless==4.11.0.86
+  installed distributions: 54
+
+OK - the environment matches the declared dependency graph.
+     The only deviation from upstream metadata is the documented
+     substitution opencv-python -> opencv-python-headless.
+
+== installed dists / lock hashes ==
+54
+1304

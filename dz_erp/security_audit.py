@@ -22,6 +22,11 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
 
+from .localization import describe_invoice_timbre_provenance
+from .key_provider import KeyMaterialUnavailable
+from .restore_generation import (
+    PromotionState,
+)
 from .database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
@@ -32,7 +37,7 @@ from .database import (
     FinancialIntegrityError,
     TenantIsolationError,
 )
-from .key_rotation import KeyConfigurationError, KeyRing
+from .key_rotation import KeyConfigurationError, KeyRing, atomic_write_bytes
 from .decimal_utils import format_dzd, to_decimal
 from .intake_ocr import VAULT_KEY_ENV, VAULT_KEY_SUFFIX, VAULT_KEYRING_SUFFIX, PrivateDocumentVault
 from .review_policy import evaluate_document_review_policy
@@ -70,6 +75,31 @@ _LOG_LOCK_TIMEOUT_SECONDS = 30.0
 _LOG_MAX_FILE_SIZE = int(os.environ.get("ERP_SECURITY_LOG_MAX_SIZE", "104857600"))
 # Number of rotated files to retain (default: 10)
 _LOG_MAX_FILES = int(os.environ.get("ERP_SECURITY_LOG_MAX_FILES", "10"))
+# Optional age-based retention for rotated files, in whole days. Unset (the
+# default) disables age-based deletion: only size/count rotation applies, which
+# preserves the pre-existing behaviour. A value is a *policy decision* that
+# belongs to the data-protection owner (see docs/LOG_RETENTION_AND_ACCESS.md);
+# this repository provides the mechanism and never a statutory period.
+def _parse_log_max_age_days(raw: Optional[str]) -> Optional[int]:
+    """Parse the opt-in retention age; reject values that could erase all logs."""
+    if raw is None or raw == "":
+        return None
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ERP_SECURITY_LOG_MAX_AGE_DAYS must be a positive whole number of days"
+        ) from exc
+    if days < 1:
+        raise ValueError(
+            "ERP_SECURITY_LOG_MAX_AGE_DAYS must be a positive whole number of days"
+        )
+    return days
+
+
+_LOG_MAX_AGE_DAYS: Optional[int] = _parse_log_max_age_days(
+    os.environ.get("ERP_SECURITY_LOG_MAX_AGE_DAYS")
+)
 
 # Process-local write locks, keyed by the resolved log path, so that two
 # ``JsonlSecurityLog`` instances aimed at the same file still share one lock.
@@ -92,15 +122,54 @@ def _rotation_lock_for(path: Path) -> threading.Lock:
         return lock
 
 
+def _prune_security_log_by_age(path: Path) -> None:
+    """Delete rotated log files older than ``_LOG_MAX_AGE_DAYS``.
+
+    Policy-driven and opt-in: when ``ERP_SECURITY_LOG_MAX_AGE_DAYS`` is unset
+    this is a no-op, so the existing size/count retention is unchanged and no
+    retention period is invented by the code. When set, rotated files (those
+    matching ``<path.name>.<n>``) whose mtime is older than the configured age
+    are removed; the active log file is never touched. Failures are best-effort:
+    a file that cannot be stat'd or unlinked is left for the next pass.
+
+    Off-host shipping is *not* implemented here: this function only deletes
+    local rotated files. Shipping to a central store is a separate, operator
+    configured capability and is documented as unavailable until configured and
+    tested (see docs/LOG_RETENTION_AND_ACCESS.md section 3).
+    """
+    if _LOG_MAX_AGE_DAYS is None:
+        return
+    cutoff = time.time() - (_LOG_MAX_AGE_DAYS * 86400)
+    for rotated in path.parent.glob(f"{path.name}.*"):
+        try:
+            suffix = rotated.name[len(path.name) + 1:]
+            if not suffix.isdigit():
+                continue
+        except (ValueError, IndexError):
+            continue
+        try:
+            if rotated.stat().st_mtime < cutoff:
+                rotated.unlink()
+        except OSError:
+            continue
+
+
 def _rotate_security_log(path: Path) -> None:
     """Rotate the security log file if it exceeds the configured maximum size.
 
+    Age-based retention (``ERP_SECURITY_LOG_MAX_AGE_DAYS``) is applied first,
+    on every call, so a quiet system still ages out rotated files even when the
+    size threshold is never reached. It is a no-op unless configured.
     Rotation is performed atomically using os.replace (POSIX) or MoveFileEx
     (Windows) to avoid losing records. The rotation is serialised with a
     process-local lock to prevent concurrent rotations.
 
     Retention policy: keep the current file plus _LOG_MAX_FILES - 1 rotated files.
     """
+    # Age-based retention runs on every call (including when no size rotation
+    # is needed), but only when configured. No-op otherwise.
+    _prune_security_log_by_age(path)
+
     # Check if rotation is needed
     try:
         if path.stat().st_size < _LOG_MAX_FILE_SIZE:
@@ -428,6 +497,10 @@ def read_supplier_invoice_secure(
                 ]
                 result = dict(inv)
                 result["lines"] = lines
+                # Phase 40 (F-04): an invoice can say which stamp-duty rule
+                # produced its tax, or say that it cannot. It is never inferred
+                # from the configuration in force today.
+                result["timbre_provenance"] = describe_invoice_timbre_provenance(inv)
 
     if denial is not None:
         raise denial
@@ -732,6 +805,64 @@ def list_stock_quants_secure(
     return db.list_stock_quants(scoped_company_id, limit=limit)
 
 
+def require_role_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    allowed_roles: Tuple[str, ...],
+    *,
+    action: str,
+    target_model: str = "api",
+    target_id: str = "-",
+) -> Dict[str, Any]:
+    """Refuse an operation unless the caller's server-side role is allowed.
+
+    ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` grants "Upload Document" to
+    ``clerk``, ``approver``, ``accountant`` and ``admin`` and explicitly denies
+    it to ``warehouse``, ``auditor``, ``ocr_worker`` and ``treasury``. The
+    document-intake endpoints predate that rule and consulted no role at all, so
+    any authenticated principal of a company - including the roles the matrix
+    denies - could create documents and make the server stream, buffer, OCR and
+    vault a file.
+
+    The role is read from the ``users`` row bound to the verified credential,
+    never from the request, and the refusal is written to the tenant's audit
+    chain (and committed) before the error is raised, exactly like the read-side
+    denials in :func:`list_supplier_invoices_secure` and the review guards in
+    :mod:`dz_erp.intake_ocr`.
+
+    Returns the user row so a caller that needs more than a boolean does not
+    have to read it twice.
+    """
+    denial: Optional[AuthorizationError] = None
+    user: Optional[Any] = None
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            raise AuthorizationError("User is inactive or revoked.")
+        if user["role"] not in allowed_roles:
+            db.append_audit_event(
+                conn=conn,
+                company_id=int(user["company_id"]),
+                actor_user_id=requesting_user_id,
+                action_type="SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
+                target_model=target_model,
+                target_id=str(target_id),
+                after_state={
+                    "role": user["role"],
+                    "action": action,
+                    "required_roles": list(allowed_roles),
+                },
+            )
+            denial = AuthorizationError(
+                f"Role '{user['role']}' is not authorized for {action}; "
+                f"required one of {list(allowed_roles)}."
+            )
+    if denial is not None:
+        raise denial
+    assert user is not None
+    return dict(user)
+
+
 def _require_user_admin(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
     """Guard shared by every user-administration operation: active admin only.
 
@@ -803,6 +934,47 @@ def create_user_admin_secure(
         actor_user_id=int(admin["id"]),
     )
     return user
+
+
+def reset_password_admin_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    auth_manager: Any,
+    *,
+    target_user_id: int,
+    new_password: str,
+) -> Dict[str, Any]:
+    """Administratively reset another user's password (SEC-13 lifecycle).
+
+    Administrators only, and only inside the admin's own company. The reset
+    revokes every token the target holds, so a compromised session dies with the
+    old password; the credential mechanics (policy, hashing, audit event,
+    revocation) live in :meth:`dz_erp.auth.AuthManager.set_password`, which
+    records the event as ``administrative_reset`` and attributes it to the admin.
+
+    Cross-tenant and non-existent targets are conflated on purpose: a 404 that
+    distinguishes "no such user" from "not your user" would enumerate accounts.
+    """
+    admin = _require_user_admin(db, requesting_user_id)
+    company_id = int(admin["company_id"])
+    with db.transaction() as conn:
+        target = conn.execute(
+            "SELECT * FROM users WHERE id = ? AND company_id = ?",
+            (target_user_id, company_id),
+        ).fetchone()
+    if target is None:
+        raise ValueError(f"User {target_user_id} not found in target company.")
+    auth_manager.set_password(
+        target_user_id,
+        new_password,
+        actor_user_id=int(admin["id"]),
+    )
+    return {
+        "user_id": int(target["id"]),
+        "username": target["username"],
+        "company_id": company_id,
+        "tokens_revoked": True,
+    }
 
 
 def deactivate_user_secure(
@@ -883,17 +1055,42 @@ def trial_balance_secure(db: ERPDatabase, requesting_user_id: int) -> Dict[str, 
     return db.trial_balance(scoped_company_id)
 
 
+def resolve_backup_encryption_key(explicit=None) -> bytes:
+    import os
+    env_val = os.environ.get("ERP_BACKUP_ENCRYPTION_KEY")
+    if env_val:
+        try:
+            return base64.b64decode(env_val.encode("ascii"))
+        except Exception:
+            return env_val.encode("utf-8")
+    if explicit is not None:
+        return bytes(explicit)
+    raise KeyMaterialUnavailable(
+        "ERP_BACKUP_ENCRYPTION_KEY is not set and no explicit backup key was provided."
+    )
+
+
 def create_encrypted_backup(
     db: ERPDatabase,
     vault: PrivateDocumentVault,
     output_backup_path: Path,
-    backup_encryption_key: bytes,
+    backup_encryption_key=None,
 ) -> Dict[str, Any]:
+    if backup_encryption_key is None:
+        backup_encryption_key = resolve_backup_encryption_key()
     """Create a consistent SQLite online backup + vault archive encrypted with Fernet and a SHA-256 manifest."""
     output_backup_path = Path(output_backup_path)
     output_backup_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = output_backup_path.parent / f".tmp_backup_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # The staging directory holds the *plaintext* database snapshot, a copy of
+    # the encrypted vault and a manifest that carries the vault key, the audit
+    # HMAC secret and both key rings. Created with the process umask it would be
+    # 0755 and its files 0644 for the seconds it exists, which is readable by
+    # every local account; create it owner-only instead (best effort on
+    # platforms whose mode bits are synthetic).
+    os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(tmp_dir, 0o700)
 
     try:
         db_snap_path = tmp_dir / "erp_snapshot.sqlite3"
@@ -928,6 +1125,7 @@ def create_encrypted_backup(
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "db_sha256": db_sha256,
+            "schema_version": 1,
             "vault_file_hashes": vault_hashes,
             # Human-readable requirement statement: which versions, and which
             # one is active. Contains no key material, so it is safe to surface
@@ -950,7 +1148,12 @@ def create_encrypted_backup(
                 json.dumps(audit_ring.to_dict(), sort_keys=True).encode("utf-8")
             ).decode("ascii"),
         }
-        (tmp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        # The manifest carries key material, so it is written like every other
+        # key file: owner-only, atomically, never world-readable even briefly.
+        atomic_write_bytes(
+            tmp_dir / "manifest.json",
+            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
+        )
 
         tar_buf = io.BytesIO()
         with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
@@ -960,7 +1163,14 @@ def create_encrypted_backup(
 
         fernet = Fernet(backup_encryption_key)
         encrypted_archive = fernet.encrypt(tar_buf.getvalue())
-        output_backup_path.write_bytes(encrypted_archive)
+        # The archive carries the vault and audit key rings inside the Fernet
+        # envelope - custody material either way - so it is published like every
+        # other key file in this project: created owner-only (0600), written to
+        # a temporary file in the same directory, fsynced and atomically renamed
+        # into place. That leaves no window in which it is group- or
+        # world-readable, and no partially written file that could later be
+        # mistaken for a good backup.
+        atomic_write_bytes(output_backup_path, encrypted_archive, mode=0o600)
 
         return {
             "backup_path": str(output_backup_path),
@@ -1064,6 +1274,41 @@ def _lstat_restore_path(path: Path) -> Optional[os.stat_result]:
     return metadata
 
 
+#: The interpreter families whose ``tarfile`` extraction filter is known to be
+#: complete enough for a safe restore, and the first patched release of each.
+#: 3.11 below 3.11.17 and 3.12 below 3.12.10 carry the link-fallback and
+#: leave-then-return bypasses; 3.13+ is not supported by the pinned OCR
+#: dependency, so it is deliberately excluded rather than silently allowed.
+SAFE_RESTORE_MINIMUMS: Dict[Tuple[int, int], Tuple[int, int, int]] = {
+    (3, 11): (3, 11, 17),
+    (3, 12): (3, 12, 10),
+}
+SAFE_RESTORE_MAX_EXCLUSIVE: Tuple[int, int, int] = (3, 13, 0)
+SAFE_RESTORE_UNSUPPORTED_MESSAGE = (
+    "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); "
+    "unsafe archive member types and paths are rejected."
+)
+
+
+def safe_restore_supported(version_info: Any = None) -> bool:
+    """Is a *safe* backup restore possible on this interpreter?
+
+    The one predicate. Both the library and every test that gates a
+    backup/restore assertion call this, so the matrix cannot drift: before
+    Phase 45 the tests carried three hand-written copies of the rule, and one of
+    them (``>= (3, 11, 17) and < (3, 13)``) wrongly accepted 3.12.0-3.12.9 —
+    versions on which the restore correctly refuses. That copy was skipped by CI
+    only because CI resolves the newest 3.12.
+    """
+    version = tuple((version_info if version_info is not None else sys.version_info))[:3]
+    if version >= SAFE_RESTORE_MAX_EXCLUSIVE:
+        return False
+    minimum = SAFE_RESTORE_MINIMUMS.get(tuple(version[:2]))
+    if minimum is None:
+        return False
+    return version >= minimum
+
+
 def restore_and_verify_backup(
     backup_path: Path,
     backup_encryption_key: bytes,
@@ -1071,29 +1316,56 @@ def restore_and_verify_backup(
     hmac_secret: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """Decrypt, unpack, and verify a backup archive in an isolated target directory."""
+    import os as _os
+    _crash_point = _os.environ.get("DR_CRASH_POINT", "")
+    def _crash_if(point: str) -> None:
+        if _crash_point == point and _os.environ.get("DR_TEST_MODE") == "1":
+            _os._exit(1)
+
     restore_target_dir = Path(restore_target_dir)
     _lstat_restore_path(restore_target_dir)
     restore_target_dir = restore_target_dir.resolve()
     target_existed = restore_target_dir.exists()
+
+    # Acquire cross-process restore lock
+    from .restore_generation import RestoreLock
+    lock_path = restore_target_dir.parent / ".restore.lock"
+    lock = RestoreLock(lock_path, timeout_seconds=30.0)
+    if not lock.acquire():
+        raise FinancialIntegrityError("Could not acquire restore lock (another restore may be in progress).")
+
+    # Use a unique staging directory — never extract directly into the active target.
+    import uuid
+    staging_dir = restore_target_dir.parent / (".restore_staging_" + uuid.uuid4().hex)
+    staging_dir.mkdir(parents=True, exist_ok=True)
     if target_existed and not restore_target_dir.is_dir():
         raise FinancialIntegrityError(f"Restore target is not a directory: {restore_target_dir}")
 
+    # Create promotion journal for recoverable restore
+    journal = None
+    try:
+        from .restore_generation import create_promotion_journal
+        journal_dir = restore_target_dir.parent
+        journal = create_promotion_journal(
+            staging_dir=restore_target_dir,
+            active_dir=restore_target_dir,
+            previous_dir=restore_target_dir.parent / (restore_target_dir.name + ".previous"),
+            journal_dir=journal_dir,
+        )
+        journal.state = PromotionState.VALIDATING
+        journal.save()
+    except Exception:
+        journal = None
+
+    _crash_if("extraction")
     # The data filter is used as one boundary, not the only boundary.
     # Python 3.11 releases after 3.11.17 are source-only; Python 3.12.15 is also
     # source-only, while 3.12.10 is the last Windows binary installer. For 3.12.10+
     # we therefore independently reject every link/special member and every
     # non-canonical/escaping path before extraction; this blocks the tarfile
     # link-fallback and leave-then-return path bypasses even on older filter code.
-    version = tuple(sys.version_info[:3])
-    supported_runtime = (
-        (version[:2] == (3, 11) and version >= (3, 11, 17))
-        or (version[:2] == (3, 12) and version >= (3, 12, 10))
-    )
-    if not supported_runtime:
-        raise FinancialIntegrityError(
-            "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ "
-            "(and below 3.13); unsafe archive member types and paths are rejected."
-        )
+    if not safe_restore_supported():
+        raise FinancialIntegrityError(SAFE_RESTORE_UNSUPPORTED_MESSAGE)
     safe_data_filter = getattr(tarfile, "data_filter", None)
     if safe_data_filter is None:
         raise FinancialIntegrityError(
@@ -1212,8 +1484,8 @@ def restore_and_verify_backup(
                         f"Backup archive contains an unsafe tar entry; extraction was refused: {exc}"
                     ) from exc
 
-            restore_target_dir.mkdir(parents=True, exist_ok=True)
-            tar.extractall(path=restore_target_dir, filter=safe_data_filter)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            tar.extractall(path=staging_dir, filter=safe_data_filter)
     except FinancialIntegrityError:
         raise
     except (tarfile.TarError, OSError) as exc:
@@ -1223,17 +1495,61 @@ def restore_and_verify_backup(
             f"Backup archive contains an unsafe or invalid tar entry; extraction was refused: {exc}"
         ) from exc
 
-    manifest = json.loads((restore_target_dir / "manifest.json").read_text(encoding="utf-8"))
-    restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"
+    manifest = json.loads((staging_dir / "manifest.json").read_text(encoding="utf-8"))
+    restored_db_path = staging_dir / "erp_snapshot.sqlite3"
+    if not restored_db_path.is_file():
+        raise FinancialIntegrityError("Restored database file is missing from the archive.")
     actual_db_sha256 = hashlib.sha256(restored_db_path.read_bytes()).hexdigest()
     if actual_db_sha256 != manifest["db_sha256"]:
         raise FinancialIntegrityError("Restored database SHA-256 mismatch!")
 
-    restored_vault_dir = restore_target_dir / "vault"
+
+    restored_vault_dir = staging_dir / "vault"
     for rel_path, expected_sha in manifest["vault_file_hashes"].items():
         fp = restored_vault_dir / rel_path
         if not fp.exists() or hashlib.sha256(fp.read_bytes()).hexdigest() != expected_sha:
             raise FinancialIntegrityError(f"Restored vault blob {rel_path} failed SHA-256 verification!")
+
+    # SQLite integrity checks
+    check_conn = sqlite3.connect(str(restored_db_path))
+    try:
+        integrity = check_conn.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise FinancialIntegrityError(
+                f"Restored database failed SQLite integrity_check: {integrity}"
+            )
+        fk_issues = check_conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_issues:
+            raise FinancialIntegrityError(
+                f"Restored database has foreign key violations: {fk_issues[:5]}"
+            )
+        # Read actual schema version from the database
+        actual_schema_version = check_conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        check_conn.close()
+
+    # Schema compatibility: manifest vs actual DB vs application
+    schema_version = manifest.get("schema_version")
+    if schema_version is None:
+        raise FinancialIntegrityError("Restored backup is missing schema_version metadata.")
+    if not isinstance(schema_version, int):
+        raise FinancialIntegrityError("Restored backup has malformed schema_version: %r" % schema_version)
+    if actual_schema_version != schema_version:
+        raise FinancialIntegrityError(
+            "Schema version mismatch: manifest=%d, database=%d" % (schema_version, actual_schema_version)
+        )
+    SUPPORTED_SCHEMA_VERSIONS = (1,)
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        if schema_version > max(SUPPORTED_SCHEMA_VERSIONS):
+            raise FinancialIntegrityError(
+                "Restored backup schema version %d is newer than supported (max %d)."
+                % (schema_version, max(SUPPORTED_SCHEMA_VERSIONS))
+            )
+        else:
+            raise FinancialIntegrityError(
+                "Restored backup schema version %d is not supported (min %d)."
+                % (schema_version, min(SUPPORTED_SCHEMA_VERSIONS))
+            )
 
     # Restore every key version the archive needs.  An explicit secret still
     # wins, but it can only be the *active* key of the archived registry -
@@ -1305,6 +1621,53 @@ def restore_and_verify_backup(
             )
         raise FinancialIntegrityError(f"Restored audit chain verification failed: {audit_verifications}")
 
+    _crash_if("before_pointer")
+    # === GENERATION-BASED ACTIVATION ===
+    # All validation passed. Promote staging -> active via rename, preserving previous.
+    gen_id = journal.generation_id if journal else ("gen_" + __import__("uuid").uuid4().hex)
+
+    # Preserve previous generation
+    previous_dir = restore_target_dir.parent / (restore_target_dir.name + ".previous")
+    if restore_target_dir.exists():
+        import shutil as _shutil
+        if previous_dir.exists():
+            _shutil.rmtree(previous_dir, ignore_errors=True)
+        os.rename(restore_target_dir, previous_dir)
+
+    # Promote staging to active path
+    os.rename(staging_dir, restore_target_dir)
+
+    # Update paths to point to the promoted (active) directory
+    restored_db_path = restore_target_dir / "erp_snapshot.sqlite3"
+    restored_vault_dir = restore_target_dir / "vault"
+
+    # Re-create DB/vault objects pointing to promoted paths
+    restored_db = ERPDatabase(db_path=str(restored_db_path), hmac_secret=audit_ring.active_material)
+    restored_vault = PrivateDocumentVault(vault_root=restored_vault_dir, keyring=vault_ring)
+
+    # Verify promotion
+    if not restored_db_path.is_file():
+        raise FinancialIntegrityError("Promotion failed: database not found at active path.")
+
+    # Atomically replace the active generation pointer (single atomic operation)
+    try:
+        from .generation_resolver import set_active_generation
+        set_active_generation(
+            generation_id=gen_id,
+            generation_dir=restore_target_dir,
+        )
+    except Exception:
+        pass
+
+    _crash_if("after_pointer")
+    # Mark promotion as complete
+    if journal is not None:
+        try:
+            journal.state = PromotionState.COMPLETE
+            journal.save()
+        except Exception:
+            pass
+
     return {
         "restored_db": restored_db,
         "restored_vault": restored_vault,
@@ -1313,4 +1676,7 @@ def restore_and_verify_backup(
         "trial_balance_debit_dzd": format_dzd(total_debit),
         "trial_balance_credit_dzd": format_dzd(total_credit),
         "audit_chains_valid": True,
+        "integrity_check": "ok",
+        "foreign_key_check": "ok",
+        "generation_id": journal.generation_id if journal else None,
     }

@@ -1,0 +1,5 @@
+docs/security/phase5_release_gate/probes/smoke.py:1:8: F401 [*] `json` imported but unused
+odoo_addons/l10n_dz_scf_extensions/__init__.py:2:15: F401 `.models` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+odoo_addons/l10n_dz_scf_extensions/models/__init__.py:2:15: F401 `.res_partner_dz` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+Found 3 errors.
+[*] 1 fixable with the `--fix` option.

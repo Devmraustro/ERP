@@ -1,0 +1,92 @@
+============================= test session starts ==============================
+collected 950 items / 7 deselected / 943 selected
+
+tests/test_phase10_vault_key_rotation.py .......................         [  2%]
+tests/test_phase11_audit_key_rotation.py .........................       [  5%]
+tests/test_phase12_key_migration_and_backup.py ......................s.. [  7%]
+...                                                                      [  8%]
+tests/test_phase13_key_rotation_regression.py ......                     [  8%]
+tests/test_phase14_rotation_audit_ledger.py .......................      [ 11%]
+tests/test_phase15_key_custody_and_monitoring.py .............           [ 12%]
+tests/test_phase16_rotation_concurrency_convergence.py ....              [ 12%]
+tests/test_phase17_key_providers.py ........ss.....................      [ 16%]
+tests/test_phase18_ocr_confidence_provenance.py ...................      [ 18%]
+tests/test_phase19_dependency_integrity.py ........F.................    [ 20%]
+tests/test_phase20_checkpoints_and_monitoring.py ....................... [ 23%]
+.............................................                            [ 28%]
+tests/test_phase21_arabic_review_routing.py ...................          [ 30%]
+tests/test_phase22_register_and_docs_consistency.py ...............      [ 31%]
+tests/test_phase23_staging_acceptance.py .                               [ 31%]
+tests/test_phase24_operational_readiness.py ....................         [ 34%]
+tests/test_phase25_read_api.py ......                                    [ 34%]
+tests/test_phase26_desktop.py ..........                                 [ 35%]
+tests/test_phase27_desktop_ui.py ....                                    [ 36%]
+tests/test_phase27_review_api.py .....                                   [ 36%]
+tests/test_phase27_scf_first_run.py ........                             [ 37%]
+tests/test_phase28_desktop_users_ui.py .......                           [ 38%]
+tests/test_phase28_user_admin.py ............                            [ 39%]
+tests/test_phase29_desktop_redesign.py .............................     [ 42%]
+tests/test_phase2_localization.py .....................                  [ 44%]
+tests/test_phase34_security_validation.py .............................. [ 48%]
+.....................                                                    [ 50%]
+tests/test_phase35_api_rate_limiting_and_request_logging.py ............ [ 51%]
+....                                                                     [ 51%]
+tests/test_phase35_integrity_gates.py ..................                 [ 53%]
+tests/test_phase39_bounded_rate_limiting.py ............................ [ 56%]
+....                                                                     [ 57%]
+tests/test_phase3_invoice_intake.py ..                                   [ 57%]
+tests/test_phase47_request_id_boundary.py ...................            [ 59%]
+tests/test_phase4_procurement_3way_match.py ...                          [ 59%]
+tests/test_phase5_security_audit_backup.py ..                            [ 60%]
+tests/test_phase62_backup_automation.py .................                [ 61%]
+tests/test_phase62_readiness.py ................                         [ 63%]
+tests/test_phase64_dependency_security_regression.py ...............F..F [ 65%]
+....................                                                     [ 67%]
+tests/test_phase6_ocr_benchmark_e2e.py ...................               [ 69%]
+tests/test_phase7_authentication_remediation.py ........................ [ 72%]
+...................................                                      [ 75%]
+tests/test_phase8_upload_boundary_and_ci.py ............................ [ 78%]
+........................................................................ [ 86%]
+........................................................................ [ 94%]
+..................................                                       [ 97%]
+tests/test_phase9_durable_security_log.py ......                         [ 98%]
+tests/test_phase9_process_boundary.py ...............                    [100%]
+
+=================================== FAILURES ===================================
+_________________________ test_live_environment_passes _________________________
+tests/test_phase19_dependency_integrity.py:145: in test_live_environment_passes
+    assert _failures() == []
+E   AssertionError: assert ['declared de...is installed'] == []
+E     
+E     Left contains 5 more items, first extra item: 'declared dependency fastapi==0.140.6 but fastapi==0.133.0 is installed'
+E     Use -v to get more diff
+_____ test_installed_version_is_at_or_above_the_security_floor[pdfplumber] _____
+tests/test_phase64_dependency_security_regression.py:255: in test_installed_version_is_at_or_above_the_security_floor
+    assert _version_tuple(installed) >= _version_tuple(floor), (
+E   AssertionError: installed pdfplumber==0.11.9 is below the security floor 0.11.10 (pins the vulnerable pdfminer.six==20250327 below this)
+E   assert (0, 11, 9) >= (0, 11, 10)
+E    +  where (0, 11, 9) = _version_tuple('0.11.9')
+E    +  and   (0, 11, 10) = _version_tuple('0.11.10')
+_________ test_pdfplumber_and_pdfminer_are_pinned_as_a_compatible_pair _________
+tests/test_phase64_dependency_security_regression.py:274: in test_pdfplumber_and_pdfminer_are_pinned_as_a_compatible_pair
+    assert pins["pdfminer.six"] == required_version, (
+E   AssertionError: lock pins pdfminer.six==20260107 but pdfplumber requires 20251230
+E   assert '20260107' == '20251230'
+E     
+E     - 20251230
+E     + 20260107
+=============================== warnings summary ===============================
+../../../tmp/py312/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /tmp/py312/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+../../../tmp/py312/lib/python3.12/site-packages/starlette/testclient.py:53
+  /tmp/py312/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_phase19_dependency_integrity.py::test_live_environment_passes
+FAILED tests/test_phase64_dependency_security_regression.py::test_installed_version_is_at_or_above_the_security_floor[pdfplumber]
+FAILED tests/test_phase64_dependency_security_regression.py::test_pdfplumber_and_pdfminer_are_pinned_as_a_compatible_pair
+= 3 failed, 937 passed, 3 skipped, 7 deselected, 2 warnings in 307.47s (0:05:07) =

@@ -1,0 +1,155 @@
+{
+  "steps": 16,
+  "passed": 16,
+  "failed": 0,
+  "workdir": "/tmp/phase10-ops-1z66_9ju",
+  "generated_at": "2026-11-10T16:25:57.559926+00:00",
+  "results": [
+    {
+      "step": "bootstrap",
+      "ok": true,
+      "detail": "Created admin 'admin' (id=1) in /tmp/phase10-ops-1z66_9ju/data/erp.sqlite3"
+    },
+    {
+      "step": "server liveness",
+      "ok": true,
+      "detail": "/healthz returned 200"
+    },
+    {
+      "step": "readiness at boot (no backup yet)",
+      "ok": true,
+      "detail": "status=200 readiness=degraded all_critical_ok=True",
+      "checks": {
+        "database": {
+          "status": "ok",
+          "critical": true,
+          "values": {
+            "table_count": 25,
+            "write_lock": true,
+            "duration_ms": 1.39
+          }
+        },
+        "vault": {
+          "status": "ok",
+          "critical": true,
+          "values": {
+            "writable": true,
+            "key_present": true,
+            "key_mode": "0o600",
+            "dir_mode": "0o755",
+            "active_key_version": 1,
+            "blob_count": 0
+          }
+        },
+        "key_custody": {
+          "status": "ok",
+          "critical": false,
+          "values": {
+            "key_dir_mode": "0o700"
+          }
+        },
+        "disk": {
+          "status": "ok",
+          "critical": true,
+          "values": {
+            "free_bytes": 18586587136,
+            "total_bytes": 21834924032,
+            "min_free_bytes": 536870912,
+            "free_percent": 85.1
+          }
+        },
+        "ocr": {
+          "status": "ok",
+          "critical": true,
+          "values": {
+            "deep": false,
+            "engine_loaded": false
+          }
+        },
+        "backup": {
+          "status": "fail",
+          "critical": false,
+          "detail": "no backup artefact found",
+          "values": {
+            "max_age_seconds": 129600
+          }
+        }
+      }
+    },
+    {
+      "step": "token issuance",
+      "ok": true,
+      "detail": "admin token issued over HTTP"
+    },
+    {
+      "step": "scheduled backup (CLI)",
+      "ok": true,
+      "detail": "exit=0 artefacts=1",
+      "stdout": "{\n  \"backup\": \"/tmp/phase10-ops-1z66_9ju/backups/erp-20261110T162555Z.erpbackup\",\n  \"db_sha256\": \"720052ac73a37aadc303942c6df6f747768665d6c6ed51b123ff2debd79985e8\",\n  \"duration_seconds\": 0.008,\n  \"name\": \"erp-20261110T162555Z.erpbackup\",\n  \"retention\": {\n    \"deleted\": [],\n    \"dry_run\": false,\n    \"errors\": [],\n    \"kept\": [\n      \"erp-20261110T162555Z.erpbackup\"\n    ],\n    \"retain_daily\": 7,\n   "
+    },
+    {
+      "step": "backup artefact + manifest",
+      "ok": true,
+      "detail": "mode=0o600 sha256=a9b0a7d31ed67f7e\u2026 size=13796"
+    },
+    {
+      "step": "readiness healthy (after first backup)",
+      "ok": true,
+      "detail": "status=200 readiness=ready",
+      "backup_check": {
+        "status": "ok",
+        "critical": false,
+        "values": {
+          "age_seconds": 0.1,
+          "max_age_seconds": 129600,
+          "size_bytes": 13796
+        }
+      }
+    },
+    {
+      "step": "verify (hash)",
+      "ok": true,
+      "detail": "exit=0"
+    },
+    {
+      "step": "corruption detected + alert",
+      "ok": true,
+      "detail": "exit=1 alert=True"
+    },
+    {
+      "step": "deep verify (restore)",
+      "ok": true,
+      "detail": "exit=0 verified=1"
+    },
+    {
+      "step": "disk-space alert",
+      "ok": true,
+      "detail": "exit=1 alert=True"
+    },
+    {
+      "step": "stale-backup alert",
+      "ok": true,
+      "detail": "exit=1"
+    },
+    {
+      "step": "retention + legal hold",
+      "ok": true,
+      "detail": "before=6 after=4 legal_hold_kept=True"
+    },
+    {
+      "step": "readiness fails closed (unwritable vault)",
+      "ok": true,
+      "detail": "status=503 readiness=not_ready"
+    },
+    {
+      "step": "liveness unaffected",
+      "ok": true,
+      "detail": "/healthz=200 after vault failure"
+    },
+    {
+      "step": "database integrity after drill",
+      "ok": true,
+      "detail": "integrity=ok posted_entries=1"
+    }
+  ]
+}

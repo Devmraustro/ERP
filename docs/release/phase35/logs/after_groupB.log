@@ -1,0 +1,250 @@
+============================= test session starts ==============================
+collected 881 items / 1 deselected / 880 selected
+
+tests/test_phase10_vault_key_rotation.py .......................         [  2%]
+tests/test_phase11_audit_key_rotation.py .F................FF.....       [  5%]
+tests/test_phase12_key_migration_and_backup.py ......FFF......FFFF..FsFF [  8%]
+...                                                                      [  8%]
+tests/test_phase13_key_rotation_regression.py ......                     [  9%]
+tests/test_phase14_rotation_audit_ledger.py .......................      [ 11%]
+tests/test_phase15_key_custody_and_monitoring.py .............           [ 13%]
+tests/test_phase16_rotation_concurrency_convergence.py ....              [ 13%]
+tests/test_phase17_key_providers.py ........ss.....................      [ 17%]
+tests/test_phase18_ocr_confidence_provenance.py ...................      [ 19%]
+tests/test_phase19_dependency_integrity.py ..........................    [ 22%]
+tests/test_phase20_checkpoints_and_monitoring.py ....................... [ 25%]
+.............................................                            [ 30%]
+tests/test_phase21_arabic_review_routing.py ...................          [ 32%]
+tests/test_phase22_register_and_docs_consistency.py ...............      [ 34%]
+tests/test_phase23_staging_acceptance.py .                               [ 34%]
+tests/test_phase24_operational_readiness.py ....................         [ 36%]
+tests/test_phase25_read_api.py ......                                    [ 37%]
+tests/test_phase26_desktop.py ..........                                 [ 38%]
+tests/test_phase27_desktop_ui.py ....                                    [ 38%]
+tests/test_phase27_review_api.py .....                                   [ 39%]
+tests/test_phase27_scf_first_run.py ........                             [ 40%]
+tests/test_phase28_desktop_users_ui.py .......                           [ 41%]
+tests/test_phase28_user_admin.py ............                            [ 42%]
+tests/test_phase29_desktop_redesign.py .............................     [ 45%]
+tests/test_phase2_localization.py .....................                  [ 48%]
+tests/test_phase34_security_validation.py .............................. [ 51%]
+.....................                                                    [ 53%]
+tests/test_phase35_integrity_gates.py ................                   [ 55%]
+tests/test_phase3_invoice_intake.py ..                                   [ 55%]
+tests/test_phase4_procurement_3way_match.py ...                          [ 56%]
+tests/test_phase5_security_audit_backup.py .F                            [ 56%]
+tests/test_phase62_backup_automation.py ...F...........F.                [ 58%]
+tests/test_phase62_readiness.py ................                         [ 60%]
+tests/test_phase63_dependency_contract.py ......                         [ 60%]
+tests/test_phase64_dependency_security_regression.py ................... [ 63%]
+....................                                                     [ 65%]
+tests/test_phase6_ocr_benchmark_e2e.py .F.................               [ 67%]
+tests/test_phase7_authentication_remediation.py ........................ [ 70%]
+...................................                                      [ 74%]
+tests/test_phase8_upload_boundary_and_ci.py ............................ [ 77%]
+........................................................................ [ 85%]
+........................................................................ [ 93%]
+.........................F...F....                                       [ 97%]
+tests/test_phase9_durable_security_log.py ......                         [ 98%]
+tests/test_phase9_process_boundary.py ..F.....FF.....                    [100%]
+
+=================================== FAILURES ===================================
+_____________ test_a_pre_versioning_database_restores_from_backup ______________
+tests/test_phase11_audit_key_rotation.py:133: in test_a_pre_versioning_database_restores_from_backup
+    report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+____________ test_backup_restore_preserves_every_audit_key_version _____________
+tests/test_phase11_audit_key_rotation.py:491: in test_backup_restore_preserves_every_audit_key_version
+    report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+__________ test_restore_reports_a_missing_key_version_as_unavailable ___________
+tests/test_phase11_audit_key_rotation.py:527: in test_restore_reports_a_missing_key_version_as_unavailable
+    report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+______ test_backup_restores_mixed_ciphertext_into_an_isolated_environment ______
+tests/test_phase12_key_migration_and_backup.py:371: in test_backup_restores_mixed_ciphertext_into_an_isolated_environment
+    report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+_______________ test_restore_of_a_tampered_registry_fails_closed _______________
+tests/test_phase12_key_migration_and_backup.py:437: in test_restore_of_a_tampered_registry_fails_closed
+    restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+___________ test_restore_rejects_ciphertext_that_needs_an_absent_key ___________
+tests/test_phase12_key_migration_and_backup.py:479: in test_restore_rejects_ciphertext_that_needs_an_absent_key
+    restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+____ test_restore_accepts_last_windows_binary_runtime_with_strict_preflight ____
+tests/test_phase12_key_migration_and_backup.py:573: in test_restore_accepts_last_windows_binary_runtime_with_strict_preflight
+    security_audit_module.restore_and_verify_backup(
+dz_erp/security_audit.py:1093: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup extraction is unavailable in this Python runtime. Use a supported, security-patched Python 3.11 or 3.12 release.
+__ test_restore_rejects_noncanonical_tar_paths_before_writing[../outside.txt] __
+tests/test_phase12_key_migration_and_backup.py:604: in test_restore_rejects_noncanonical_tar_paths_before_writing
+    with pytest.raises(FinancialIntegrityError, match="Unsafe tar member path"):
+E   AssertionError: Regex pattern did not match.
+E     Expected regex: 'Unsafe tar member path'
+E     Actual message: 'Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.'
+_ test_restore_rejects_noncanonical_tar_paths_before_writing[vault/../outside.txt] _
+tests/test_phase12_key_migration_and_backup.py:604: in test_restore_rejects_noncanonical_tar_paths_before_writing
+    with pytest.raises(FinancialIntegrityError, match="Unsafe tar member path"):
+E   AssertionError: Regex pattern did not match.
+E     Expected regex: 'Unsafe tar member path'
+E     Actual message: 'Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.'
+_ test_restore_rejects_noncanonical_tar_paths_before_writing[../evil/../dest/sub/file] _
+tests/test_phase12_key_migration_and_backup.py:604: in test_restore_rejects_noncanonical_tar_paths_before_writing
+    with pytest.raises(FinancialIntegrityError, match="Unsafe tar member path"):
+E   AssertionError: Regex pattern did not match.
+E     Expected regex: 'Unsafe tar member path'
+E     Actual message: 'Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.'
+_______ test_restore_refuses_preexisting_hardlink_target_before_writing ________
+tests/test_phase12_key_migration_and_backup.py:686: in test_restore_refuses_preexisting_hardlink_target_before_writing
+    with pytest.raises(FinancialIntegrityError, match="hard-linked file"):
+E   AssertionError: Regex pattern did not match.
+E     Expected regex: 'hard-linked file'
+E     Actual message: 'Safe backup extraction is unavailable in this Python runtime. Use a supported, security-patched Python 3.11 or 3.12 release.'
+_______ test_restore_requires_a_backup_key_and_does_not_leak_on_failure ________
+tests/test_phase12_key_migration_and_backup.py:767: in test_restore_requires_a_backup_key_and_does_not_leak_on_failure
+    restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+____________ test_restore_with_a_contradicting_audit_key_is_refused ____________
+tests/test_phase12_key_migration_and_backup.py:789: in test_restore_with_a_contradicting_audit_key_is_refused
+    restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+______ test_audit_immutability_log_redaction_and_encrypted_backup_restore ______
+tests/test_phase5_security_audit_backup.py:255: in test_audit_immutability_log_redaction_and_encrypted_backup_restore
+    restore_report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+______________ test_deep_verify_restores_and_compares_the_ledger _______________
+tests/test_phase62_backup_automation.py:160: in test_deep_verify_restores_and_compares_the_ledger
+    assert report["ok"] is True, report
+E   AssertionError: {'file': 'erp-20261112T213617Z.erpbackup', 'ok': False, 'checks': {'exists': True, 'manifest_present': True, 'sha256_actual': 'd89d7070a9df637661d9def6040c6a2976bd4a29f61809bf2e04957d209021d0', 'size_bytes': 12172, ...}}
+E   assert False is True
+________________________ test_cli_verify_deep_restores _________________________
+tests/test_phase62_backup_automation.py:355: in test_cli_verify_deep_restores
+    assert ops_backup.main(["--backup-dir", str(backup_dir), "verify", "--deep"]) == 0
+E   AssertionError: assert 1 == 0
+E    +  where 1 = <function main at 0x7f32a458a8e0>(['--backup-dir', '/tmp/pytest-of-user/pytest-3/test_cli_verify_deep_restores0/backups', 'verify', '--deep'])
+E    +    where <function main at 0x7f32a458a8e0> = ops_backup.main
+----------------------------- Captured stdout call -----------------------------
+{
+  "backup_dir_entries": 1,
+  "deep": true,
+  "duration_seconds": 0.0,
+  "failed": 1,
+  "failures": [
+    {
+      "checks": {
+        "deep": "restore failed: FinancialIntegrityError",
+        "deep_ok": false,
+        "exists": true,
+        "manifest_present": true,
+        "sha256_actual": "38b6f113ee04451fef86409cbb6f76141e2c775721224b40347a90502ebe95f3",
+        "sha256_expected": "38b6f113ee04451fef86409cbb6f76141e2c775721224b40347a90502ebe95f3",
+        "sha256_matches": true,
+        "size_bytes": 12172,
+        "size_matches": true
+      },
+      "file": "erp-20261112T213617Z.erpbackup"
+    }
+  ],
+  "ok": false,
+  "verified": 1,
+  "verified_at": "2026-11-12T21:36:17.281335+00:00"
+}
+----------------------------- Captured stderr call -----------------------------
+{"detail": "1 backup artefact(s) failed verification", "event": "BACKUP_INTEGRITY_FAILED", "fields": {"failed": 1, "verified": 1}, "service": "algerian-ai-erp", "severity": "error", "timestamp": "2026-11-12T21:36:17.281352+00:00"}
+__________ test_complete_14_step_end_to_end_supplier_invoice_workflow __________
+tests/test_phase6_ocr_benchmark_e2e.py:290: in test_complete_14_step_end_to_end_supplier_invoice_workflow
+    restored = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+________________ test_backup_and_restore_preserve_the_audit_key ________________
+tests/test_phase8_upload_boundary_and_ci.py:1400: in test_backup_and_restore_preserve_the_audit_key
+    report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+_ test_restored_database_and_vault_are_reopenable_without_the_original_secrets _
+tests/test_phase8_upload_boundary_and_ci.py:1501: in test_restored_database_and_vault_are_reopenable_without_the_original_secrets
+    report = restore_and_verify_backup(
+dz_erp/security_audit.py:1087: in restore_and_verify_backup
+    raise FinancialIntegrityError(
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+_____ test_restore_is_usable_from_a_fresh_process_in_a_different_directory _____
+tests/test_phase9_process_boundary.py:101: in test_restore_is_usable_from_a_fresh_process_in_a_different_directory
+    restored = run_worker("restore", state)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_phase9_process_boundary.py:51: in run_worker
+    assert proc.returncode == 0, (
+E   AssertionError: worker 'restore' exited 1
+E     stdout: {"__error__": "FinancialIntegrityError", "message": "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected."}
+E     
+E     stderr: 
+E   assert 1 == 0
+E    +  where 1 = CompletedProcess(args=['/tmp/vui/bin/python', '-m', 'tests.process_boundary_workers', 'restore', '--state', '/tmp/pyte...thon 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected."}\n', stderr='').returncode
+_____________________ test_incomplete_restore_is_rejected ______________________
+tests/test_phase9_process_boundary.py:229: in test_incomplete_restore_is_rejected
+    assert "failed SHA-256 verification" in payload["message"]
+E   AssertionError: assert 'failed SHA-256 verification' in 'Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.'
+_____ test_repeated_restores_are_idempotent_and_leave_a_usable_deployment ______
+tests/test_phase9_process_boundary.py:240: in test_repeated_restores_are_idempotent_and_leave_a_usable_deployment
+    first = run_worker("restore", state)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_phase9_process_boundary.py:51: in run_worker
+    assert proc.returncode == 0, (
+E   AssertionError: worker 'restore' exited 1
+E     stdout: {"__error__": "FinancialIntegrityError", "message": "Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected."}
+E     
+E     stderr: 
+E   assert 1 == 0
+E    +  where 1 = CompletedProcess(args=['/tmp/vui/bin/python', '-m', 'tests.process_boundary_workers', 'restore', '--state', '/tmp/pyte...thon 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected."}\n', stderr='').returncode
+=============================== warnings summary ===============================
+../../../tmp/vui/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /tmp/vui/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_phase11_audit_key_rotation.py::test_a_pre_versioning_database_restores_from_backup
+FAILED tests/test_phase11_audit_key_rotation.py::test_backup_restore_preserves_every_audit_key_version
+FAILED tests/test_phase11_audit_key_rotation.py::test_restore_reports_a_missing_key_version_as_unavailable
+FAILED tests/test_phase12_key_migration_and_backup.py::test_backup_restores_mixed_ciphertext_into_an_isolated_environment
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_of_a_tampered_registry_fails_closed
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_ciphertext_that_needs_an_absent_key
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_accepts_last_windows_binary_runtime_with_strict_preflight
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_noncanonical_tar_paths_before_writing[../outside.txt]
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_noncanonical_tar_paths_before_writing[vault/../outside.txt]
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_noncanonical_tar_paths_before_writing[../evil/../dest/sub/file]
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_refuses_preexisting_hardlink_target_before_writing
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_requires_a_backup_key_and_does_not_leak_on_failure
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_with_a_contradicting_audit_key_is_refused
+FAILED tests/test_phase5_security_audit_backup.py::test_audit_immutability_log_redaction_and_encrypted_backup_restore
+FAILED tests/test_phase62_backup_automation.py::test_deep_verify_restores_and_compares_the_ledger
+FAILED tests/test_phase62_backup_automation.py::test_cli_verify_deep_restores
+FAILED tests/test_phase6_ocr_benchmark_e2e.py::test_complete_14_step_end_to_end_supplier_invoice_workflow
+FAILED tests/test_phase8_upload_boundary_and_ci.py::test_backup_and_restore_preserve_the_audit_key
+FAILED tests/test_phase8_upload_boundary_and_ci.py::test_restored_database_and_vault_are_reopenable_without_the_original_secrets
+FAILED tests/test_phase9_process_boundary.py::test_restore_is_usable_from_a_fresh_process_in_a_different_directory
+FAILED tests/test_phase9_process_boundary.py::test_incomplete_restore_is_rejected
+FAILED tests/test_phase9_process_boundary.py::test_repeated_restores_are_idempotent_and_leave_a_usable_deployment
+= 22 failed, 855 passed, 3 skipped, 1 deselected, 1 warning in 257.90s (0:04:17) =

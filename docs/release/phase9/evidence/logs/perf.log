@@ -1,0 +1,67 @@
+{"event": "bootstrap", "tail": ["Created admin 'admin' (id=1) in /tmp/phase9g-2bph8220/perf.sqlite3"]}
+{
+ "event": "performance",
+ "healthz": {
+  "n": 200,
+  "p50_ms": 1.76,
+  "mean_ms": 1.95,
+  "p95_ms": 3.67,
+  "max_ms": 5.44,
+  "statuses": [
+   200
+  ]
+ },
+ "token_issue": {
+  "n": 30,
+  "p50_ms": 113.01,
+  "mean_ms": 118.19,
+  "p95_ms": 156.23,
+  "max_ms": 179.58,
+  "statuses": [
+   200
+  ]
+ },
+ "authenticated_listing": {
+  "n": 100,
+  "p50_ms": 6.34,
+  "mean_ms": 6.65,
+  "p95_ms": 7.2,
+  "max_ms": 39.95,
+  "statuses": [
+   200
+  ]
+ },
+ "trial_balance": {
+  "n": 50,
+  "p50_ms": 6.21,
+  "mean_ms": 6.29,
+  "p95_ms": 7.38,
+  "max_ms": 7.44,
+  "statuses": [
+   200
+  ]
+ },
+ "concurrency": {
+  "threads": 20,
+  "requests": 500,
+  "wall_seconds": 0.64,
+  "rps": 779.1,
+  "p50_ms": 24.04,
+  "p95_ms": 31.89,
+  "max_ms": 62.79,
+  "non_200": 0
+ },
+ "server_peak_rss_kb": 126180,
+ "db_bytes": 266240,
+ "ocr_native_text_seconds": [
+  0.02,
+  0.01,
+  0.01
+ ],
+ "ocr_native_text_mean_seconds": 0.01,
+ "ocr_neural_seconds": [
+  2.85,
+  1.73
+ ],
+ "ocr_neural_mean_seconds": 2.29
+}

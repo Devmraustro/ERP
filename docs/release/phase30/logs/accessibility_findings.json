@@ -1,0 +1,256 @@
+{
+  "total": 41,
+  "passed": 41,
+  "findings": [
+    {
+      "area": "contrast/light",
+      "check": "text on surface",
+      "ok": true,
+      "detail": "16.49:1 (threshold 4.5:1, colours #15202B on #FFFFFF)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "muted text on surface",
+      "ok": true,
+      "detail": "5.70:1 (threshold 4.5:1, colours #5B6875 on #FFFFFF)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "text on surface_alt",
+      "ok": true,
+      "detail": "15.75:1 (threshold 4.5:1, colours #15202B on #F8FAFB)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "text on surface_raised",
+      "ok": true,
+      "detail": "16.49:1 (threshold 4.5:1, colours #15202B on #FFFFFF)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "disabled text on surface_alt",
+      "ok": true,
+      "detail": "3.32:1 (threshold 3.0:1, colours #7E8B99 on #F8FAFB)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "primary button label",
+      "ok": true,
+      "detail": "13.10:1 (threshold 4.5:1, colours #FFFFFF on #16324F)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "primary button label (hover)",
+      "ok": true,
+      "detail": "10.36:1 (threshold 4.5:1, colours #FFFFFF on #1E4266)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "primary button label (pressed)",
+      "ok": true,
+      "detail": "15.15:1 (threshold 4.5:1, colours #FFFFFF on #102740)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "accent button label",
+      "ok": true,
+      "detail": "6.45:1 (threshold 4.5:1, colours #FFFFFF on #B3282D)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "accent button label (hover)",
+      "ok": true,
+      "detail": "8.34:1 (threshold 4.5:1, colours #FFFFFF on #961F24)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "danger button label",
+      "ok": true,
+      "detail": "6.54:1 (threshold 4.5:1, colours #FFFFFF on #B3261E)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "danger fill on surface (boundary)",
+      "ok": true,
+      "detail": "6.54:1 (threshold 3.0:1, colours #B3261E on #FFFFFF)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "primary fill on surface (boundary)",
+      "ok": true,
+      "detail": "13.10:1 (threshold 3.0:1, colours #16324F on #FFFFFF)"
+    },
+    {
+      "area": "contrast/light",
+      "check": "sidebar active label",
+      "ok": true,
+      "detail": "10.19:1 (threshold 4.5:1, colours #FFFFFF on #1F4368)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "text on surface",
+      "ok": true,
+      "detail": "13.97:1 (threshold 4.5:1, colours #E4EBF2 on #171E26)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "muted text on surface",
+      "ok": true,
+      "detail": "6.76:1 (threshold 4.5:1, colours #98A6B5 on #171E26)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "text on surface_alt",
+      "ok": true,
+      "detail": "13.18:1 (threshold 4.5:1, colours #E4EBF2 on #1B232D)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "text on surface_raised",
+      "ok": true,
+      "detail": "12.55:1 (threshold 4.5:1, colours #E4EBF2 on #1E2732)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "disabled text on surface_alt",
+      "ok": true,
+      "detail": "3.26:1 (threshold 3.0:1, colours #66737F on #1B232D)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "primary button label",
+      "ok": true,
+      "detail": "5.53:1 (threshold 4.5:1, colours #FFFFFF on #2E6CA4)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "primary button label (hover)",
+      "ok": true,
+      "detail": "6.42:1 (threshold 4.5:1, colours #FFFFFF on #2A6294)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "primary button label (pressed)",
+      "ok": true,
+      "detail": "7.94:1 (threshold 4.5:1, colours #FFFFFF on #24547E)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "accent button label",
+      "ok": true,
+      "detail": "5.25:1 (threshold 4.5:1, colours #0F151B on #E0605F)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "accent button label (hover)",
+      "ok": true,
+      "detail": "6.72:1 (threshold 4.5:1, colours #0F151B on #EC7B7A)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "danger button label",
+      "ok": true,
+      "detail": "5.70:1 (threshold 4.5:1, colours #0F151B on #E5695F)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "danger fill on surface (boundary)",
+      "ok": true,
+      "detail": "5.21:1 (threshold 3.0:1, colours #E5695F on #171E26)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "primary fill on surface (boundary)",
+      "ok": true,
+      "detail": "3.04:1 (threshold 3.0:1, colours #2E6CA4 on #171E26)"
+    },
+    {
+      "area": "contrast/dark",
+      "check": "sidebar active label",
+      "ok": true,
+      "detail": "14.58:1 (threshold 4.5:1, colours #FFFFFF on #1D2A38)"
+    },
+    {
+      "area": "contrast",
+      "check": "token module reports its own measured contrasts",
+      "ok": true,
+      "detail": "{'light_text_on_surface': 16.491616737161223, 'dark_text_on_surface': 13.969988744441645}"
+    },
+    {
+      "area": "keyboard",
+      "check": "window exposes tab-focusable controls",
+      "ok": true,
+      "detail": "7 focusable widgets"
+    },
+    {
+      "area": "keyboard",
+      "check": "sidebar is tab-reachable",
+      "ok": true,
+      "detail": "11"
+    },
+    {
+      "area": "keyboard",
+      "check": "Tab reaches multiple distinct controls",
+      "ok": true,
+      "detail": "QListWidget:NavList \u2192 QPushButton:SidebarToggle \u2192 QToolButton:IconButton \u2192 QComboBox:- \u2192 QComboBox:- \u2192 IconButton:IconButton \u2192 QLineEdit:SearchBox \u2192 QTableWidget:-"
+    },
+    {
+      "area": "keyboard",
+      "check": "Tab reaches the screen's search box",
+      "ok": true,
+      "detail": [
+        "QLineEdit:SearchBox"
+      ]
+    },
+    {
+      "area": "keyboard",
+      "check": "Tab reaches the table",
+      "ok": true,
+      "detail": [
+        "QTableWidget:-"
+      ]
+    },
+    {
+      "area": "keyboard",
+      "check": "the table does not trap Tab (cell-by-cell navigation off)",
+      "ok": true,
+      "detail": "1 consecutive table stops in 14 presses"
+    },
+    {
+      "area": "keyboard",
+      "check": "Tab returns to the sidebar (the order is a cycle, not a dead end)",
+      "ok": true,
+      "detail": "[0, 9]"
+    },
+    {
+      "area": "keyboard",
+      "check": "sidebar rows are reachable with arrow keys",
+      "ok": true,
+      "detail": "3 -> 4"
+    },
+    {
+      "area": "labels",
+      "check": "every visible button/input has a name, label or placeholder",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "area": "state",
+      "check": "a disabled button is visually distinguishable",
+      "ok": true,
+      "detail": "1440 differing sampled pixels"
+    },
+    {
+      "area": "errors",
+      "check": "load errors render a visible message",
+      "ok": true,
+      "detail": true
+    },
+    {
+      "area": "errors",
+      "check": "the message text is present, not just an empty panel",
+      "ok": true,
+      "detail": "checked structurally"
+    }
+  ]
+}

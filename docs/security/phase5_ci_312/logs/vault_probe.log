@@ -1,0 +1,13 @@
+blob mode: 0o600
+blob dir mode: 0o755
+vault root mode: 0o755
+key file exists: True mode: 0o600
+plaintext in blob: False | blob bytes: 169 | magic: b'DZKV'
+temp leftovers: []
+read back ok: True
+tenant isolation: TenantIsolationError
+tamper detection: InvalidToken
+verify_blobs: {'checked': 1, 'failed': 0, 'by_version': {'1': 1}, 'errors': []}
+concurrent stores: files=16 errors=[]
+all readable: True
+permission denied: PermissionError

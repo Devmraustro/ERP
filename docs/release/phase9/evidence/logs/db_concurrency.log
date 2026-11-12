@@ -1,0 +1,61 @@
+/tmp/v9/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+{
+ "integrity_check": "ok",
+ "foreign_key_check": 0,
+ "journal_mode": "wal",
+ "tables": 27,
+ "rollback": {
+  "before": 1,
+  "after": 1,
+  "rolled_back": true
+ },
+ "concurrent_duplicate_creation": {
+  "outcomes": [
+   "200:{\"invoice_id\":1,\"workflow_state\":\"Validated\",\"validation_err",
+   "200:{\"invoice_id\":2,\"workflow_state\":\"DuplicateRejected\",\"valida"
+  ],
+  "validated": 1,
+  "duplicate_rejected": 1,
+  "invariant_ok": true
+ },
+ "invoices_in_db": 2,
+ "posting_workflow": {
+  "submit": 200,
+  "decide": 200,
+  "clerk_self_approval": 403,
+  "post_first": 200,
+  "post_same_key_replay": 200,
+  "post_replay_same_entry": true,
+  "post_other_key": 409,
+  "post_without_key": 400,
+  "posted_entries": 1,
+  "posted_entries_balanced": 1,
+  "single_posting_invariant_ok": true
+ },
+ "duplicate_posting": {
+  "refused_second": true,
+  "idempotent_replay": true
+ },
+ "trial_balance_after_posting": {
+  "balanced": true,
+  "debit": "11900.00",
+  "credit": "11900.00"
+ },
+ "restart": {
+  "session_status_after_restart": 200,
+  "session_payload": {
+   "user_id": 3,
+   "company_id": 1,
+   "branch_id": null,
+   "username": "acct_a",
+   "role": "accountant",
+   "token_id": 3,
+   "token_prefix": "dzsess_9HWXHu",
+   "expires_at": "2026-11-10T08:08:36.353361+00:00"
+  },
+  "integrity_after_restart": "ok",
+  "invoices_after_restart": 2
+ },
+ "verdict": "PASS"
+}

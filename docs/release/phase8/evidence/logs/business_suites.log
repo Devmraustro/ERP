@@ -1,0 +1,8 @@
+test_phase32_cross_phase_integration_audit :: ======================== 45 passed, 2 warnings in 9.86s ========================
+test_phase33_invoice_lifecycle :: ======================== 40 passed, 2 warnings in 8.32s ========================
+test_phase56_dr_foundations :: ============================== 21 passed in 0.15s ==============================
+test_phase36_accounting_and_tax_configuration :: ============================== 29 passed in 1.22s ==============================
+test_phase40_timbre_rule_provenance :: ======================== 22 passed, 2 warnings in 2.32s ========================
+test_phase46_timbre_rule_administration :: ======================== 39 passed, 2 warnings in 3.16s ========================
+test_phase27_scf_first_run :: ============================== 8 passed in 1.18s ===============================
+test_phase4_procurement_3way_match :: ============================== 3 passed in 0.37s ===============================

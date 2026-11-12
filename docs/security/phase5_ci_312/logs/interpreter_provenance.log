@@ -1,0 +1,13 @@
+== interpreter provenance (CI-equivalent environment) ==
+date            : 2026-11-09T20:38:28Z
+host            : Linux 6.1.158+ / 2 cores
+interpreter     : Python 3.12.10 (main, Nov  9 2026, 20:23:09) [GCC 12.2.0]
+venv            : /tmp/py312venv (created from /tmp/py312, prefix-built from source)
+build sources   : CPython v3.12.10 (codeload.github.com/python/cpython), OpenSSL 3.0.15, zlib 1.3.1, SQLite amalgamation 3.53.4 (npm better-sqlite3 13.0.3), libffi 3.4.6 headers + system libffi.so.8
+sha256 floor    : {(3, 11): (3, 11, 17), (3, 12): (3, 12, 10)}
+gate(current)   : True
+
+== lockfile install (--require-hashes) ==
+requirements    : requirements.lock.hashes.txt (53 pins, 1304 hashes)
+installed dists : 54
+requires-python : requires-python = ">=3.11.17,<3.13,!=3.12.0,!=3.12.1,!=3.12.2,!=3.12.3,!=3.12.4,!=3.12.5,!=3.12.6,!=3.12.7,!=3.12.8,!=3.12.9"

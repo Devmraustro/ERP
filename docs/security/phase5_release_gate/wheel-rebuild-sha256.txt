@@ -1,0 +1,11 @@
+Rebuilt wheel (NOT committed - binaries are not stored in this repository)
+  file    : algerian_ai_erp-0.1.0-py3-none-any.whl
+  size    : 683553 bytes
+  sha256  : 973924d581171d6b941f6773d202c5403768ea5d5008a8315ddc89f393ef9b1b
+  built   : verified tree + docs/security/phase3_blocker_closure/packaging-flat-layout.patch
+  rebuild : cp -r <tree> /tmp/pk && cd /tmp/pk \
+            && git apply .../packaging-flat-layout.patch \
+            && python -m pip wheel . --ignore-requires-python --no-deps -w dist
+  contents: see wheel-contents.phase5-rebuild.txt
+  note    : wheels are not byte-reproducible (zip timestamps); this hash identifies
+            this specific rebuild, it is not the Phase-3 hash e0136753... which stays missing.

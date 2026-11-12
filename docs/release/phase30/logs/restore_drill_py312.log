@@ -1,0 +1,35 @@
+==============================================================================
+Phase 30 — isolated safe-restore drill
+interpreter : 3.12.10
+tarfile.data_filter present : True
+temp root   : /tmp
+==============================================================================
+[PASS] real invoice posted through the API — workflow_state=Posted
+[PASS] source database created — /tmp/phase30-restore-qw1leo1x/source/erp.sqlite3
+[PASS] source uses two audit key versions — {1: 4, 2: 9}
+[PASS] backup written — phase30.erpbackup (50040 bytes)
+[PASS] backup reports both audit key versions — [1, 2]
+[PASS] backup report carries no key material
+[PASS] backup manifest present in report
+[PASS] restore returned a report — 7 keys
+[PASS] restored database file exists — erp_snapshot.sqlite3
+[PASS] PRAGMA integrity_check — ok
+[PASS] PRAGMA foreign_key_check clean — 0 rows
+[PASS] restored ledger balances — debit=148750.00 credit=148750.00
+[PASS] restored totals equal source totals — source=148750.00
+[PASS] report says audit chains valid
+[PASS] restored audit key versions — [1, 2]
+[PASS] audit events per key version match the source — restored={1: 4, 2: 9} source={1: 4, 2: 9}
+[PASS] audit chain v1 verifies
+[PASS] audit chain v2 verifies
+[PASS] audit key file restored alongside DB — erp_snapshot.sqlite3.audit.key
+[PASS] audit key registry restored — erp_snapshot.sqlite3.audit.keys.json
+[PASS] vault key material restored for the vault — vault.vault.key, vault.vault.keys.json
+[PASS] restored vault decrypts the stored blob — dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.enc
+[PASS] source backup byte-identical after restore — e9415ba628148828…
+[PASS] second restore into a fresh directory succeeds
+[PASS] restore with a wrong key is refused — InvalidToken
+==============================================================================
+RESULT: 25/25 passed, 0 failed
+interpreter: 3.12.10
+==============================================================================

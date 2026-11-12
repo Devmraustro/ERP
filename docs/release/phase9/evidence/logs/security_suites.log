@@ -1,0 +1,8 @@
+test_phase35_api_rate_limiting_and_request_logging :: ======================== 16 passed, 2 warnings in 3.57s ========================
+test_phase39_bounded_rate_limiting :: ======================= 32 passed, 2 warnings in 16.06s ========================
+test_phase43_limiter_hardening :: ============================= 17 passed in 10.15s ==============================
+test_phase47_request_id_boundary :: ======================== 19 passed, 2 warnings in 1.83s ========================
+test_phase57_ipv6_aggregation_and_trusted_proxy :: ============================== 7 passed in 0.05s ===============================
+test_phase58_security_selective_integration :: ======================= 92 passed, 2 warnings in 17.44s ========================
+test_phase59_sec13_14_15_closure :: ======================== 45 passed, 2 warnings in 5.82s ========================
+test_phase61_security_controls :: ======================== 20 passed, 2 warnings in 3.17s ========================

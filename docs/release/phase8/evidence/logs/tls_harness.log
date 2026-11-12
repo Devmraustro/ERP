@@ -1,0 +1,30 @@
+== staging workdir: /tmp/phase8c-ptqn4y3y
+== bootstrap: ["Created admin 'admin' (id=1) in /tmp/phase8c-ptqn4y3y/erp.sqlite3"]
+[    PASS     ] HTTPS request via reverse proxy: status=200 body=b'{"status":"ok","service":"algerian-ai-er'
+[    PASS     ] HSTS present on the TLS edge: hsts='max-age=31536000; includeSubDomains' (emitted by the harness edge, not by the application)
+[    PASS     ] self-signed certificate rejected by the default trust store: SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local 
+[NOT EXECUTED ] certificate valid against the PUBLIC trust store: requires a publicly trusted certificate; a self-signed CA cannot prove it
+[    PASS     ] plaintext request to the TLS port: refused (ConnectionResetError)
+[    PASS     ] HTTP to HTTPS redirect: status=301 location=https://localhost:8443/healthz (edge behaviour; the app itself does not redirect)
+[    PASS     ] Host header injection through the proxy: status=400
+[    PASS     ] allow-listed Host accepted: status=200
+[    PASS     ] token issuance over HTTPS through the proxy: status=200 token_prefix=dzsess_G
+[    PASS     ] authenticated call over HTTPS: status=200
+[    PASS     ] X-Forwarded-For rotation cannot bypass the limiter: statuses=[401, 401, 401, 429, 429, 429]
+[    PASS     ] X-Forwarded-Proto cannot whitelist a bad Host: status=400
+[  OBSERVED   ] direct peer reaching the backend: status=200 (the deployment must not expose the backend port)
+
+== summary
+      PASS      | HTTPS request via reverse proxy
+      PASS      | HSTS present on the TLS edge
+      PASS      | self-signed certificate rejected by the default trust store
+  NOT EXECUTED  | certificate valid against the PUBLIC trust store
+      PASS      | plaintext request to the TLS port
+      PASS      | HTTP to HTTPS redirect
+      PASS      | Host header injection through the proxy
+      PASS      | allow-listed Host accepted
+      PASS      | token issuance over HTTPS through the proxy
+      PASS      | authenticated call over HTTPS
+      PASS      | X-Forwarded-For rotation cannot bypass the limiter
+      PASS      | X-Forwarded-Proto cannot whitelist a bad Host
+    OBSERVED    | direct peer reaching the backend

@@ -1,0 +1,10 @@
+log mode: 0o600
+file lines: 1
+  leak password: False
+  leak token: False
+  leak authorization: False
+  leak bank_rib: False
+  leak raw_text: False
+NIN leaked: False | IBAN leaked: False
+redaction markers: 5 value-pattern markers: 0 1 1 0
+record survived: True

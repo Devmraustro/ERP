@@ -1,0 +1,11 @@
+  from starlette.testclient import TestClient as TestClient  # noqa
+healthz: 200 {'status': 'ok', 'service': 'algerian-ai-erp'}
+openapi disabled: 404
+unauth users list: 401
+token: 200 prefix: dzsess_dR6QQs
+session: 200
+rate-limit policy: 200 hosts: ['localhost', '127.0.0.1', '[::1]', 'testserver']
+bad host: 400
+upload-policy (public): 200
+wrong password: 401
+short new password (SEC-13): 422

@@ -1,0 +1,20 @@
+--- /home/user/ERP/docs/security/phase3_blocker_closure/untracked-files/tests/test_phase58_security_selective_integration.py	2026-11-09 20:13:00.918507180 +0000
++++ /tmp/gate/tests/test_phase58_security_selective_integration.py	2026-11-09 20:29:45.703853307 +0000
+@@ -491,8 +491,15 @@
+ 
+     key = Fernet.generate_key()
+     path = _backup(env, key=key)
+-    restored = restore_and_verify_backup(path, tmp_path / "restored", backup_encryption_key=key)
+-    assert restored["db_sha256"]
++    restored = restore_and_verify_backup(
++        backup_path=path,
++        backup_encryption_key=key,
++        restore_target_dir=tmp_path / "restored",
++    )
++    assert restored["db_sha256_verified"] is True
++    assert restored["audit_chains_valid"] is True
++    assert restored["integrity_check"] == "ok"
++    assert restored["foreign_key_check"] == "ok"
+ 
+ 
+ # ---------------------------------------------------------------------------

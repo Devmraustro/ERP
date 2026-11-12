@@ -1,0 +1,9 @@
+# SHA-256 of the integrated state (paths relative to a workspace checked out at
+# 5a3e47ddfba2b789bcff71d6438db4927f5c7986 and reconstructed from this package).
+# Verify with:  cd <reconstructed-workspace> && sha256sum -c INTEGRATED_STATE_SHA256.txt
+d991ff8006f44c69117cfc54d236ea41d4b1400cd063c8352c1c1f605f96d093  dz_erp/api.py
+f8af67b83fac671572dad7877c187d409c1578e9b9c8ba55e6ad22af72c41db2  dz_erp/decimal_utils.py
+12803bd3ddd82869e8bcb41bd0130fa3e2ba23a2902450722d797960c6b17566  dz_erp/procurement_stock.py
+9eeacb5164b71eb087ef2b96ee5f29c89217379b5fda8f80ae5a7707f2605792  dz_erp/security_audit.py
+734dec80d5d723dba4398e092bcefc9117e77a7389f246e727108db7804b76d4  ops/erp.env.example
+527bcc991f9f088adaa5766a822fc7306cca625f5227863c5ade3d5d05492837  tests/test_phase58_security_selective_integration.py

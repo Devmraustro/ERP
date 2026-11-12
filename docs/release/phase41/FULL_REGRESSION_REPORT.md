@@ -96,3 +96,48 @@ QT_QPA_PLATFORM=offscreen PYTHONPATH=. \
 The two exclusions are both explained above, and both are consequences of things this phase
 deliberately did not do (integrate a blocked schema change; keep a GUI-only extra out of the runtime
 lock).
+
+## 8. Independent re-verification on the committed tree
+
+The result was **reproduced from scratch after the work was committed**, because the sandbox wipes
+`/tmp` between sessions and a result that cannot be re-derived is not evidence.
+
+| Step | Outcome |
+| --- | --- |
+| `/tmp` wiped (interpreter, sqlite object, OpenSSL tree all gone) | confirmed |
+| `docs/release/phase35/toolchain/build_env.sh 3.12.10` | CPython 3.12.10 + zlib rebuilt |
+| SQLite amalgamation rebuilt without tclsh | 190,278 lines, `sqlite3 3.45.3` importable |
+| OpenSSL 3.0.20 re-fetched, `_ssl` + `_hashlib` relinked | `ssl: OpenSSL 3.0.20`, `pbkdf2_hmac` works |
+| `_ctypes` relinked against `libffi.so.8` | `ctypes` + `tarfile.data_filter` work |
+| `pip install -r requirements.lock.txt` + PySide6 | fastapi 0.140.6, PySide6 6.11.2 |
+| Qt stub libs regenerated (patched `mkstub.py` for the 3.12 site-packages path) | `libGL`/`libEGL`/`libxkbcommon`/`libdbus` stubs |
+| **Full suite on the committed tree** | **946 passed, 3 skipped, 0 failed** |
+
+Log: `docs/release/phase35/logs/final_committed_tree.log`.
+
+Two environment faults surfaced during this re-run and were fixed **in the environment, not the
+repo** — both are the same H-1 dependency issue:
+
+- `pip install -r requirements.lock.txt` pulled `opencv-python` (the GUI wheel) as a transitive
+  dependency of `rapidocr-onnxruntime`, which fails `test_the_installed_cv2_does_not_link_libgl` and
+  `test_the_installed_cv2_is_the_headless_build`.
+- Replacing it with the pinned `opencv-python-headless==4.11.0.86` from the lock resolves both, and
+  `test_live_environment_passes`.
+
+This is direct evidence for H-1: the lockfile **documents** the OpenCV defect and specifies the
+headless build, but a plain `pip install -r requirements.lock.txt` still installs the GUI wheel,
+because the transitive requirement is unpinned. The hash lock cannot fix this and neither can the
+plain lock; only pinning the transitive dependency will.
+
+### Rebuild cost of a missing tclsh
+
+Rebuilding the amalgamation also required headers the `SRC` list omits, discovered one at a time:
+
+```
+ext/fts3/fts3.h      ext/rtree/rtree.h      ext/icu/sqliteicu.h
+ext/session/sqlite3session.h                tsrc/keywordhash.h (from tool/mkkeywordhash.c)
+```
+
+Hand-stubbing `keywordhash.c` produced an `_sqlite3` that linked but failed at import with
+`undefined symbol: sqlite3_keyword_count`. Generating it from `tool/mkkeywordhash.c` is required.
+Both facts are recorded so the next rebuild is one pass, not six.

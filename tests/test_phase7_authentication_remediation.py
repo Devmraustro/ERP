@@ -274,10 +274,13 @@ def test_openapi_contract_no_longer_advertises_identity_headers(env: SimpleNames
     assert "X-User-Id" not in declared
     assert "X-Company-Id" not in declared
     # The public set is exactly what the implementation serves without a
-    # credential: the health probe, the endpoint that *issues* credentials, and
-    # the deliberately non-sensitive upload-policy description.  Anything else
-    # appearing here would mean a protected route is published as open.
+    # credential: the health probe (asserted just above), the readiness probe that
+    # infrastructure scrapes before any user exists (Phase 10), the endpoint that
+    # *issues* credentials, and the deliberately non-sensitive upload-policy
+    # description.  Anything else appearing here would mean a protected route is
+    # published as open.
     assert protected_without_security == [
+        "GET /readyz",
         "GET /api/v1/upload-policy",
         "POST /api/v1/auth/token",
     ], f"unexpected public operations: {protected_without_security}"

@@ -1,0 +1,19 @@
+# Phase 10: load the OCR engine for real (deep check) once a day. A missing model
+# or a broken onnxruntime install otherwise shows up as "intake is silently slow
+# and every document needs manual entry".
+[Unit]
+Description=DZ ERP OCR engine health check
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+ExecStart=/usr/bin/env python -m dz_erp.ops_checks ocr
+Restart=no
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+# Phase 10: log rotation for the DZ ERP security log.
+#
+# The application writes newline-delimited JSON to ERP_SECURITY_LOG_PATH with
+# umask 0077. Duplicating that stream with copytruncate keeps the file descriptor
+# the running process holds valid - a rename would leave the process writing to an
+# unlinked inode and the new file permanently empty. The trade-off is a window of
+# a few milliseconds in which a line can be lost; for a security log that is
+# acceptable, and it is stated rather than hidden.
+#
+# Install: cp to /etc/logrotate.d/dz-erp (mode 0644). Test with `logrotate -d`.
+/srv/dz-erp/logs/security.jsonl {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0600 dz-erp dz-erp
+    su dz-erp dz-erp
+}
+
+# Backup verification summaries are rewritten in place by every verify run; they
+# are small and are kept for the same window so an auditor can reconstruct when
+# an artefact was last proven intact.
+/var/log/dz-erp/*.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0600 dz-erp dz-erp
+    su dz-erp dz-erp
+}

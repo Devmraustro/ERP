@@ -83,8 +83,15 @@ def test_corrupt_config_recovers_to_defaults(tmp_path: Path) -> None:
 
 
 def test_config_validation_refuses_bad_values(tmp_path: Path) -> None:
+    # Phase 29 added English as a third supported UI language (fr/ar/en), so
+    # "en" is now valid. The assertion is narrowed to a genuinely unsupported
+    # language rather than dropped: bad values must still be refused, and the
+    # "en" acceptance is asserted explicitly instead of implicitly.
+    DesktopConfig(data_dir=str(tmp_path), language="en").validate()
     with pytest.raises(ValueError):
-        DesktopConfig(data_dir=str(tmp_path), language="en").validate()
+        DesktopConfig(data_dir=str(tmp_path), language="es").validate()
+    with pytest.raises(ValueError):
+        DesktopConfig(data_dir=str(tmp_path), theme="sepia").validate()
     with pytest.raises(ValueError):
         DesktopConfig(data_dir=str(tmp_path), mode="server", server_url="").validate()
     with pytest.raises(ValueError):

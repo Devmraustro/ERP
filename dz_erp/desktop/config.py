@@ -28,13 +28,17 @@ from typing import Any, Dict, Optional
 
 from . import APP_NAME
 
-LANGUAGES = ("fr", "ar")
+LANGUAGES = ("fr", "ar", "en")
 MODES = ("local", "server")
+#: Visual themes. Persisted like every other preference; see ``tokens`` for
+#: the palettes themselves (this module stays Qt-free and asset-free).
+THEMES = ("light", "dark")
 
 #: Fields that may be persisted. Anything else is dropped on save, so a
 #: secret that someone stuffs into the config object cannot reach the disk.
 _PERSISTED_FIELDS = (
     "language",
+    "theme",
     "mode",
     "server_url",
     "db_path",
@@ -60,6 +64,9 @@ class DesktopConfig:
     """Everything the client needs to start. Deliberately free of secrets."""
 
     language: str = "fr"
+    #: ``light`` or ``dark``; the Phase 29 theme applied at start-up and
+    #: switched from the top bar. Persisted so the choice survives a restart.
+    theme: str = "light"
     mode: str = "local"
     server_url: str = ""
     db_path: str = ""
@@ -87,6 +94,8 @@ class DesktopConfig:
         """Raise ``ValueError`` with an actionable message on bad values."""
         if self.language not in LANGUAGES:
             raise ValueError(f"language must be one of {LANGUAGES}, got {self.language!r}")
+        if self.theme not in THEMES:
+            raise ValueError(f"theme must be one of {THEMES}, got {self.theme!r}")
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}")
         if self.mode == "server" and not self.server_url:

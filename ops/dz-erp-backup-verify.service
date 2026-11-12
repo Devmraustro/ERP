@@ -1,0 +1,30 @@
+# Phase 10: prove the newest artefacts are still intact and still restorable.
+# `verify` recomputes every SHA-256 against its manifest (no key needed) and the
+# weekly job adds --deep, which actually restores into a temporary directory and
+# checks the ledger balances and the audit chain.
+[Unit]
+Description=DZ ERP backup verification (hash, and weekly deep restore)
+Documentation=file:/srv/dz-erp/docs/release/phase10/BACKUP_AND_RECOVERY_RUNBOOK.md
+After=dz-erp-backup.service
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+Environment=ERP_BACKUP_DIR=/mnt/backup-offsite/dz-erp
+Environment=ERP_BACKUP_KEY_FILE=/etc/dz-erp/backup.key
+# Sunday runs the deep restore; every other day the hash check is enough.
+ExecStart=/bin/sh -c 'day=$(date -u +%u); \
+    if [ "$day" = "7" ]; then \
+        exec /usr/bin/env python -m dz_erp.ops_backup --backup-dir "${ERP_BACKUP_DIR}" verify --deep; \
+    else \
+        exec /usr/bin/env python -m dz_erp.ops_backup --backup-dir "${ERP_BACKUP_DIR}" verify; \
+    fi'
+Restart=no
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

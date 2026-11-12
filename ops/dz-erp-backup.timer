@@ -1,0 +1,15 @@
+# Phase 10: nightly backup. 02:15 UTC keeps the job clear of the 00:00 and 12:00
+# invoicing peaks and leaves the rest of the night for the verify job.
+[Unit]
+Description=Run the DZ ERP encrypted backup nightly
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+AccuracySec=1min
+# If the host was down at 02:15, run as soon as it comes back rather than skipping
+# the night: a missed night is a wider recovery point.
+Persistent=true
+Unit=dz-erp-backup.service
+
+[Install]
+WantedBy=timers.target

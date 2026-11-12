@@ -12,6 +12,44 @@ from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
 from .intake_ocr import levenshtein_distance, normalize_invoice_ref
 from .localization import calculate_droit_de_timbre, validate_algerian_identifiers
 
+# The same three methods the ``supplier_invoices.payment_method`` CHECK
+# constraint allows. Validating them here turns a rejected write into a clean
+# 422 instead of a sqlite3.IntegrityError escaping the API as a 500.
+VALID_PAYMENT_METHODS = ("CASH", "BANK_TRANSFER", "CHEQUE")
+MAX_SUPPLIER_INVOICE_NO_LENGTH = 128
+
+
+def compute_line_ht_dzd(qty: Any, unit_price_dzd: Any, discount_pct: Any = "0.00") -> str:
+    """Line net (HT) implied by quantity, unit price and discount, formatted.
+
+    Single definition of the arithmetic the invoice validation compares a
+    declared line amount against, so an omitted ``line_ht_dzd`` is derived with
+    exactly the same rule instead of raising ``TypeError`` on ``None``.
+    """
+    qty_dec = round_qty(qty)
+    pu_dec = round_qty(unit_price_dzd)
+    disc_dec = to_decimal("0.00" if discount_pct is None else discount_pct)
+    expected = round_dzd(qty_dec * pu_dec * ((Decimal("100.00") - disc_dec) / Decimal("100.00")))
+    return format_dzd(expected)
+
+
+def _materialise_line_ht(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return copies of ``lines`` with an omitted/null ``line_ht_dzd`` filled in.
+
+    The request model declares ``line_ht_dzd`` optional. A caller that omits it
+    gets the derived amount (so the payload hash and the validation loop both
+    see a concrete value) rather than an unhandled ``TypeError`` and HTTP 500.
+    """
+    materialised: List[Dict[str, Any]] = []
+    for line in lines:
+        current = dict(line)
+        if current.get("line_ht_dzd") is None:
+            current["line_ht_dzd"] = compute_line_ht_dzd(
+                current["qty"], current["unit_price_dzd"], current.get("discount_pct")
+            )
+        materialised.append(current)
+    return materialised
+
 
 def compute_invoice_payload_hash(
     supplier_id: int,
@@ -404,8 +442,30 @@ def create_and_validate_supplier_invoice(
 ) -> Dict[str, Any]:
     """Create a supplier invoice draft and run deterministic validation + 3-way matching."""
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Request-shape validation happens before any business rule or write, so a
+    # malformed request is a clean 422 (ValueError) rather than an unhandled
+    # 500 from ``int(invoice_date[:4])`` or a CHECK-constraint IntegrityError.
+    if not isinstance(supplier_invoice_no, str) or not supplier_invoice_no.strip():
+        raise ValueError("supplier_invoice_no is required.")
+    if len(supplier_invoice_no.strip()) > MAX_SUPPLIER_INVOICE_NO_LENGTH:
+        raise ValueError(
+            f"supplier_invoice_no exceeds {MAX_SUPPLIER_INVOICE_NO_LENGTH} characters."
+        )
+    if payment_method not in VALID_PAYMENT_METHODS:
+        raise ValueError(
+            f"payment_method {payment_method!r} is not supported; expected one of {sorted(VALID_PAYMENT_METHODS)}."
+        )
+    try:
+        invoice_day = datetime.strptime(str(invoice_date).strip(), "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        # Rejecting here also stops the internal TypeError text ("invalid
+        # literal for int() ...") from being echoed to the caller.
+        raise ValueError("invoice_date must be a valid calendar date in YYYY-MM-DD form.") from exc
+
     norm_ref = normalize_invoice_ref(supplier_invoice_no)
-    fiscal_year = int(invoice_date[:4])
+    fiscal_year = invoice_day.year
+    lines = _materialise_line_ht(lines)
 
     ht_dec = round_dzd(amount_ht_dzd)
     tva_dec = round_dzd(amount_tva_dzd)
@@ -483,7 +543,10 @@ def create_and_validate_supplier_invoice(
                 validation_errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
 
             expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
-            declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
+            # ``line_ht_dzd`` is optional in the public request model; it was
+            # materialised from the same rule above, so no line reaches
+            # round_dzd(None) (which used to escape as an unhandled HTTP 500).
+            declared_line_ht = round_dzd(line["line_ht_dzd"])
             if declared_line_ht != expected_line_ht:
                 validation_errors.append(
                     f"LINE_{idx + 1}_HT_MATH_MISMATCH:declared={declared_line_ht:.2f}!=expected={expected_line_ht:.2f}"
@@ -545,6 +608,28 @@ def create_and_validate_supplier_invoice(
         expected_ttc = round_dzd(ht_dec + tva_dec + timbre_dec)
         if ttc_dec != expected_ttc:
             validation_errors.append(f"TOTAL_TTC_MISMATCH:declared={ttc_dec:.2f}!=expected={expected_ttc:.2f}")
+
+        # Phase 35 (from PR #7): the header reconciliation as one reviewed gate.
+        #
+        # The four checks above are kept because they are what the existing
+        # callers and tests know, but they miss one thing that matters: a
+        # negative header. Before this, a request declaring HT=-100, TVA=-19,
+        # TTC=-119 reconciled perfectly against its own negative lines and was
+        # written with workflow_state='Validated' and an EMPTY error list - a
+        # negative payable that the posting step would then carry into the GL.
+        # A credit note is a positive-amount reversal document, so a negative
+        # header can only come from a malformed payload.
+        validation_errors.extend(
+            _validate_invoice_totals(
+                ht_dec=ht_dec,
+                tva_dec=tva_dec,
+                timbre_dec=timbre_dec,
+                ttc_dec=ttc_dec,
+                payment_method=payment_method,
+                sum_line_ht=sum_line_ht,
+                sum_line_tva=sum_line_tva,
+            )
+        )
 
         if is_exact_dup:
             wf_state = "DuplicateRejected"
@@ -1734,3 +1819,338 @@ def post_reversal(
             after_state=result,
         )
         return result
+
+
+class _RefusedAttempt(FinancialIntegrityError):
+    """A refusal whose audit record must outlive the rollback of the attempt.
+
+    ``db.transaction()`` rolls back everything written inside the failed
+    attempt, including an audit event appended there. A refusal is itself
+    evidence an auditor needs — who tried, against which invoice, and why it
+    was refused — so the event is carried on the exception and written by the
+    public function in its own transaction after the rollback.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        action_type: str,
+        target_model: str,
+        target_id: str,
+        after_state: Dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.audit_action_type = action_type
+        self.audit_target_model = target_model
+        self.audit_target_id = target_id
+        self.audit_after_state = after_state
+
+
+# ===========================================================================
+# Phase 35 — integrity gates integrated from PR #7 (commit 2427fda)
+# ===========================================================================
+# These seven validation helpers existed in PR #7's procurement module and were
+# absent here. They are pure functions over an existing connection plus the
+# decimal helpers this module already imports, so they port without any new
+# dependency. They add the checks the workspace performed only partially:
+# per-line bounds and product existence, header/timbre/TTC reconciliation,
+# duplicate detection, PO price variance, the reviewed-source fingerprint, and
+# approval invalidation on change.
+#
+# They are NOT yet on the live write path: wiring them into
+# ``create_and_validate_supplier_invoice`` changes behaviour for existing
+# callers and is done as a separate, tested step (see PHASE38 report).
+
+def _validate_invoice_lines(
+    conn: Any,
+    *,
+    company_id: int,
+    lines: List[Dict[str, Any]],
+    price_tolerance_dzd: str,
+    vat_rates: Any = None,
+) -> Tuple[List[str], List[Dict[str, Any]], Decimal, Decimal]:
+    """Per-line arithmetic, Algerian TVA rates, discount bounds and 3-way match.
+
+    ``vat_rates`` is the effective-dated rate set resolved for the invoice date
+    (see :func:`dz_erp.localization.resolve_vat_rates`). Omitting it keeps the
+    historical built-in whitelist; callers holding the invoice date must pass
+    the resolved set so a configured, reviewed rate table governs validation.
+    """
+    errors: List[str] = []
+    prepared: List[Dict[str, Any]] = []
+    sum_line_ht = Decimal("0.00")
+    sum_line_tva = Decimal("0.00")
+    allowed_rates = (
+        tuple(vat_rates.rates) if vat_rates is not None
+        else (Decimal("0.0"), Decimal("9.0"), Decimal("19.0"))
+    )
+
+    for idx, line in enumerate(lines):
+        qty = round_qty(line["qty"])
+        pu = round_qty(line["unit_price_dzd"])
+        disc = to_decimal(line.get("discount_pct", "0.00"))
+        rate = to_decimal(line.get("tax_rate", "19.0"))
+        if rate not in allowed_rates:
+            errors.append(f"LINE_{idx + 1}_INVALID_ALGERIAN_TVA_RATE:{rate}")
+        # Documented business rule (Phase 31): a discount is a percentage in
+        # [0, 100] inclusive. A negative or >100 discount is refused as a
+        # validation error — never clamped into range — so the invoice stays in
+        # NeedsReview and cannot be submitted.
+        if disc < Decimal("0.00") or disc > Decimal("100.00"):
+            errors.append(f"LINE_{idx + 1}_DISCOUNT_OUT_OF_RANGE:{disc}")
+        if qty <= Decimal("0.000000"):
+            errors.append(f"LINE_{idx + 1}_QTY_NONPOSITIVE:{qty}")
+        # F-R2-4: the same policy that refuses a non-positive quantity refuses a
+        # non-positive unit price. A negative price is not how this system models
+        # a credit note — a reversal is an IN_REFUND document with positive
+        # amounts (see reverse_posted_invoice) — so a negative price can only
+        # produce a negative-valued payable line that no workflow expects.
+        if pu <= Decimal("0.000000"):
+            errors.append(f"LINE_{idx + 1}_PRICE_NONPOSITIVE:{pu}")
+
+        expected_line_ht = round_dzd(qty * pu * ((Decimal("100.00") - disc) / Decimal("100.00")))
+        declared_line_ht = round_dzd(line.get("line_ht_dzd", expected_line_ht))
+        if declared_line_ht != expected_line_ht:
+            errors.append(
+                f"LINE_{idx + 1}_HT_MATH_MISMATCH:declared={declared_line_ht:.2f}!=expected={expected_line_ht:.2f}"
+            )
+
+        line_tva = round_dzd(declared_line_ht * (rate / Decimal("100.00")))
+        line_ttc = round_dzd(declared_line_ht + line_tva)
+        sum_line_ht = round_dzd(sum_line_ht + declared_line_ht)
+        sum_line_tva = round_dzd(sum_line_tva + line_tva)
+
+        po_line_id = line.get("po_line_id")
+        if po_line_id is not None:
+            po_line = conn.execute(
+                "SELECT * FROM purchase_order_lines WHERE id = ? AND company_id = ?",
+                (po_line_id, company_id),
+            ).fetchone()
+            if not po_line:
+                errors.append(f"LINE_{idx + 1}_PO_LINE_NOT_FOUND:{po_line_id}")
+            else:
+                rem_receivable_to_bill = round_qty(
+                    to_decimal(po_line["qty_received"]) - to_decimal(po_line["qty_invoiced"])
+                )
+                if qty > rem_receivable_to_bill:
+                    errors.append(
+                        f"THREE_WAY_MATCH_QTY_MISMATCH:line={idx + 1},billed={qty:.6f}>unbilled_received={rem_receivable_to_bill:.6f}"
+                    )
+                po_pu = round_qty(po_line["unit_price_dzd"])
+                if abs(pu - po_pu) > to_decimal(price_tolerance_dzd):
+                    errors.append(
+                        f"THREE_WAY_MATCH_PRICE_MISMATCH:line={idx + 1},invoice_pu={pu:.6f}!=po_pu={po_pu:.6f}"
+                    )
+
+        prepared.append(
+            {
+                "po_line_id": po_line_id,
+                "product_id": line.get("product_id"),
+                "description": line.get("description", f"Line {idx + 1}"),
+                "qty": f"{qty:.6f}",
+                "unit_price_dzd": f"{pu:.6f}",
+                "discount_pct": format_dzd(disc),
+                "tax_rate": f"{rate:.1f}",
+                "line_ht_dzd": format_dzd(declared_line_ht),
+                "line_tva_dzd": format_dzd(line_tva),
+                "line_ttc_dzd": format_dzd(line_ttc),
+            }
+        )
+    return errors, prepared, sum_line_ht, sum_line_tva
+
+def _validate_invoice_totals(
+    *,
+    ht_dec: Decimal,
+    tva_dec: Decimal,
+    timbre_dec: Decimal,
+    ttc_dec: Decimal,
+    payment_method: str,
+    sum_line_ht: Decimal,
+    sum_line_tva: Decimal,
+    timbre_rule: Any = None,
+) -> List[str]:
+    """Header HT/TVA/TTC reconciliation and the Algerian timbre rule.
+
+    ``timbre_rule`` is the effective-dated rule resolved for this invoice's
+    date (see :func:`dz_erp.localization.resolve_timbre_rule`). When it is
+    omitted the compiled-in constants are used, which is the historical
+    behaviour; callers that have the invoice date must pass it so a configured
+    rule version governs the calculation instead of a constant.
+    """
+    errors: List[str] = []
+    # F-R2-4: zero is legitimate (exempt, fully discounted); a negative total is
+    # not. A credit note carries positive amounts, so a negative header can only
+    # come from a malformed payload — and it would post a negative payable.
+    for label, value in (
+        ("HT", ht_dec),
+        ("TVA", tva_dec),
+        ("TIMBRE", timbre_dec),
+        ("TTC", ttc_dec),
+    ):
+        if value < Decimal("0.00"):
+            errors.append(f"HEADER_AMOUNT_NEGATIVE:{label}={value:.2f}")
+    if sum_line_ht != ht_dec:
+        errors.append(f"HEADER_HT_MISMATCH:sum_lines={sum_line_ht:.2f}!=header_ht={ht_dec:.2f}")
+    if sum_line_tva != tva_dec:
+        errors.append(f"HEADER_TVA_MISMATCH:sum_tva={sum_line_tva:.2f}!=header_tva={tva_dec:.2f}")
+    rule_kwargs = timbre_rule.as_kwargs() if timbre_rule is not None else {}
+    expected_timbre = calculate_droit_de_timbre(
+        ht_dec + tva_dec, payment_method=payment_method, **rule_kwargs
+    )
+    if timbre_dec != expected_timbre:
+        errors.append(
+            f"TIMBRE_MISMATCH:declared={timbre_dec:.2f}!=expected={expected_timbre:.2f}_for_{payment_method}"
+        )
+    expected_ttc = round_dzd(ht_dec + tva_dec + timbre_dec)
+    if ttc_dec != expected_ttc:
+        errors.append(f"TOTAL_TTC_MISMATCH:declared={ttc_dec:.2f}!=expected={expected_ttc:.2f}")
+    return errors
+
+def _duplicate_invoice_errors(
+    conn: Any,
+    *,
+    company_id: int,
+    supplier_id: int,
+    fiscal_year: int,
+    norm_ref: str,
+    ttc_dec: Decimal,
+    exclude_invoice_id: Optional[int] = None,
+) -> Tuple[List[str], bool]:
+    """Exact and fuzzy duplicate detection, scoped to the tenant.
+
+    ``exclude_invoice_id`` lets a *re-validation* of an existing invoice ignore
+    itself, so correcting a draft is never mistaken for re-creating it.
+    """
+    existing_invs = conn.execute(
+        """
+        SELECT id, supplier_invoice_no, normalized_invoice_no, amount_ttc_dzd, workflow_state
+        FROM supplier_invoices
+        WHERE company_id = ? AND supplier_id = ? AND fiscal_year = ?
+          AND workflow_state NOT IN ('Rejected', 'DuplicateRejected')
+          AND invoice_type = 'IN_INVOICE'
+          AND (? IS NULL OR id != ?)
+        """,
+        (company_id, supplier_id, fiscal_year, exclude_invoice_id, exclude_invoice_id),
+    ).fetchall()
+
+    errors: List[str] = []
+    is_exact_dup = False
+    for ex in existing_invs:
+        if ex["normalized_invoice_no"] == norm_ref:
+            is_exact_dup = True
+            errors.append(f"EXACT_DUPLICATE_INVOICE_REF_OF_ID_{ex['id']}")
+            break
+        dist = levenshtein_distance(ex["normalized_invoice_no"], norm_ref)
+        if dist <= 2 and abs(to_decimal(ex["amount_ttc_dzd"]) - ttc_dec) <= Decimal("1.00"):
+            errors.append(f"FUZZY_DUPLICATE_SUSPECTED:existing='{ex['supplier_invoice_no']}',dist={dist}")
+    return errors, is_exact_dup
+
+def _line_price_variance(
+    conn: Any,
+    company_id: int,
+    line: Any,
+    qty: Any,
+    line_ht: Any,
+) -> tuple[Any, Any, Any]:
+    """Receipt value, invoice value and their difference for one storable line.
+
+    The GRN credits the clearing account at the *receipt* cost recorded on
+    ``goods_receipt_lines``; the invoice debits the same account at the
+    *invoice* price. When those differ, the gap does not belong on the clearing
+    account — it is a purchase price variance. This returns:
+
+    * ``received_value`` — what the matched receipts put on the clearing account;
+    * ``invoice_value`` — what the invoice charges for the same quantity;
+    * ``variance`` — ``invoice_value - received_value`` (positive = invoiced
+      above receipt).
+
+    A line with no receipt history, or a non-storable line, has no receipt cost
+    to compare against and returns a zero variance, leaving the historical
+    treatment untouched.
+    """
+    zero = Decimal("0.00")
+    if not line["product_id"] or not line["po_line_id"]:
+        return line_ht, line_ht, zero
+    # Read the receipt lines and add them up in Decimal. Casting in SQL
+    # (``CAST(... AS REAL)``) would reintroduce binary floating point into a
+    # monetary path the project deliberately keeps exact: 1000 units at
+    # 1.000125 sum to 1000.1249999999999 in float, which rounds to 1000.12
+    # instead of the 1000.13 the GRN credited — a phantom cent of variance and a
+    # residual left on the clearing account, at identical prices.
+    rows = conn.execute(
+        """
+        SELECT grl.qty_done AS qty_done, grl.unit_cost_dzd AS unit_cost_dzd
+        FROM goods_receipt_lines grl
+        JOIN goods_receipts gr ON gr.id = grl.grn_id
+        WHERE grl.po_line_id = ? AND grl.company_id = ? AND gr.company_id = ?
+        """,
+        (line["po_line_id"], company_id, company_id),
+    ).fetchall()
+    received_qty = zero
+    received_total = zero
+    for row in rows:
+        receipt_qty = round_qty(row["qty_done"])
+        receipt_cost = round_qty(row["unit_cost_dzd"])
+        # Per-line rounding, exactly as the GRN posted its own clearing credit.
+        received_total += round_dzd(receipt_qty * receipt_cost)
+        received_qty += receipt_qty
+    if received_qty <= zero:
+        return line_ht, line_ht, zero
+    # The share of that receipt value attributable to the invoiced quantity.
+    # One exact multiplication, one division, one rounding: when the invoice
+    # covers the whole receipt the result is the receipt value itself, bit for
+    # bit, so the clearing account closes at zero.
+    received_value = round_dzd(received_total * qty / received_qty)
+    invoice_value = round_dzd(line_ht)
+    return received_value, invoice_value, (invoice_value - received_value)
+
+
+def _invalidate_approval_requests(
+    conn: Any,
+    company_id: int,
+    invoice_id: int,
+    *,
+    reason: str,
+    actor_user_id: int,
+    now_iso: str,
+    target_model: str = "supplier_invoices",
+    include_approved: bool = True,
+) -> List[int]:
+    """Explicitly invalidate the approvals a modified payload can no longer rely on."""
+    states = ("PENDING", "APPROVED") if include_approved else ("PENDING",)
+    placeholders = ",".join("?" for _ in states)
+    rows = conn.execute(
+        f"""
+        SELECT id FROM approval_requests
+        WHERE company_id = ? AND target_model = ? AND target_id = ?
+          AND decision IN ({placeholders})
+        ORDER BY id
+        """,
+        (company_id, target_model, invoice_id, *states),
+    ).fetchall()
+    request_ids = [int(r["id"]) for r in rows]
+    if request_ids:
+        marks = ",".join("?" for _ in request_ids)
+        conn.execute(
+            f"""
+            UPDATE approval_requests
+            SET decision = 'INVALIDATED', decided_by_id = ?, decided_at = ?, reason = ?
+            WHERE id IN ({marks})
+            """,
+            (actor_user_id, now_iso, reason, *request_ids),
+        )
+    return request_ids
+
+def _record_refused_attempt(db: ERPDatabase, company_id: int, user_id: int, refusal: _RefusedAttempt) -> None:
+    """Commit the audit record of a refused write (never the write itself)."""
+    with db.transaction() as conn:
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=user_id,
+            action_type=refusal.audit_action_type,
+            target_model=refusal.audit_target_model,
+            target_id=refusal.audit_target_id,
+            after_state=refusal.audit_after_state,
+        )

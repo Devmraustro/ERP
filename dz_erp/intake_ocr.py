@@ -1027,6 +1027,25 @@ def detect_prompt_injection(text: str) -> List[str]:
     return hits
 
 
+def _pdfplumber_model_version() -> str:
+    """Provenance label for native PDF text extraction, read from the parsers.
+
+    The label used to be a hardcoded "pdfplumber-0.11.6+pdfminer" string, so it
+    kept claiming an old parser version after the dependency was upgraded. A
+    provenance field that can drift from reality is worse than none: it makes a
+    reviewed document look like it was read by a parser it never touched.
+    """
+    import importlib.metadata as _metadata
+
+    versions = []
+    for distribution, fallback in (("pdfplumber", "pdfplumber"), ("pdfminer.six", "pdfminer")):
+        try:
+            versions.append(_metadata.version(distribution))
+        except _metadata.PackageNotFoundError:  # pragma: no cover - metadata always present when installed
+            versions.append(fallback)
+    return f"pdfplumber-{versions[0]}+pdfminer.six-{versions[1]}"
+
+
 def _confidence_payload(value: Optional[float], kind: str) -> Dict[str, Any]:
     """Every confidence field carries its provenance alongside its value.
 
@@ -1234,7 +1253,12 @@ def extract_document_ocr(
                 txt = page.extract_text() or ""
                 if txt.strip():
                     engine_name = "pdfplumber"
-                    model_version = "pdfplumber-0.11.6+pdfminer"
+                    # Provenance must name the versions that actually parsed the
+                    # document. It used to be the literal "pdfplumber-0.11.6+
+                    # pdfminer", which silently became a false record whenever the
+                    # pinned parser moved (Phase 10 moved it to 0.11.10). Reading
+                    # the installed metadata keeps the audit trail truthful.
+                    model_version = _pdfplumber_model_version()
                     for line_idx, raw_line in enumerate(txt.splitlines()):
                         if raw_line.strip():
                             bbox = [[0.0, float(line_idx * 15)], [500.0, float(line_idx * 15)], [500.0, float((line_idx + 1) * 15)], [0.0, float((line_idx + 1) * 15)]]

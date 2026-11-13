@@ -291,6 +291,121 @@ def run(state: Path) -> int:
         ),
     )
     check(
+        "review: submission is refused while the document review is incomplete",
+        lambda: _assert(
+            client.post(
+                f"/api/v1/invoices/{invoice_id}/submit-approval",
+                headers={"Authorization": f"Bearer {clerk}"},
+            ).status_code
+            == 422
+        ),
+    )
+
+    # ------------------------------------------------------------ field review
+    # Phase 29: the field review is enforced, not advisory. The reviewer
+    # completes it through the documented API: every extracted required field
+    # (and every extracted line quantity and line unit price) is CONFIRMED at
+    # exactly its current value, and every optional field the extraction did
+    # not find is asserted absent.
+    verdict = client.get(
+        f"/api/v1/documents/{document['document_id']}/review-policy",
+        headers={"Authorization": f"Bearer {clerk}"},
+    )
+    check(
+        "review: the review-policy verdict is readable and unsatisfied before decisions",
+        lambda: _assert(
+            verdict.status_code == 200 and verdict.json()["satisfied"] is False, verdict.text
+        ),
+    )
+
+    def complete_review() -> bool:
+        body = verdict.json()
+        for fev in body["fields"]:
+            if fev["satisfied"]:
+                continue
+            if fev["value"] is not None:
+                decision = {
+                    "field_name": fev["field_name"],
+                    "decision": "CONFIRMED",
+                    "expected_value": fev["value"],
+                }
+            elif not fev["required"]:
+                decision = {"field_name": fev["field_name"], "decision": "NOT_PRESENT"}
+            else:
+                return _assert(
+                    False,
+                    f"required field {fev['field_name']} was not extracted; the staging"
+                    " fixture must stay fully extracted (transcription path is covered by"
+                    " the phase-29 test suite)",
+                )
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json=decision,
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        for lev in body["lines"]:
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json={
+                    "field_name": "line_item_json",
+                    "decision": "CONFIRMED",
+                    "expected_value": lev["value"],
+                    "line_index": lev["line_index"],
+                },
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        for pev in body["line_prices"]:
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json={
+                    "field_name": "line_unit_price",
+                    "decision": "CONFIRMED",
+                    "expected_value": pev["value"],
+                    "line_index": pev["line_index"],
+                },
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        for dev in body["line_discounts"]:
+            # The extraction emits no discount; the staging fixture's printed
+            # line nets equal qty × PU, so an absent discount is honestly
+            # transcribed as 0.00 through the documented API.
+            if dev["value"] is not None:
+                payload = {
+                    "field_name": "line_discount",
+                    "decision": "CONFIRMED",
+                    "expected_value": dev["value"],
+                    "line_index": dev["line_index"],
+                }
+            else:
+                payload = {
+                    "field_name": "line_discount",
+                    "decision": "CORRECTED",
+                    "value": "0.00",
+                    "line_index": dev["line_index"],
+                }
+            resp = client.post(
+                f"/api/v1/documents/{document['document_id']}/fields/decide",
+                headers={"Authorization": f"Bearer {clerk}"},
+                json=payload,
+            )
+            if resp.status_code != 200:
+                return _assert(False, resp.text)
+        after = client.get(
+            f"/api/v1/documents/{document['document_id']}/review-policy",
+            headers={"Authorization": f"Bearer {clerk}"},
+        )
+        return _assert(
+            after.status_code == 200 and after.json()["satisfied"] is True, after.text
+        )
+
+    check("review: field decisions satisfy the review policy", complete_review)
+    check(
         "workflow: submitted for approval",
         lambda: _assert(
             client.post(

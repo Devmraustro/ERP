@@ -1,0 +1,28 @@
+[EXECUTED     ] startup (embedded service, Mode A): bound http://127.0.0.1:41661
+[EXECUTED     ] login: token_prefix=dzsess_U_vYs… keys=['access_token', 'expires_at', 'expires_in', 'token_id', 'token_type', 'user']
+[EXECUTED     ] API connectivity (authenticated reads): accounts=294 trial_balance_debit=0.00
+[EXECUTED     ] session identity: user_id=1 company_id=1 role=admin
+[EXECUTED     ] logout invalidates the session: revoked token replayed -> HTTP 401 Authentication credential has been revok
+[EXECUTED     ] client drops the token on logout: is_logged_in=False
+[EXECUTED     ] invalid credentials: typed error 401
+[EXECUTED     ] translation catalogue completeness: languages=['fr', 'ar'] keys=126 missing_per_language=none
+[EXECUTED     ] RTL metadata (Arabic): is_rtl per language: {'fr': False, 'ar': True}
+[GAP          ] English language support: available_languages()=['fr', 'ar'] - English is not implemented, so 'FR/EN switching' cannot be accepted
+[NOT EXECUTED ] application window construction: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] Arabic RTL rendering (shaped glyphs, alignment): requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] French/English switching in the running UI: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] session expiry prompt in the UI: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] role-based navigation visibility: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] invoice intake through the UI: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] OCR correction in the review screen: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] invoice posting from the UI: requires a Qt display (libGL.so.1 absent) or Windows
+[NOT EXECUTED ] error surfacing in the UI (no traceback): requires a Qt display (libGL.so.1 absent) or Windows
+
+== summary ==
+{
+  "rows": 19,
+  "executed": 9,
+  "not_executed": 9,
+  "failed": 0
+}
+written: /tmp/dz-desktop-acc-53hu9te8/desktop_headless_acceptance.json

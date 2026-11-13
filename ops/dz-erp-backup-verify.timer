@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify DZ ERP backups daily (deep restore on Sundays)
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+AccuracySec=5min
+Persistent=true
+Unit=dz-erp-backup-verify.service
+
+[Install]
+WantedBy=timers.target

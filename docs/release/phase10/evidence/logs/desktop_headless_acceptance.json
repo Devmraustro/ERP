@@ -1,0 +1,104 @@
+{
+  "rows": 19,
+  "executed": 9,
+  "not_executed": 9,
+  "failed": 0,
+  "results": [
+    {
+      "row": "startup (embedded service, Mode A)",
+      "status": "EXECUTED",
+      "detail": "bound http://127.0.0.1:44669"
+    },
+    {
+      "row": "login",
+      "status": "EXECUTED",
+      "detail": "token_prefix=dzsess_BpuYr\u2026 keys=['access_token', 'expires_at', 'expires_in', 'token_id', 'token_type', 'user']"
+    },
+    {
+      "row": "API connectivity (authenticated reads)",
+      "status": "EXECUTED",
+      "detail": "accounts=294 trial_balance_debit=0.00"
+    },
+    {
+      "row": "session identity",
+      "status": "EXECUTED",
+      "detail": "user_id=1 company_id=1 role=admin"
+    },
+    {
+      "row": "logout invalidates the session",
+      "status": "EXECUTED",
+      "detail": "revoked token replayed -> HTTP 401 Authentication credential has been revok"
+    },
+    {
+      "row": "client drops the token on logout",
+      "status": "EXECUTED",
+      "detail": "is_logged_in=False"
+    },
+    {
+      "row": "invalid credentials",
+      "status": "EXECUTED",
+      "detail": "typed error 401"
+    },
+    {
+      "row": "translation catalogue completeness",
+      "status": "EXECUTED",
+      "detail": "languages=['fr', 'ar'] keys=126 missing_per_language=none",
+      "missing_keys": {}
+    },
+    {
+      "row": "RTL metadata (Arabic)",
+      "status": "EXECUTED",
+      "detail": "is_rtl per language: {'fr': False, 'ar': True}"
+    },
+    {
+      "row": "English language support",
+      "status": "GAP",
+      "detail": "available_languages()=['fr', 'ar'] - English is not implemented, so 'FR/EN switching' cannot be accepted"
+    },
+    {
+      "row": "application window construction",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "Arabic RTL rendering (shaped glyphs, alignment)",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "French/English switching in the running UI",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "session expiry prompt in the UI",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "role-based navigation visibility",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "invoice intake through the UI",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "OCR correction in the review screen",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "invoice posting from the UI",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    },
+    {
+      "row": "error surfacing in the UI (no traceback)",
+      "status": "NOT EXECUTED",
+      "detail": "requires a Qt display (libGL.so.1 absent) or Windows"
+    }
+  ]
+}

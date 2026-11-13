@@ -1,0 +1,258 @@
+[
+  {
+    "scale_factor": 1.0,
+    "logical_dpi": 96.0,
+    "window_logical": [
+      1280,
+      840
+    ],
+    "screens": [
+      {
+        "view": "dashboard",
+        "rendered": true
+      },
+      {
+        "view": "documents",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "invoices",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "accounts",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "trial_balance",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "products",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "stock",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "suppliers",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "users",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      }
+    ],
+    "qt_scale_factor_env": "1.0",
+    "screenshot": "30_dpi_1_0.png"
+  },
+  {
+    "scale_factor": 1.25,
+    "logical_dpi": 96.0,
+    "window_logical": [
+      1280,
+      840
+    ],
+    "screens": [
+      {
+        "view": "dashboard",
+        "rendered": true
+      },
+      {
+        "view": "documents",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "invoices",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "accounts",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "trial_balance",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "products",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "stock",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "suppliers",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "users",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      }
+    ],
+    "qt_scale_factor_env": "1.25",
+    "screenshot": "30_dpi_1_25.png"
+  },
+  {
+    "scale_factor": 1.5,
+    "logical_dpi": 96.0,
+    "window_logical": [
+      1280,
+      840
+    ],
+    "screens": [
+      {
+        "view": "dashboard",
+        "rendered": true
+      },
+      {
+        "view": "documents",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "invoices",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "accounts",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "trial_balance",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "products",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "stock",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "suppliers",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "users",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      }
+    ],
+    "qt_scale_factor_env": "1.5",
+    "screenshot": "30_dpi_1_5.png"
+  },
+  {
+    "scale_factor": 2.0,
+    "logical_dpi": 96.0,
+    "window_logical": [
+      1280,
+      840
+    ],
+    "screens": [
+      {
+        "view": "dashboard",
+        "rendered": true
+      },
+      {
+        "view": "documents",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "invoices",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "accounts",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "trial_balance",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "products",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "stock",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "suppliers",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      },
+      {
+        "view": "users",
+        "rendered": true,
+        "header_width": 952,
+        "header_fits": true
+      }
+    ],
+    "qt_scale_factor_env": "2.0",
+    "screenshot": "30_dpi_2_0.png"
+  }
+]

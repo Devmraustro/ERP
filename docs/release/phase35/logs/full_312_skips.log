@@ -1,0 +1,66 @@
+============================= test session starts ==============================
+collected 950 items / 1 deselected / 949 selected
+
+tests/test_phase10_vault_key_rotation.py .......................         [  2%]
+tests/test_phase11_audit_key_rotation.py .........................       [  5%]
+tests/test_phase12_key_migration_and_backup.py ......................s.. [  7%]
+...                                                                      [  8%]
+tests/test_phase13_key_rotation_regression.py ......                     [  8%]
+tests/test_phase14_rotation_audit_ledger.py .......................      [ 11%]
+tests/test_phase15_key_custody_and_monitoring.py .............           [ 12%]
+tests/test_phase16_rotation_concurrency_convergence.py ....              [ 12%]
+tests/test_phase17_key_providers.py ........ss.....................      [ 16%]
+tests/test_phase18_ocr_confidence_provenance.py ...................      [ 18%]
+tests/test_phase19_dependency_integrity.py ..........................    [ 20%]
+tests/test_phase20_checkpoints_and_monitoring.py ....................... [ 23%]
+.............................................                            [ 28%]
+tests/test_phase21_arabic_review_routing.py ...................          [ 30%]
+tests/test_phase22_register_and_docs_consistency.py ...............      [ 31%]
+tests/test_phase23_staging_acceptance.py .                               [ 31%]
+tests/test_phase24_operational_readiness.py ....................         [ 33%]
+tests/test_phase25_read_api.py ......                                    [ 34%]
+tests/test_phase26_desktop.py ..........                                 [ 35%]
+tests/test_phase27_desktop_ui.py ....                                    [ 35%]
+tests/test_phase27_review_api.py .....                                   [ 36%]
+tests/test_phase27_scf_first_run.py ........                             [ 37%]
+tests/test_phase28_desktop_users_ui.py .......                           [ 38%]
+tests/test_phase28_user_admin.py ............                            [ 39%]
+tests/test_phase29_desktop_redesign.py .............................     [ 42%]
+tests/test_phase2_localization.py .....................                  [ 44%]
+tests/test_phase34_security_validation.py .............................. [ 47%]
+.....................                                                    [ 49%]
+tests/test_phase35_api_rate_limiting_and_request_logging.py ............ [ 51%]
+....                                                                     [ 51%]
+tests/test_phase35_integrity_gates.py ..................                 [ 53%]
+tests/test_phase39_bounded_rate_limiting.py ............................ [ 56%]
+....                                                                     [ 56%]
+tests/test_phase3_invoice_intake.py ..                                   [ 57%]
+tests/test_phase47_request_id_boundary.py ...................            [ 59%]
+tests/test_phase4_procurement_3way_match.py ...                          [ 59%]
+tests/test_phase5_security_audit_backup.py ..                            [ 59%]
+tests/test_phase62_backup_automation.py .................                [ 61%]
+tests/test_phase62_readiness.py ................                         [ 63%]
+tests/test_phase63_dependency_contract.py ......                         [ 63%]
+tests/test_phase64_dependency_security_regression.py ................... [ 65%]
+....................                                                     [ 67%]
+tests/test_phase6_ocr_benchmark_e2e.py ...................               [ 69%]
+tests/test_phase7_authentication_remediation.py ........................ [ 72%]
+...................................                                      [ 76%]
+tests/test_phase8_upload_boundary_and_ci.py ............................ [ 79%]
+........................................................................ [ 86%]
+........................................................................ [ 94%]
+..................................                                       [ 97%]
+tests/test_phase9_durable_security_log.py ......                         [ 98%]
+tests/test_phase9_process_boundary.py ...............                    [100%]
+
+=============================== warnings summary ===============================
+../../../tmp/py312/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /tmp/py312/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_phase12_key_migration_and_backup.py:697: Windows junction regression
+SKIPPED [1] tests/test_phase17_key_providers.py:97: exercises the Windows reparse-point open path
+SKIPPED [1] tests/test_phase17_key_providers.py:111: exercises the Windows reparse-point API path
+===== 946 passed, 3 skipped, 1 deselected, 1 warning in 319.04s (0:05:19) ======

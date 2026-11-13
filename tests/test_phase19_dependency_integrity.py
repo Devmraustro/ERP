@@ -237,8 +237,11 @@ def test_optional_desktop_extra_is_exact_pinned_and_absent_from_the_lockfile() -
     pins = dict(re.findall(r'"([A-Za-z0-9_.\-]+)==([^"]+)"', extras_block.group(1)))
     # Both extras are asserted exactly: any addition is a deliberate,
     # reviewed decision, never a silent GUI dependency.
+    # pytest moved to 9.2.0 in the Phase 10 security remediation: 8.3.5 carried
+    # PYSEC-2026-* advisories. The assertion is exact on purpose - if an extra
+    # is added, removed or re-pinned, this fails and forces a deliberate review.
     assert pins == {
-        "pytest": "8.3.5",
+        "pytest": "9.2.0",
         "pytest-cov": "6.0.0",
         "pytest-asyncio": "1.3.0",
         "ruff": "0.14.0",

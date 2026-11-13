@@ -1,0 +1,19 @@
+# Phase 10: free-space check. A full volume stops SQLite writes and vault
+# writes at the same moment, so it is alerted before it happens, not after.
+[Unit]
+Description=DZ ERP disk-space check
+Documentation=file:/srv/dz-erp/docs/release/phase10/OPERATIONAL_READINESS_REPORT.md
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+Environment=ERP_VAULT_PATH=/srv/dz-erp/vault
+Environment=ERP_MIN_FREE_BYTES=536870912
+ExecStart=/usr/bin/env python -m dz_erp.ops_checks disk
+Restart=no
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

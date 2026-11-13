@@ -1,0 +1,18 @@
+== raw packaging failure on the verified tree ==
+  Preparing metadata (pyproject.toml): finished with status 'error'
+  error: subprocess-exited-with-error
+      error: Multiple top-level packages discovered in a flat-layout: ['ops', 'dz_erp', 'vendor', 'odoo_addons'].
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: metadata-generation-failed
+
+== the same build with the separate Phase-3 packaging patch applied (scratch copy) ==
+packaging patch applied
+[notice] A new release of pip is available: 24.2 -> 26.3
+[notice] To update, run: python -m pip install --upgrade pip
+total 672
+drwxr-xr-x 2 user user     60 Nov  9 19:57 .
+drwxr-xr-x 5 user user   4096 Nov  9 19:57 ..
+-rw-r--r-- 1 user user 683553 Nov  9 19:57 algerian_ai_erp-0.1.0-py3-none-any.whl
+wheel: algerian_ai_erp-0.1.0-py3-none-any.whl
+top-level: ['algerian_ai_erp-0.1.0.dist-info', 'dz_erp']
+assets: ['dz_erp/assets/fonts/DejaVuSans.COPYRIGHT', 'dz_erp/assets/fonts/DejaVuSans.ttf']

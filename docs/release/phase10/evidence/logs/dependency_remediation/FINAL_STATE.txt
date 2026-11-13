@@ -1,0 +1,8 @@
+=== final gate summary 2026-11-10T20:51:51Z ===
+HEAD 4fc1364a9504fab1153ea44e753f354f00023428 | branch arena/7557bcfb-erp
+pip-audit lockfile: exit 0 (no known vulnerabilities)
+pip-audit installed env: exit 0
+generate_hash_lock --check: exit 0 (53 dist, 1317 hashes)
+full suite (3.11.2, new lock): 22 failed / 799 passed / 6 skipped / 172.64s
+baseline (3.11.2, old lock):    22 failed / 759 passed / 6 skipped
+failure-set diff: empty (all 22 = Python 3.11.17+ restore guard)

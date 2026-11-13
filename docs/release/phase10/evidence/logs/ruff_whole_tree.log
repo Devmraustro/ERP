@@ -1,0 +1,26 @@
+docs/release/phase10/evidence/desktop_headless_acceptance.py:25:34: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase10/evidence/desktop_headless_acceptance.py:26:63: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase10/evidence/desktop_headless_acceptance.py:27:77: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase10/evidence/desktop_headless_acceptance.py:54:31: RUF100 [*] Unused `noqa` directive (non-enabled: `BLE001`)
+docs/release/phase10/evidence/desktop_headless_acceptance.py:168:24: RUF100 [*] Unused `noqa` directive (non-enabled: `BLE001`)
+docs/release/phase10/evidence/operational_drill.py:158:35: RUF100 [*] Unused `noqa` directive (non-enabled: `BLE001`)
+docs/release/phase10/evidence/operational_drill.py:159:13: F841 Local variable `token` is assigned to but never used
+docs/release/phase9/evidence/db_concurrency_restart.py:31:44: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/db_concurrency_restart.py:33:48: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/db_concurrency_restart.py:34:40: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/db_concurrency_restart.py:35:42: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/db_concurrency_restart.py:36:53: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/db_concurrency_restart.py:136:20: F821 Undefined name `client`
+docs/release/phase9/evidence/dr_drill.py:35:41: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/dr_drill.py:37:40: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/dr_drill.py:38:42: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/dr_drill.py:39:53: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/dr_drill.py:40:38: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+docs/release/phase9/evidence/dr_drill.py:148:5: F841 Local variable `restored_db_path` is assigned to but never used
+docs/release/phase9/evidence/performance_probe.py:109:13: F841 Local variable `payload` is assigned to but never used
+docs/release/phase9/evidence/performance_probe.py:230:31: RUF100 [*] Unused `noqa` directive (non-enabled: `BLE001`)
+docs/security/phase5_release_gate/probes/smoke.py:1:8: F401 [*] `json` imported but unused
+odoo_addons/l10n_dz_scf_extensions/__init__.py:2:15: F401 `.models` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+odoo_addons/l10n_dz_scf_extensions/models/__init__.py:2:15: F401 `.res_partner_dz` imported but unused; consider removing, adding to `__all__`, or using a redundant alias
+Found 24 errors.
+[*] 18 fixable with the `--fix` option (3 hidden fixes can be enabled with the `--unsafe-fixes` option).

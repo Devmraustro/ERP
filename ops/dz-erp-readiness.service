@@ -1,0 +1,22 @@
+# Phase 10: readiness probe for a host without an orchestrator. Exits 1 (and
+# raises READINESS_FAILED) when a critical subsystem - database, vault, disk, OCR -
+# cannot do its job. /readyz on the API is the same evaluation for load balancers.
+[Unit]
+Description=DZ ERP readiness check
+Documentation=file:/srv/dz-erp/docs/release/phase10/OPERATIONAL_READINESS_REPORT.md
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+Environment=ERP_DB_PATH=/srv/dz-erp/data/erp.sqlite3
+Environment=ERP_VAULT_PATH=/srv/dz-erp/vault
+Environment=ERP_BACKUP_DIR=/mnt/backup-offsite/dz-erp
+Environment=ERP_MIN_FREE_BYTES=536870912
+ExecStart=/usr/bin/env python -m dz_erp.ops_checks readiness
+Restart=no
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

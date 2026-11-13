@@ -255,6 +255,10 @@ CREATE TABLE IF NOT EXISTS ocr_extracted_fields (
     confidence_calibrated   INTEGER NOT NULL DEFAULT 0 CHECK (confidence_calibrated IN (0, 1)),
     bbox_json               TEXT NOT NULL,
     ocr_model_version       TEXT NOT NULL,
+    -- Conflicting later extractions for this field (JSON), if any. Nullable
+    -- with no default: documents extracted before it existed keep NULL,
+    -- which reads as "not recorded", never as "no conflicts".
+    conflict_values_json    TEXT,
     human_override_value    TEXT,
     edited_by_id            INTEGER REFERENCES users(id) ON DELETE RESTRICT,
     edited_at               TEXT,
@@ -272,9 +276,35 @@ WHEN OLD.raw_text != NEW.raw_text
   OR OLD.confidence_scope != NEW.confidence_scope
   OR OLD.confidence_calibrated != NEW.confidence_calibrated
   OR OLD.ocr_model_version != NEW.ocr_model_version
+  OR OLD.conflict_values_json IS NOT NEW.conflict_values_json
 BEGIN
-    SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, its provenance and ocr_model_version cannot be overwritten.');
+    SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, its provenance, conflicting extractions and ocr_model_version cannot be overwritten.');
 END;
+
+-- Phase 46 (integrating PR #7's Phase 29/34 work): per-field human review
+-- decisions. The extraction itself stays read-only evidence; a decision is a
+-- separate, attributed record bound to the exact value it was made on, so a
+-- later edit visibly stales it (see dz_erp/review_policy.py).
+CREATE TABLE IF NOT EXISTS ocr_field_reviews (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    document_id     TEXT NOT NULL REFERENCES source_documents(id) ON DELETE RESTRICT,
+    field_name      TEXT NOT NULL,
+    line_index      INTEGER,
+    decision        TEXT NOT NULL CHECK (decision IN ('CONFIRMED', 'CORRECTED', 'FLAGGED', 'NOT_PRESENT')),
+    reviewed_value  TEXT,
+    note            TEXT,
+    -- Which extraction rows this decision actually reviewed (JSON). Nullable on
+    -- purpose: a decision taken before this column existed reviewed the only row
+    -- there was, and a NULL binding reads as "covers a single row", never as
+    -- "covers any number of rows".
+    evidence_json   TEXT,
+    reviewed_by_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    reviewed_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ocr_field_reviews_doc
+ON ocr_field_reviews(company_id, document_id, field_name, line_index);
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -868,6 +898,44 @@ class ERPDatabase:
 
         self._migrate_ocr_confidence(conn)
         self._migrate_document_routing(conn)
+        self._migrate_conflict_values(conn)
+
+
+    def _migrate_conflict_values(self, conn: sqlite3.Connection) -> None:
+        """Add `ocr_extracted_fields.conflict_values_json` to legacy databases.
+
+        Phase 46 (integrating PR #7): a field may be extracted more than once
+        with different values. Recording the conflicts makes "there were none"
+        distinguishable from "we never looked", so the column is nullable with
+        no default and old rows keep NULL.
+
+        The raw-immutability trigger is re-created because
+        ``CREATE TRIGGER IF NOT EXISTS`` alone would leave an older trigger body
+        in place, silently failing to protect the new column.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocr_extracted_fields)").fetchall()}
+        if not cols:
+            return
+        if "conflict_values_json" not in cols:
+            conn.execute("ALTER TABLE ocr_extracted_fields ADD COLUMN conflict_values_json TEXT")
+        conn.execute("DROP TRIGGER IF EXISTS trg_ocr_field_preserve_raw")
+        conn.execute(
+            """
+            CREATE TRIGGER trg_ocr_field_preserve_raw
+            BEFORE UPDATE ON ocr_extracted_fields
+            FOR EACH ROW
+            WHEN OLD.raw_text != NEW.raw_text
+              OR OLD.confidence IS NOT NEW.confidence
+              OR OLD.confidence_kind != NEW.confidence_kind
+              OR OLD.confidence_scope != NEW.confidence_scope
+              OR OLD.confidence_calibrated != NEW.confidence_calibrated
+              OR OLD.ocr_model_version != NEW.ocr_model_version
+              OR OLD.conflict_values_json IS NOT NEW.conflict_values_json
+            BEGIN
+                SELECT RAISE(ABORT, 'OCR_RAW_IMMUTABILITY_VIOLATION: raw_text, confidence, its provenance, conflicting extractions and ocr_model_version cannot be overwritten.');
+            END
+            """
+        )
 
     def _migrate_document_routing(self, conn: sqlite3.Connection) -> None:
         """Add the review-routing columns to `source_documents`, leaving old rows NULL.
@@ -1719,9 +1787,10 @@ class ERPDatabase:
 
         Carries exactly what a reviewer needs to judge and correct a field -
         the raw OCR text (immutable by trigger), the current normalized
-        value, the honest confidence triple and any human override with its
-        editor - and deliberately excludes ``bbox_json`` (geometry the UI
-        does not render). The caller must already be inside the tenant; the
+        value, the honest confidence triple, any human override with its
+        editor, and the conflicting later readings of the same field - and
+        deliberately excludes ``bbox_json`` (geometry the UI does not
+        render). The caller must already be inside the tenant; the
         secure wrapper above the API layer derives that scope from the
         verified credential, never from an argument.
         """
@@ -1735,10 +1804,40 @@ class ERPDatabase:
                        normalized_value, confidence, confidence_kind,
                        confidence_scope, confidence_calibrated,
                        human_override_value, edited_by_id, edited_at,
-                       ocr_model_version
+                       conflict_values_json, ocr_model_version
                 FROM ocr_extracted_fields
                 WHERE company_id = ? AND document_id = ?
                 ORDER BY page_number, COALESCE(line_index, 0), field_name
+                LIMIT ?
+                """,
+                (cid, document_id, capped),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_field_reviews(
+        self, company_id: Any, document_id: str, *, limit: Any = 500
+    ) -> List[Dict[str, Any]]:
+        """Human review decisions for one document, oldest first.
+
+        Deliberately excludes nothing about the decision itself - reviewer id,
+        timestamp, decision, the exact value it was made on and the note are
+        the evidence a reviewer or auditor needs. The caller must already be
+        inside the tenant; the secure wrapper derives that scope from the
+        verified credential.
+        """
+        cid = self._require_company_scope(company_id, "list_field_reviews")
+        capped = self._read_limit(limit, "list_field_reviews")
+        conn = self._create_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, field_name, line_index, decision, reviewed_value,
+                       note, reviewed_by_id, reviewed_at
+                FROM ocr_field_reviews
+                WHERE company_id = ? AND document_id = ?
+                ORDER BY id
                 LIMIT ?
                 """,
                 (cid, document_id, capped),

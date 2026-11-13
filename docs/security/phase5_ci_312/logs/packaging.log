@@ -1,0 +1,12 @@
+== B2: build the verified tree as-is (build isolation on) ==
+  error: subprocess-exited-with-error
+      error: Multiple top-level packages discovered in a flat-layout: ['ops', 'dz_erp', 'vendor', 'odoo_addons'].
+error: subprocess-exited-with-error
+
+== B2: same tree + preserved Phase-3 packaging patch (scratch copy) ==
+patch applied
+
+[notice] A new release of pip is available: 25.0.1 -> 26.3
+[notice] To update, run: /tmp/py312venv/bin/python3.12 -m pip install --upgrade pip
+drwxr-xr-x 5 user user   4096 Nov  9 20:38 ..
+-rw-r--r-- 1 user user 683553 Nov  9 20:38 algerian_ai_erp-0.1.0-py3-none-any.whl

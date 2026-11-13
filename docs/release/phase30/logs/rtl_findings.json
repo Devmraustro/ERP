@@ -1,0 +1,114 @@
+{
+  "total": 18,
+  "passed": 18,
+  "findings": [
+    {
+      "kind": "language",
+      "check": "LANGUAGES contains ar",
+      "ok": true,
+      "detail": "('fr', 'ar', 'en')"
+    },
+    {
+      "kind": "direction",
+      "check": "is_rtl('ar') is True",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "kind": "direction",
+      "check": "application layout direction is RightToLeft",
+      "ok": true,
+      "detail": "LayoutDirection.RightToLeft"
+    },
+    {
+      "kind": "layout",
+      "check": "sidebar sits on the physical right in RTL",
+      "ok": true,
+      "detail": "sidebar x=1168 of width 1400"
+    },
+    {
+      "kind": "translation",
+      "check": "identity line is Arabic",
+      "ok": true,
+      "detail": "المستخدم: admin (admin)"
+    },
+    {
+      "kind": "translation",
+      "check": "no French leftovers in sidebar",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "kind": "translation",
+      "check": "sidebar labels are Arabic",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "kind": "layout",
+      "check": "table header labels are Arabic",
+      "ok": true,
+      "detail": "['الرمز', 'التسمية', 'مدين (دج)', 'دائن (دج)']"
+    },
+    {
+      "kind": "data",
+      "check": "trial balance has the posted invoice rows",
+      "ok": true,
+      "detail": "3 rows"
+    },
+    {
+      "kind": "data",
+      "check": "account names present in the Arabic ledger",
+      "ok": true,
+      "detail": "['موردو المخزونات والخدمات', 'الرسم على القيمة المضافة القابل للاسترجاع', 'مشتريات البضائع المبيعة']"
+    },
+    {
+      "kind": "data",
+      "check": "at least one account name renders in Arabic script",
+      "ok": true,
+      "detail": "['موردو المخزونات والخدمات', 'الرسم على القيمة المضافة القابل للاسترجاع']"
+    },
+    {
+      "kind": "dialog",
+      "check": "review dialog title is Arabic",
+      "ok": true,
+      "detail": "مراجعة الفاتورة"
+    },
+    {
+      "kind": "dialog",
+      "check": "review dialog state badge carries the Arabic label",
+      "ok": true,
+      "detail": "حالة المستند: Posted · مُرحَّلة"
+    },
+    {
+      "kind": "data",
+      "check": "SCF plan carries Arabic names for a subset",
+      "ok": true,
+      "detail": "6/100"
+    },
+    {
+      "kind": "data",
+      "check": "every account row still renders a non-empty name",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "kind": "switch",
+      "check": "switch to French",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "kind": "switch",
+      "check": "switch to English",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "kind": "switch",
+      "check": "switch back to Arabic",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

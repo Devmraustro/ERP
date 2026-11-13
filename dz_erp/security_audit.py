@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
 
+from .review_policy import evaluate_document_review_policy
 from .database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
@@ -356,7 +357,24 @@ class StructuredRedactingLogger:
             return sanitized
         return val
 
-    def log(self, level: str, event: str, correlation_id: str, **context: Any) -> Dict[str, Any]:
+    def log(
+        self,
+        level: str,
+        event: str,
+        correlation_id: str,
+        *,
+        durable: bool = True,
+        **context: Any,
+    ) -> Dict[str, Any]:
+        """Record one structured event.
+
+        ``durable`` defaults to True: security-relevant events must outlive the
+        process. Phase 35 (SEC-15) adds ordinary per-request access records,
+        which belong in the in-memory trace (so a correlation id can be followed)
+        but not in the append-only *security* log - that file is evidence an
+        auditor reads, and diluting it with successes hides the rejections that
+        matter. Callers pass ``durable=False`` for those.
+        """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": level.upper(),
@@ -365,7 +383,7 @@ class StructuredRedactingLogger:
             "context": {k: self._redact_value(k, v) for k, v in context.items()},
         }
         self.records.append(entry)
-        if self._sink is not None:
+        if self._sink is not None and durable:
             # Deliberately not wrapped in a try/except: a sink failure must not
             # be swallowed, or the durable log silently stops being durable -
             # which is the exact gap this closes.
@@ -661,6 +679,59 @@ def list_stock_quants_secure(
     return db.list_stock_quants(scoped_company_id, limit=limit)
 
 
+def require_role_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    allowed_roles: Tuple[str, ...],
+    *,
+    action: str,
+    target_model: str = "api",
+    target_id: str = "-",
+) -> Dict[str, Any]:
+    """Refuse an operation unless the caller's server-side role is allowed.
+
+    ``docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md`` defines which role may
+    upload a document and edit an OCR draft: ``clerk``, ``approver``,
+    ``accountant`` and ``admin`` may; ``warehouse``, ``auditor``,
+    ``ocr_worker`` and ``treasury`` may not.  The document-intake endpoints did
+    not consult the role at all, so any authenticated principal of a company -
+    including the roles that matrix explicitly denies - could create documents
+    and modify the values a reviewer later approves.
+
+    The role is read from the ``users`` row bound to the verified credential,
+    never from the request, and the denial is audited (and committed) in the
+    caller's tenant chain before the error is raised, exactly like the existing
+    read-side denials.
+    """
+    denial: Optional[AuthorizationError] = None
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            raise AuthorizationError("User is inactive or revoked.")
+        if user["role"] not in allowed_roles:
+            db.append_audit_event(
+                conn=conn,
+                company_id=int(user["company_id"]),
+                actor_user_id=requesting_user_id,
+                action_type="SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED",
+                target_model=target_model,
+                target_id=str(target_id),
+                after_state={
+                    "role": user["role"],
+                    "action": action,
+                    "required_roles": list(allowed_roles),
+                },
+            )
+            denial = AuthorizationError(
+                f"Role '{user['role']}' is not authorized for {action}; "
+                f"required one of {list(allowed_roles)}."
+            )
+    if denial is not None:
+        raise denial
+    assert user is not None
+    return dict(user)
+
+
 def _require_user_admin(db: ERPDatabase, requesting_user_id: int) -> Dict[str, Any]:
     """Guard shared by every user-administration operation: active admin only.
 
@@ -889,7 +960,19 @@ def create_encrypted_backup(
 
         fernet = Fernet(backup_encryption_key)
         encrypted_archive = fernet.encrypt(tar_buf.getvalue())
-        output_backup_path.write_bytes(encrypted_archive)
+        # The archive carries the vault key ring and the audit HMAC key ring
+        # (inside the Fernet envelope, but still custody material). Writing it
+        # with the process umask - 0644 on a default Linux install - leaves it
+        # world-readable, so every key file this project writes is 0600 and the
+        # backup must be too. Create it 0600 rather than chmod-ing afterwards so
+        # there is no window in which it is readable by another user.
+        fd = os.open(str(output_backup_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encrypted_archive)
+        try:
+            os.chmod(output_backup_path, 0o600)
+        except OSError:  # pragma: no cover - non-POSIX filesystems
+            pass
 
         return {
             "backup_path": str(output_backup_path),
@@ -1243,3 +1326,80 @@ def restore_and_verify_backup(
         "trial_balance_credit_dzd": format_dzd(total_credit),
         "audit_chains_valid": True,
     }
+
+
+# ===========================================================================
+# Phase 46 - review-policy verdict under document RBAC (integrated from PR #7)
+# ===========================================================================
+# Reads the same evidence the invoice-approval gate will later judge, inside one
+# transaction scoped by the verified credential, so a reviewer sees exactly what
+# will be enforced rather than a second, possibly divergent, computation.
+
+def evaluate_document_review_policy_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    document_id: str,
+) -> Dict[str, Any]:
+    """The Phase 29 review-policy verdict for one document, under document RBAC.
+
+    Everything the verdict depends on (document row, extracted fields, review
+    decisions) is read inside one transaction scoped by the verified
+    credential — the same evidence the invoice-approval gate will later judge,
+    so a reviewer sees exactly what will be enforced. A cross-company attempt
+    is audited (and committed) exactly like the per-document file read before
+    the error is raised.
+    """
+    denial: Optional[Exception] = None
+    evaluation: Optional[Dict[str, Any]] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        else:
+            doc = conn.execute(
+                "SELECT company_id FROM source_documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if not doc:
+                denial = ValueError("Source document not found.")
+            elif doc["company_id"] != user["company_id"]:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=doc["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="SECURITY_CROSS_COMPANY_READ_BLOCKED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={
+                        "attacker_company_id": user["company_id"],
+                        "target_company_id": doc["company_id"],
+                    },
+                )
+                denial = TenantIsolationError("Cross-company read access denied.")
+            else:
+                company_id = int(user["company_id"])
+                doc_row = dict(
+                    conn.execute(
+                        "SELECT * FROM source_documents WHERE id = ?", (document_id,)
+                    ).fetchone()
+                )
+                fields = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ?",
+                        (company_id, document_id),
+                    ).fetchall()
+                ]
+                decisions = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM ocr_field_reviews WHERE company_id = ? AND document_id = ?",
+                        (company_id, document_id),
+                    ).fetchall()
+                ]
+                evaluation = evaluate_document_review_policy(doc_row, fields, decisions)
+
+    if denial is not None:
+        raise denial
+    assert evaluation is not None
+    return evaluation

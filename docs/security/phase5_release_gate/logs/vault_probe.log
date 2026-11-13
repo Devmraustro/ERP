@@ -1,0 +1,19 @@
+blob mode: 0o600
+blob dir mode: 0o755
+vault root mode: 0o755
+key file exists: True mode: 0o600
+plaintext in blob: False | blob bytes: 169 | magic: b'DZKV'
+temp leftovers: []
+read back ok: True
+tenant isolation: TenantIsolationError
+tamper detection: InvalidToken
+verify_blobs: {'checked': 1, 'failed': 0, 'by_version': {'1': 1}, 'errors': []}
+concurrent stores: files=16 errors=[]
+all readable: True
+permission denied: PermissionError
+concurrent: files=16 readable=True
+versions before rotation: {1: 16}
+rotate_key ok: {'vault_root': '/tmp/phase5-probe-ldavtiaq/vault', 'keyring_path': '/tmp/phase5-probe-ldavtiaq/vault.vault.keys.json', 'journal_path': '/tmp/phase5-probe-ldavtiaq/vault.vault.rotation.jsonl', 'previous_version': 1, 'active_version': 2, 'resumed': False}
+versions after rotation: {2: 16}
+still readable: True
+verify_blobs: 16 checked, 0 failed

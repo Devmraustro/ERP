@@ -1,0 +1,22 @@
+=== lock vs installed ===
+lock pins        : 53
+installed dists  : 53
+missing          : NONE
+version mismatch : NONE
+extra unpinned   : NONE
+
+=== opencv providers ===
+cv2 version/path: 4.11.0 /home/user/.venvs/q46/lib/python3.11/site-packages/cv2/__init__.py
+headless        : 4.11.0.86
+GUI opencv      : NOT INSTALLED (no conflict)
+
+=== dependency graph ===
+
+OK - the environment matches the declared dependency graph.
+     The only deviation from upstream metadata is the documented
+     substitution opencv-python -> opencv-python-headless.
+
+=== OCR inference ===
+detections: 2
+    'TOTAL TTC: 1190.00' score=0.975
+    'DZD' score=0.994

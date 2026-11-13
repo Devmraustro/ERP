@@ -1,0 +1,50 @@
+# B1 environment evidence (2026-11-09T19:50:28Z)
+
+## interpreters on the host
+lrwxrwxrwx 1 root root      10 Apr  9  2023 /usr/bin/python3 -> python3.11
+-rwxr-xr-x 1 root root 6834424 Apr  8  2026 /usr/bin/python3.11
+Python 3.11.2
+absent: py
+absent: conda
+absent: mamba
+absent: pyenv
+absent: asdf
+
+## uv (installed from PyPI, authorised)
+uv 0.13.7 (x86_64-unknown-linux-gnu)
+
+## uv python install 3.12 (default TLS)
+  cause: Failed to download `https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`
+  cause: error sending request for url (https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz)
+  cause: client error (Connect)
+  cause: invalid peer certificate: UnknownIssuer
+
+## uv python install 3.12 --native-tls
+  cause: Failed to download `https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`
+  cause: error sending request for url (https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz)
+  cause: client error (Connect)
+  cause: tls handshake eof
+
+## direct download of the resolved asset
+curl: (35) OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to release-assets.githubusercontent.com:443 
+
+## host reachability (egress policy)
+https://github.com                                      200
+https://api.github.com                                  200
+https://codeload.github.com                             301
+https://pypi.org                                        200
+https://files.pythonhosted.org                          404
+https://release-assets.githubusercontent.com            000BLOCKED
+https://objects.githubusercontent.com                   000BLOCKED
+https://www.python.org                                  000BLOCKED
+https://deb.debian.org                                  000BLOCKED
+
+## source build feasibility
+gcc    gcc (Debian 12.2.0-14+deb12u1) 12.2.0
+make   GNU Make 4.3
+header MISSING: zlib.h
+header MISSING: openssl/ssl.h
+header MISSING: sqlite3.h
+header MISSING: ffi.h
+header MISSING: lzma.h
+header MISSING: bzlib.h

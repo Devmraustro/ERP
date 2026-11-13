@@ -27,7 +27,7 @@ from typing import Optional
 from . import APP_NAME, __version__
 from .api_client import ErpApiError, ErpClient
 from .config import DesktopConfig, load_config, save_config
-from .i18n import is_rtl, tr
+from .i18n import tr
 from .service import EmbeddedErpService, bootstrap_first_run, has_any_user
 
 # Synthetic first-run credentials for --smoke. They exist only inside the
@@ -161,7 +161,6 @@ def _apply_overrides(config: DesktopConfig, args: argparse.Namespace) -> None:
 
 def run_gui(args: argparse.Namespace) -> int:
     try:
-        from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication, QMessageBox
     except ImportError:
         print(
@@ -174,6 +173,7 @@ def run_gui(args: argparse.Namespace) -> int:
         )
         return 2
 
+    from .theme import ThemeManager
     from .ui import FirstRunDialog, LoginDialog, MainWindow
 
     config = load_config(args.data_dir)
@@ -181,10 +181,36 @@ def run_gui(args: argparse.Namespace) -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
     lang = config.language
-    app.setLayoutDirection(
-        Qt.LayoutDirection.RightToLeft if is_rtl(lang) else Qt.LayoutDirection.LeftToRight
-    )
+    # One theme manager for the whole process: it owns the palette, the
+    # stylesheet, the layout direction and the icon colours, so every widget
+    # inherits them instead of each screen carrying its own colours.
+    theme_manager = ThemeManager(theme=config.theme, language=lang)
+    theme_manager.apply()
+    # Qt's Fusion style is the only one whose widget metrics we can reason
+    # about identically on Windows and Linux, so the design system is drawn on
+    # top of it rather than on each platform's native style.
+    try:
+        app.setStyle("Fusion")
+    except Exception:  # pragma: no cover - a style-less build still runs
+        pass
+
+    def persist_preferences() -> None:
+        """Write language + theme through the verified config mechanism."""
+        current = load_config(args.data_dir)
+        persisted = theme_manager.persisted()
+        current.language = str(persisted.get("language", current.language))
+        current.theme = str(persisted.get("theme", current.theme))
+        if current.language == config.language and current.theme == config.theme:
+            return
+        try:
+            current.validate()
+            save_config(current)
+        except Exception:  # a read-only config dir must not kill the session
+            pass
+
+    app.aboutToQuit.connect(persist_preferences)
 
     service: Optional[EmbeddedErpService] = None
     client: Optional[ErpClient] = None
@@ -212,8 +238,19 @@ def run_gui(args: argparse.Namespace) -> int:
     windows: dict = {}
 
     def open_main(session: dict) -> None:
-        window = MainWindow(lang, client, mode_label)
+        window = MainWindow(
+            theme_manager.language, client, mode_label, theme_manager=theme_manager
+        )
+        window.set_mode_label(
+            mode_label,
+            key="mode_local" if config.mode == "local" else "mode_server",
+            url=config.server_url if config.mode != "local" else "",
+        )
         window.set_session(session)
+        # Every switch goes through the theme manager's subscribers, so the
+        # preference is written the moment it changes - a crash later in the
+        # session cannot lose the user's choice.
+        theme_manager.subscribe(persist_preferences)
         window.show()
         windows["main"] = window
         if "login" in windows:

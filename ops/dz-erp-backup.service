@@ -1,0 +1,40 @@
+# Phase 10: encrypted backup + retention, driven by dz-erp-backup.timer.
+# The application already knows how to write an encrypted archive; this unit is
+# the schedule around it, and `dz_erp.ops_backup` is the part that adds a manifest
+# (for keyless integrity checks), retention, and failure alerting.
+[Unit]
+Description=DZ ERP encrypted backup (database + Local File Vault)
+Documentation=file:/srv/dz-erp/docs/release/phase10/BACKUP_AND_RECOVERY_RUNBOOK.md
+After=network-online.target
+# Never start a second run while one is compressing a large vault.
+RefuseManualStart=no
+
+[Service]
+Type=oneshot
+User=dz-erp
+Group=dz-erp
+WorkingDirectory=/srv/dz-erp
+Environment=ERP_DB_PATH=/srv/dz-erp/data/erp.sqlite3
+Environment=ERP_VAULT_PATH=/srv/dz-erp/vault
+# Backups live on storage that outlives this host. A copy on the same disk as the
+# database survives neither disk loss nor ransomware.
+Environment=ERP_BACKUP_DIR=/mnt/backup-offsite/dz-erp
+# 0600 file, never an inline key in this unit file: the unit is world-readable.
+Environment=ERP_BACKUP_KEY_FILE=/etc/dz-erp/backup.key
+Environment=ERP_BACKUP_RETAIN_DAILY=7
+Environment=ERP_BACKUP_RETAIN_WEEKLY=4
+# Optional: any HTTP endpoint that accepts a JSON body (Slack relay, PagerDuty
+# events proxy, an internal collector). Unset = stderr/journal only.
+# Environment=ERP_ALERT_WEBHOOK=https://alerts.example.dz/hooks/dz-erp
+ExecStart=/usr/bin/env python -m dz_erp.ops_backup --backup-dir ${ERP_BACKUP_DIR} run
+Restart=no
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+# A failed backup is an incident: the journal keeps the JSON alert emitted by
+# dz_erp.ops_alerts, and the non-zero exit is what the timer's OnFailure uses.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target

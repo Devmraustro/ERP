@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the DZ ERP OCR engine once a day
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+AccuracySec=10min
+Persistent=true
+Unit=dz-erp-ocr-check.service
+
+[Install]
+WantedBy=timers.target

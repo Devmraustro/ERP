@@ -1100,7 +1100,11 @@ def test_audit_chain_remains_valid_after_phase8_activity(env: SimpleNamespace) -
 
 def test_all_protected_routes_use_the_authenticated_path(env: SimpleNamespace) -> None:
     """Every non-public route must reject an unauthenticated request."""
-    public = {"/healthz", "/api/v1/upload-policy", "/api/v1/auth/token"}
+    # Phase 10 adds /readyz to the deliberately public set: infrastructure scrapes it
+    # to decide whether to route traffic, so it cannot require a user credential. It
+    # returns only check names, statuses and counters - never a path or key material -
+    # which is why making it public does not widen the information boundary.
+    public = {"/healthz", "/readyz", "/api/v1/upload-policy", "/api/v1/auth/token"}
     schema = env.app.openapi()
     for path, item in schema.get("paths", {}).items():
         for method, operation in item.items():
@@ -1273,6 +1277,7 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     assert sorted(public) == [
         "GET /api/v1/upload-policy",
         "GET /healthz",
+        "GET /readyz",
         "POST /api/v1/auth/token",
     ], f"unexpected public set: {sorted(public)}"
     # 14 original protected operations + the 5 Phase 25 read/report endpoints
@@ -1283,7 +1288,12 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # deactivate).
     # The count pin catches accidental surface changes; the desktop read
     # endpoints are authenticated like every other protected operation.
-    assert len(protected) == 26, f"expected 26 protected operations, got {len(protected)}: {sorted(protected)}"
+    # Phase 35 (SEC-13): GET /api/v1/system/rate-limit-policy is a protected
+    # admin-only operation, so the boundary grew from 26 to 27.
+    # Phase 46: the two Phase 29 document-review operations that the review
+    # gates depend on are now exposed - POST .../fields/decide and GET
+    # .../review-policy - both authenticated like the rest, so 27 -> 29.
+    assert len(protected) == 29, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

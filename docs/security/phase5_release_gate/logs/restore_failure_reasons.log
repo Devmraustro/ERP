@@ -1,0 +1,65 @@
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   AssertionError: worker 'restore' exited 1
+/tmp/gate/tests/test_phase9_process_boundary.py:51: AssertionError: worker 'restore' exited 1
+E   AssertionError: assert 'failed SHA-256 verification' in 'Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.'
+/tmp/gate/tests/test_phase9_process_boundary.py:229: AssertionError: assert 'failed SHA-256 verification' in 'Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.'
+E   AssertionError: worker 'restore' exited 1
+/tmp/gate/tests/test_phase9_process_boundary.py:51: AssertionError: worker 'restore' exited 1
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup extraction is unavailable in this Python runtime. Use a supported, security-patched Python 3.11 or 3.12 release.
+/tmp/gate/dz_erp/security_audit.py:1371: dz_erp.database.FinancialIntegrityError: Safe backup extraction is unavailable in this Python runtime. Use a supported, security-patched Python 3.11 or 3.12 release.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   AssertionError: Regex pattern did not match.
+/tmp/gate/tests/test_phase12_key_migration_and_backup.py:604: AssertionError: Regex pattern did not match.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   AssertionError: Regex pattern did not match.
+/tmp/gate/tests/test_phase12_key_migration_and_backup.py:604: AssertionError: Regex pattern did not match.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   AssertionError: Regex pattern did not match.
+/tmp/gate/tests/test_phase12_key_migration_and_backup.py:604: AssertionError: Regex pattern did not match.
+E   dz_erp.database.FinancialIntegrityError: Safe backup extraction is unavailable in this Python runtime. Use a supported, security-patched Python 3.11 or 3.12 release.
+E   AssertionError: Regex pattern did not match.
+/tmp/gate/tests/test_phase12_key_migration_and_backup.py:686: AssertionError: Regex pattern did not match.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+E   dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+/tmp/gate/dz_erp/security_audit.py:1368: dz_erp.database.FinancialIntegrityError: Safe backup restore requires Python 3.11.17+ or Python 3.12.10+ (and below 3.13); unsafe archive member types and paths are rejected.
+FAILED tests/test_phase5_security_audit_backup.py::test_audit_immutability_log_redaction_and_encrypted_backup_restore
+FAILED tests/test_phase6_ocr_benchmark_e2e.py::test_complete_14_step_end_to_end_supplier_invoice_workflow
+FAILED tests/test_phase8_upload_boundary_and_ci.py::test_backup_and_restore_preserve_the_audit_key
+FAILED tests/test_phase8_upload_boundary_and_ci.py::test_restored_database_and_vault_are_reopenable_without_the_original_secrets
+FAILED tests/test_phase9_process_boundary.py::test_restore_is_usable_from_a_fresh_process_in_a_different_directory
+FAILED tests/test_phase9_process_boundary.py::test_incomplete_restore_is_rejected
+FAILED tests/test_phase9_process_boundary.py::test_repeated_restores_are_idempotent_and_leave_a_usable_deployment
+FAILED tests/test_phase11_audit_key_rotation.py::test_a_pre_versioning_database_restores_from_backup
+FAILED tests/test_phase11_audit_key_rotation.py::test_backup_restore_preserves_every_audit_key_version
+FAILED tests/test_phase11_audit_key_rotation.py::test_restore_reports_a_missing_key_version_as_unavailable
+FAILED tests/test_phase12_key_migration_and_backup.py::test_backup_restores_mixed_ciphertext_into_an_isolated_environment
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_of_a_tampered_registry_fails_closed
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_ciphertext_that_needs_an_absent_key
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_accepts_last_windows_binary_runtime_with_strict_preflight
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_noncanonical_tar_paths_before_writing[../outside.txt]
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_noncanonical_tar_paths_before_writing[vault/../outside.txt]
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_rejects_noncanonical_tar_paths_before_writing[../evil/../dest/sub/file]
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_refuses_preexisting_hardlink_target_before_writing
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_requires_a_backup_key_and_does_not_leak_on_failure
+FAILED tests/test_phase12_key_migration_and_backup.py::test_restore_with_a_contradicting_audit_key_is_refused
+======= 20 failed, 274 passed, 1 skipped, 2 warnings in 81.42s (0:01:21) =======

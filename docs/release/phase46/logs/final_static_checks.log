@@ -1,0 +1,13 @@
+=== ruff ===
+All checks passed!
+
+=== compileall ===
+compileall OK (exit 0)
+
+=== hash lock check ===
+OK - 53 pinned distributions, 1317 hashes, no drift from requirements.lock.txt.
+
+=== dependency graph ===
+OK - the environment matches the declared dependency graph.
+     The only deviation from upstream metadata is the documented
+     substitution opencv-python -> opencv-python-headless.

@@ -1290,7 +1290,10 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # endpoints are authenticated like every other protected operation.
     # Phase 35 (SEC-13): GET /api/v1/system/rate-limit-policy is a protected
     # admin-only operation, so the boundary grew from 26 to 27.
-    assert len(protected) == 27, f"expected 27 protected operations, got {len(protected)}: {sorted(protected)}"
+    # Phase 46: the two Phase 29 document-review operations that the review
+    # gates depend on are now exposed - POST .../fields/decide and GET
+    # .../review-policy - both authenticated like the rest, so 27 -> 29.
+    assert len(protected) == 29, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

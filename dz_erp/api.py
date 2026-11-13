@@ -47,7 +47,13 @@ from .auth import (
     parse_bearer_token,
 )
 from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
-from .intake_ocr import PrivateDocumentVault, update_extracted_field_by_human, upload_and_process_supplier_document
+from .intake_ocr import (
+    PrivateDocumentVault,
+    decide_extracted_field_review,
+    update_extracted_field_by_human,
+    upload_and_process_supplier_document,
+)
+from .review_policy import ReviewPolicyValueError
 from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
 from .rate_limit import (
     RequestThrottle,
@@ -76,6 +82,7 @@ from .security_audit import (
     list_stock_quants_secure,
     list_supplier_invoices_secure,
     list_users_secure,
+    evaluate_document_review_policy_secure,
     read_source_document_content_secure,
     read_source_document_file_secure,
     read_supplier_invoice_secure,
@@ -133,6 +140,28 @@ class ReversalInput(BaseModel):
 class ReversalApprovalDecisionInput(BaseModel):
     approve: bool
     reason: str = ""
+
+
+class FieldDecisionInput(BaseModel):
+    """One field-review decision (Phase 46, from PR #7).
+
+    ``decision`` is CONFIRMED | CORRECTED | FLAGGED | NOT_PRESENT. CONFIRMED
+    requires ``expected_value`` (the value the reviewer saw); CORRECTED
+    requires ``value`` (the transcribed or corrected value); line quantities
+    address the line via ``line_index``.
+    """
+
+    field_name: str
+    decision: str
+    value: Optional[str] = None
+    expected_value: Optional[str] = None
+    note: Optional[str] = None
+    line_index: Optional[int] = None
+    # When several extraction rows claim the same field, name the one the
+    # reviewer treats as authoritative. Omitting it falls back to the row whose
+    # value matches ``expected_value``; either way the decision covers every row
+    # of the group or the field stays blocked.
+    selected_row_id: Optional[int] = None
 
 
 class FieldEditInput(BaseModel):
@@ -785,6 +814,66 @@ def create_erp_fastapi_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/documents/{document_id}/fields/decide")
+    def api_decide_extracted_field(
+        document_id: str,
+        body: FieldDecisionInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Record one human field-review decision (Phase 46, from PR #7).
+
+        The decision is the enforced record: the invoice approval gate refuses
+        to run while any required field of the linked document is undecided,
+        flagged, or stale. Refusals - wrong role, closed document state, value
+        changed since read - are audited server-side and surfaced here with
+        their reason.
+        """
+        try:
+            return decide_extracted_field_review(
+                db=db,
+                company_id=auth.company_id,
+                user_id=auth.user_id,
+                document_id=document_id,
+                field_name=body.field_name,
+                decision=body.decision,
+                value=body.value,
+                expected_value=body.expected_value,
+                note=body.note,
+                line_index=body.line_index,
+                selected_row_id=body.selected_row_id,
+            )
+        except (AuthorizationError, TenantIsolationError) as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (FinancialIntegrityError, ReviewPolicyValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/v1/documents/{document_id}/review-policy")
+    def api_get_document_review_policy(
+        document_id: str,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """The fail-closed review-policy verdict for one document (Phase 46).
+
+        Same evaluation the invoice submit/approval gates run: per-field status
+        with honest confidence provenance, decisions bound to values,
+        extracted-totals arithmetic, and the blocking reasons that currently
+        keep the document from backing an approval. Cross-company attempts are
+        audited by the secure wrapper.
+        """
+        try:
+            evaluation = evaluate_document_review_policy_secure(
+                db, auth.user_id, document_id
+            )
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return evaluation
 
     @app.post("/api/v1/invoices")
     def api_create_invoice(

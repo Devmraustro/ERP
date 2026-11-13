@@ -157,7 +157,9 @@ def _bearer(token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _seed_tenant_one_assets(env: SimpleNamespace) -> SimpleNamespace:
+def _seed_tenant_one_assets(
+    env: SimpleNamespace, complete_document_field_review=None
+) -> SimpleNamespace:
     """Create a real document + invoice owned by company 1."""
     doc = upload_and_process_supplier_document(
         env.db,
@@ -189,6 +191,11 @@ def _seed_tenant_one_assets(env: SimpleNamespace) -> SimpleNamespace:
             }
         ],
     )
+    # Phase 46: when the caller exercises the submit path, the linked document's
+    # field review must be complete first (fail-closed). Left optional so the
+    # pure read/authz tests do not pay for a full review.
+    if complete_document_field_review is not None:
+        complete_document_field_review(env.db, 1, doc["document_id"], reviewer_user_id=1)
     return SimpleNamespace(document_id=doc["document_id"], invoice_id=inv["invoice_id"])
 
 
@@ -574,8 +581,10 @@ def test_tenant_isolation_rejects_foreign_supplier_reference(env: SimpleNamespac
 # ---------------------------------------------------------------------------
 
 
-def test_rbac_enforced_across_all_protected_endpoints(env: SimpleNamespace) -> None:
-    assets = _seed_tenant_one_assets(env)
+def test_rbac_enforced_across_all_protected_endpoints(
+    env: SimpleNamespace, complete_document_field_review
+) -> None:
+    assets = _seed_tenant_one_assets(env, complete_document_field_review)
     client = env.client
     inv_id = assets.invoice_id
 

@@ -9,8 +9,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .database import AuthorizationError, ERPDatabase, FinancialIntegrityError, TenantIsolationError
 from .decimal_utils import format_dzd, round_dzd, round_qty, to_decimal
-from .intake_ocr import levenshtein_distance, normalize_invoice_ref
+from .intake_ocr import (
+    DOCUMENT_LINKABLE_STATES,
+    levenshtein_distance,
+    normalize_invoice_ref,
+)
 from .localization import calculate_droit_de_timbre, validate_algerian_identifiers
+from .review_policy import evaluate_document_review_policy
 
 # The same three methods the ``supplier_invoices.payment_method`` CHECK
 # constraint allows. Validating them here turns a rejected write into a clean
@@ -77,6 +82,10 @@ def compute_invoice_payload_hash(
                 "po_line_id": line.get("po_line_id"),
                 "qty": f"{round_qty(line['qty']):.6f}",
                 "unit_price_dzd": f"{round_qty(line['unit_price_dzd']):.6f}",
+                # The discount is part of the approved payload. Omitting it let
+                # a tampered discount leave the hash unchanged, so an approval of
+                # an older payload kept matching a newer, cheaper invoice.
+                "discount_pct": format_dzd(line.get("discount_pct", "0.00")),
                 "tax_rate": f"{to_decimal(line.get('tax_rate', '19.0')):.1f}",
                 "line_ht_dzd": format_dzd(line["line_ht_dzd"]),
             }
@@ -609,6 +618,20 @@ def create_and_validate_supplier_invoice(
         if ttc_dec != expected_ttc:
             validation_errors.append(f"TOTAL_TTC_MISMATCH:declared={ttc_dec:.2f}!=expected={expected_ttc:.2f}")
 
+        # Phase 46: per-line bounds as one reviewed gate. The inline loop above
+        # reconciles declared numbers against each other; it never asks whether
+        # a discount or quantity is *admissible*. A -5% discount raises the net,
+        # reconciles perfectly, and would otherwise be written as Validated.
+        # ``prepared_lines`` is recomputed by the gate, so the stored lines are
+        # the ones it validated rather than the ones the loop happened to build.
+        line_errors, prepared_lines, sum_line_ht, sum_line_tva = _validate_invoice_lines(
+            conn,
+            company_id=company_id,
+            lines=lines,
+            price_tolerance_dzd=str(price_tolerance_dzd),
+        )
+        validation_errors.extend(line_errors)
+
         # Phase 35 (from PR #7): the header reconciliation as one reviewed gate.
         #
         # The four checks above are kept because they are what the existing
@@ -700,6 +723,11 @@ def create_and_validate_supplier_invoice(
             )
 
         if document_id:
+            # A draft may only cite a document that is still in review. Checked
+            # before the state write, so a document already carried off by a
+            # submitted invoice is refused instead of being dragged backwards
+            # into this invoice's state.
+            _assert_document_linkable(conn, company_id, document_id)
             conn.execute(
                 "UPDATE source_documents SET workflow_state = ? WHERE id = ? AND company_id = ?",
                 (wf_state, document_id, company_id),
@@ -747,36 +775,55 @@ def submit_invoice_for_approval(
                 f"Cannot request approval for invoice in state '{inv['workflow_state']}'; must be 'Validated'."
             )
 
-        cur = conn.execute(
-            """
-            INSERT INTO approval_requests (
-                company_id, target_model, target_id, payload_sha256,
-                requested_by_id, requested_at, decision
-            ) VALUES (?, 'supplier_invoices', ?, ?, ?, ?, 'PENDING')
-            """,
-            (company_id, invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
-        )
-        req_id = int(cur.lastrowid)
-        conn.execute(
-            "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
-            (invoice_id,),
-        )
-        if inv["document_id"]:
-            conn.execute(
-                "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
-                (inv["document_id"],),
+        # Phase 46: a reviewed source document is a precondition, not a label.
+        # Without this, an invoice could be submitted while its document was
+        # never reviewed, or after the extraction was edited to disagree with
+        # the payload being approved.
+        # The gate writes its own audit event inside this transaction and then
+        # returns (rather than raises) the denial, so the refusal is committed
+        # with the attempt instead of being rolled back with it.
+        denial = _document_review_gate(conn, db, company_id, inv, user_id, action="SUBMIT")
+        if denial is not None:
+            result: Optional[Dict[str, Any]] = None
+        else:
+            result = None
+            cur = conn.execute(
+                """
+                INSERT INTO approval_requests (
+                    company_id, target_model, target_id, payload_sha256,
+                    requested_by_id, requested_at, decision
+                ) VALUES (?, 'supplier_invoices', ?, ?, ?, ?, 'PENDING')
+                """,
+                (company_id, invoice_id, inv["payload_sha256"], inv["created_by_id"], now_iso),
             )
-
-        db.append_audit_event(
-            conn=conn,
-            company_id=company_id,
-            actor_user_id=user_id,
-            action_type="APPROVAL_REQUESTED",
-            target_model="supplier_invoices",
-            target_id=str(invoice_id),
-            after_state={"approval_request_id": req_id, "workflow_state": "PendingApproval"},
-        )
-        return {"invoice_id": invoice_id, "approval_request_id": req_id, "workflow_state": "PendingApproval"}
+            req_id = int(cur.lastrowid)
+            conn.execute(
+                "UPDATE supplier_invoices SET workflow_state = 'PendingApproval' WHERE id = ?",
+                (invoice_id,),
+            )
+            if inv["document_id"]:
+                conn.execute(
+                    "UPDATE source_documents SET workflow_state = 'PendingApproval' WHERE id = ?",
+                    (inv["document_id"],),
+                )
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=user_id,
+                action_type="APPROVAL_REQUESTED",
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state={"approval_request_id": req_id, "workflow_state": "PendingApproval"},
+            )
+            result = {
+                "invoice_id": invoice_id,
+                "approval_request_id": req_id,
+                "workflow_state": "PendingApproval",
+            }
+    if denial is not None:
+        raise denial
+    assert result is not None
+    return result
 
 
 def decide_invoice_approval(
@@ -820,51 +867,76 @@ def decide_invoice_approval(
         decision_str = "APPROVED" if approve else "REJECTED"
         new_wf_state = "Approved" if approve else "Rejected"
 
-        conn.execute(
-            """
-            UPDATE approval_requests
-            SET decision = ?, decided_by_id = ?, decided_at = ?, reason = ?
-            WHERE id = ?
-            """,
-            (decision_str, approver_user_id, now_iso, reason, req["id"]),
-        )
-        conn.execute(
-            """
-            UPDATE supplier_invoices
-            SET workflow_state = ?,
-                approved_payload_sha256 = ?,
-                approved_by_id = ?,
-                approved_at = ?
-            WHERE id = ?
-            """,
-            (
-                new_wf_state,
-                inv["payload_sha256"] if approve else None,
-                approver_user_id if approve else None,
-                now_iso if approve else None,
-                invoice_id,
-            ),
-        )
-        if inv["document_id"]:
-            conn.execute(
-                "UPDATE source_documents SET workflow_state = ?, rejection_reason = ? WHERE id = ?",
-                (new_wf_state, None if approve else reason, inv["document_id"]),
+        # Phase 46: re-check the review evidence at approval, not only at
+        # submit. The document may have been edited after submission, and an
+        # approval must decide the payload against the evidence as it is now.
+        denial: Optional[Exception] = None
+        if approve:
+            # "APPROVAL" (not "APPROVE") keeps the recorded action name aligned
+            # with the workflow stage the operator actually attempted.
+            denial = _document_review_gate(
+                conn, db, company_id, inv, approver_user_id, action="APPROVAL"
             )
+        if denial is not None:
+            # Refused (commit-then-refuse): the gate already wrote the audit
+            # event inside this transaction; the workflow writes below must not
+            # happen, so the approval never takes effect.
+            result = None
+        else:
 
-        db.append_audit_event(
-            conn=conn,
-            company_id=company_id,
-            actor_user_id=approver_user_id,
-            action_type="INVOICE_APPROVED" if approve else "INVOICE_REJECTED",
-            target_model="supplier_invoices",
-            target_id=str(invoice_id),
-            after_state={
+            conn.execute(
+                """
+                UPDATE approval_requests
+                SET decision = ?, decided_by_id = ?, decided_at = ?, reason = ?
+                WHERE id = ?
+                """,
+                (decision_str, approver_user_id, now_iso, reason, req["id"]),
+            )
+            conn.execute(
+                """
+                UPDATE supplier_invoices
+                SET workflow_state = ?,
+                    approved_payload_sha256 = ?,
+                    approved_by_id = ?,
+                    approved_at = ?
+                WHERE id = ?
+                """,
+                (
+                    new_wf_state,
+                    inv["payload_sha256"] if approve else None,
+                    approver_user_id if approve else None,
+                    now_iso if approve else None,
+                    invoice_id,
+                ),
+            )
+            if inv["document_id"]:
+                conn.execute(
+                    "UPDATE source_documents SET workflow_state = ?, rejection_reason = ? WHERE id = ?",
+                    (new_wf_state, None if approve else reason, inv["document_id"]),
+                )
+
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=approver_user_id,
+                action_type="INVOICE_APPROVED" if approve else "INVOICE_REJECTED",
+                target_model="supplier_invoices",
+                target_id=str(invoice_id),
+                after_state={
+                    "workflow_state": new_wf_state,
+                    "approved_payload_sha256": inv["payload_sha256"] if approve else None,
+                    "reason": reason,
+                },
+            )
+            result = {
+                "invoice_id": invoice_id,
                 "workflow_state": new_wf_state,
-                "approved_payload_sha256": inv["payload_sha256"] if approve else None,
-                "reason": reason,
-            },
-        )
-        return {"invoice_id": invoice_id, "workflow_state": new_wf_state, "decision": decision_str}
+                "decision": decision_str,
+            }
+    if denial is not None:
+        raise denial
+    assert result is not None
+    return result
 
 
 def modify_draft_invoice_line(
@@ -897,7 +969,13 @@ def modify_draft_invoice_line(
         qty = round_qty(line["qty"])
         pu = round_qty(new_unit_price_dzd)
         rate = to_decimal(line["tax_rate"])
-        new_ht = round_dzd(qty * pu)
+        # The stored discount still applies. Recomputing qty * pu alone silently
+        # raised a discounted line back to its undiscounted net (e.g. 990.00 ->
+        # 1100.00), so a correction could quietly inflate the invoice.
+        disc = to_decimal(line["discount_pct"]) if line["discount_pct"] is not None else Decimal("0.00")
+        new_ht = to_decimal(
+            compute_line_ht_dzd(qty, pu, disc)
+        )
         new_tva = round_dzd(new_ht * (rate / Decimal("100.00")))
         new_ttc = round_dzd(new_ht + new_tva)
 
@@ -2154,3 +2232,316 @@ def _record_refused_attempt(db: ERPDatabase, company_id: int, user_id: int, refu
             target_id=refusal.audit_target_id,
             after_state=refusal.audit_after_state,
         )
+
+
+# ===========================================================================
+# Phase 46 - reviewed-source cross-check (integrated from PR #7)
+# ===========================================================================
+# Review completeness alone is insufficient: a perfectly reviewed document must
+# not authorise a *different* invoice payload. This compares the reviewed values
+# with the financial payload, so "the reviewer confirmed the paper" cannot be
+# separated from "the invoice says what the paper says".
+
+def _source_invoice_mismatches(
+    conn: Any,
+    company_id: int,
+    invoice: Any,
+    evaluation: Dict[str, Any],
+) -> List[str]:
+    """Compare the reviewed source values with the financial invoice payload.
+
+    Review completeness alone is insufficient: a perfectly reviewed source
+    document must not authorize a different invoice payload. This comparison
+    is deliberately performed from the current rows in the caller's IMMEDIATE
+    transaction and is repeated at submit and approval. All three reviewable
+    line elements — quantity, unit price and discount — are compared against
+    the invoice's lines in their canonical forms (6-decimal quantity/price,
+    2-decimal discount), with exact equality, and each line's net amount is
+    re-derived from the decided values and compared with the invoice line:
+    the price and discount the reviewer bound to the paper are the price and
+    discount the invoice must carry, and the net must follow from them.
+    """
+    fields = {item["field_name"]: item for item in evaluation["fields"]}
+    mismatches: List[str] = []
+
+    def source_value(name: str) -> Optional[str]:
+        item = fields.get(name)
+        return None if item is None or item["status"] == "missing" else item["value"]
+
+    source_number = source_value("invoice_number")
+    if source_number is None or normalize_invoice_ref(source_number) != normalize_invoice_ref(
+        str(invoice["supplier_invoice_no"])
+    ):
+        mismatches.append("INVOICE_NUMBER_SOURCE_MISMATCH")
+
+    source_date = source_value("invoice_date")
+    if source_date is None or str(source_date).strip() != str(invoice["invoice_date"]).strip():
+        mismatches.append("INVOICE_DATE_SOURCE_MISMATCH")
+
+    source_currency = source_value("currency_code")
+    if source_currency is None or str(source_currency).strip().upper() != str(invoice["currency_code"]).strip().upper():
+        mismatches.append("CURRENCY_SOURCE_MISMATCH")
+
+    for field_name, invoice_column in (
+        ("amount_ht_dzd", "amount_ht_dzd"),
+        ("amount_tva_dzd", "amount_tva_dzd"),
+        ("amount_timbre_dzd", "amount_timbre_dzd"),
+        ("amount_ttc_dzd", "amount_ttc_dzd"),
+    ):
+        raw_source = source_value(field_name)
+        # A missing timbre is explicitly permitted by the review policy and is
+        # equivalent to zero only for this comparison. Other missing totals
+        # fail closed rather than silently defaulting.
+        if raw_source is None and field_name == "amount_timbre_dzd":
+            raw_source = "0.00"
+        try:
+            if raw_source is None or round_dzd(raw_source) != round_dzd(invoice[invoice_column]):
+                mismatches.append(f"{field_name.upper()}_SOURCE_MISMATCH")
+        except (ValueError, TypeError, ArithmeticError):
+            mismatches.append(f"{field_name.upper()}_SOURCE_UNPARSEABLE")
+
+    supplier = conn.execute(
+        "SELECT nif FROM partners WHERE id = ? AND company_id = ?",
+        (invoice["supplier_id"], company_id),
+    ).fetchone()
+    source_nif = source_value("supplier_nif")
+    if (
+        supplier is None
+        or not supplier["nif"]
+        or source_nif is None
+        or "".join(ch for ch in str(source_nif) if ch.isdigit())
+        != "".join(ch for ch in str(supplier["nif"]) if ch.isdigit())
+    ):
+        mismatches.append("SUPPLIER_NIF_SOURCE_MISMATCH")
+
+    source_lines = evaluation["lines"]
+    # The review policy intentionally allows documents with no extracted line
+    # items: the invoice lines are then entered by a human and there is no
+    # source line evidence to compare. Do not interpret "no extracted lines"
+    # as "the invoice must have zero lines". When source lines exist, their
+    # count, quantities and unit prices must match exactly.
+    #
+    # Line association invariant: invoice lines are matched to source lines by
+    # row order — source lines sorted by their extraction ``line_index``,
+    # invoice lines by insertion ``id``. The invoice line table stores no
+    # supplier SKU to join on, so entering the invoice's lines in a different
+    # order than the paper's rows is itself a mismatch and is flagged
+    # positionally, never silently rematched (the swap regression test pins
+    # this).
+    if source_lines:
+        invoice_lines = conn.execute(
+            "SELECT qty, unit_price_dzd, discount_pct, line_ht_dzd FROM supplier_invoice_lines"
+            " WHERE company_id = ? AND invoice_id = ? ORDER BY id",
+            (company_id, invoice["id"]),
+        ).fetchall()
+        if len(source_lines) != len(invoice_lines):
+            mismatches.append("LINE_COUNT_SOURCE_MISMATCH")
+        else:
+            line_prices = evaluation.get("line_prices") or []
+            if len(line_prices) != len(source_lines):
+                # The evaluator emits one price evaluation per extracted line
+                # row; a divergence means a corrupted evaluation. Refuse to
+                # compare rather than guess which price belongs to which line.
+                mismatches.append("LINE_PRICE_EVIDENCE_INCONSISTENT")
+            line_discounts = evaluation.get("line_discounts") or []
+            if len(line_discounts) != len(source_lines):
+                mismatches.append("LINE_DISCOUNT_EVIDENCE_INCONSISTENT")
+            for index, (source_line, invoice_line, price_eval, discount_eval) in enumerate(
+                zip(source_lines, invoice_lines, line_prices, line_discounts), start=1
+            ):
+                try:
+                    source_qty = round_qty(to_decimal(str(source_line["value"])))
+                    invoice_qty = round_qty(to_decimal(str(invoice_line["qty"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_UNPARSEABLE")
+                    continue
+                if source_qty != invoice_qty:
+                    mismatches.append(f"LINE_{index}_QUANTITY_SOURCE_MISMATCH")
+                # zip truncates to the shortest, so a short price/discount
+                # list can only shrink the compared prefix — the count
+                # divergence was already flagged above, which blocks
+                # regardless.
+                raw_source_price = price_eval["value"]
+                # A decided-but-absent reading is its own case. It used to be
+                # unreachable: ``str(None)`` raised inside the parser below, so
+                # a missing price was reported as "unparseable" — a different
+                # and less accurate refusal. The None test therefore comes
+                # first, and the parse only sees real strings (F-R2-6).
+                if raw_source_price is None:
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISSING")
+                    continue
+                try:
+                    source_price = round_qty(to_decimal(str(raw_source_price)))
+                    invoice_price = round_qty(to_decimal(str(invoice_line["unit_price_dzd"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_UNPARSEABLE")
+                    continue
+                if source_price != invoice_price:
+                    mismatches.append(f"LINE_{index}_PRICE_SOURCE_MISMATCH")
+                # The decided discount is the third binding: exact 2-decimal
+                # equality with the invoice line's first-class discount
+                # column. An invoice discount is never clamped or defaulted:
+                # an unparseable or missing reading is refused, not treated
+                # as zero.
+                raw_source_discount = discount_eval["value"]
+                if raw_source_discount is None:
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISSING")
+                    continue
+                try:
+                    source_discount = round_dzd(to_decimal(str(raw_source_discount)))
+                    invoice_discount = round_dzd(to_decimal(str(invoice_line["discount_pct"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_UNPARSEABLE")
+                    continue
+                if source_discount != invoice_discount:
+                    mismatches.append(f"LINE_{index}_DISCOUNT_SOURCE_MISMATCH")
+                # Line-net comparison, only where the representations are
+                # semantically equivalent: both sides mean the same
+                # ``qty × PU × (1 − discount/100)`` rounded to 2 decimals
+                # (``round_dzd``, ROUND_HALF_UP). The source net is derived
+                # from the *decided* quantity, price and discount — never
+                # from the payload's stored ``line_ht_dzd`` reading, which is
+                # a derived value nobody decided. Documented rounding policy:
+                # the decided 2-decimal discount is authoritative; an invoice
+                # whose net was validated against a raw discount with more
+                # precision than the canonical form may be flagged here by up
+                # to a centime — the honest repair is entering the invoice
+                # with the canonical 2-decimal discount.
+                derived_source_ht = round_dzd(
+                    source_qty * source_price * ((Decimal("100.00") - source_discount) / Decimal("100.00"))
+                )
+                try:
+                    invoice_ht = round_dzd(to_decimal(str(invoice_line["line_ht_dzd"])))
+                except (ValueError, TypeError, ArithmeticError):
+                    mismatches.append(f"LINE_{index}_LINE_HT_SOURCE_UNPARSEABLE")
+                    continue
+                if derived_source_ht != invoice_ht:
+                    mismatches.append(
+                        f"LINE_{index}_LINE_HT_SOURCE_MISMATCH:derived={derived_source_ht:.2f}"
+                        f"!=invoiced={invoice_ht:.2f}"
+                    )
+
+    return mismatches
+
+
+# ===========================================================================
+# Phase 46 - document review gate (integrated from PR #7)
+# ===========================================================================
+# Refuses an invoice whose source document has not been fully reviewed, and
+# refuses one whose payload disagrees with what the reviewer bound to. Without
+# this, "reviewed" is a workflow label rather than an enforced precondition.
+
+def _assert_document_linkable(conn: Any, company_id: int, document_id: str) -> None:
+    """A draft may cite a source document only while that document is in review."""
+    linked_doc = conn.execute(
+        "SELECT workflow_state FROM source_documents WHERE id = ? AND company_id = ?",
+        (document_id, company_id),
+    ).fetchone()
+    if not linked_doc:
+        raise TenantIsolationError("Source document does not belong to target company.")
+    if linked_doc["workflow_state"] not in DOCUMENT_LINKABLE_STATES:
+        raise FinancialIntegrityError(
+            f"DOCUMENT_LINK_STATE_REFUSED: document {document_id} is in state "
+            f"'{linked_doc['workflow_state']}'; a draft invoice may only cite a "
+            f"document in one of {DOCUMENT_LINKABLE_STATES}."
+        )
+
+
+def _document_review_gate(
+    conn: Any,
+    db: ERPDatabase,
+    company_id: int,
+    invoice: Any,
+    actor_user_id: int,
+    *,
+    action: str,
+    audit: bool = True,
+) -> Optional[FinancialIntegrityError]:
+    """Phase 29 fail-closed gate: the linked document's field review must hold.
+
+    Evaluates :func:`dz_erp.review_policy.evaluate_document_review_policy`
+    from the rows visible inside the caller's IMMEDIATE transaction, so the
+    verdict cannot race a concurrent field edit or decision (TOCTOU-safe: the
+    same lock that will move the invoice forward also reads the evidence the
+    gate judges). Invoices without a linked document pass untouched — their
+    inputs were typed by a human at creation time, and deterministic
+    validation, SoD and payload-hash binding still apply.
+
+    Returns ``None`` when satisfied; otherwise audits the blocked attempt
+    (committed with the caller's transaction via the commit-then-refuse
+    pattern) and returns the error the caller must raise after the
+    transaction body completes.
+    """
+    document_id = invoice["document_id"]
+    if not document_id:
+        return None
+    doc = conn.execute(
+        "SELECT * FROM source_documents WHERE id = ? AND company_id = ?",
+        (document_id, company_id),
+    ).fetchone()
+    if not doc:
+        return FinancialIntegrityError(
+            f"DOCUMENT_REVIEW_UNSATISFIED: linked document {document_id} not found in company {company_id}."
+        )
+    fields = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ?",
+            (company_id, document_id),
+        ).fetchall()
+    ]
+    decisions = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM ocr_field_reviews WHERE company_id = ? AND document_id = ?",
+            (company_id, document_id),
+        ).fetchall()
+    ]
+    evaluation = evaluate_document_review_policy(dict(doc), fields, decisions)
+    if evaluation["satisfied"]:
+        source_mismatches = _source_invoice_mismatches(conn, company_id, invoice, evaluation)
+        if source_mismatches:
+            db.append_audit_event(
+                conn=conn,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                action_type=f"INVOICE_{action}_BLOCKED_SOURCE_MISMATCH",
+                target_model="supplier_invoices",
+                target_id=str(invoice["id"]),
+                after_state={
+                    "document_id": document_id,
+                    "mismatches": source_mismatches[:20],
+                    "mismatches_truncated": len(source_mismatches) > 20,
+                },
+            )
+            return FinancialIntegrityError(
+                "DOCUMENT_INVOICE_MISMATCH: the invoice payload differs from its reviewed source document — "
+                + "; ".join(source_mismatches[:20])
+            )
+        return None
+    blocking = evaluation["blocking"]
+    audit_state = {
+        "document_id": document_id,
+        "document_state": doc["workflow_state"],
+        "blocking": blocking[:20],
+        "blocking_truncated": len(blocking) > 20,
+    }
+    if audit:
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            action_type=f"INVOICE_{action}_BLOCKED_UNREVIEWED",
+            target_model="supplier_invoices",
+            target_id=str(invoice["id"]),
+            after_state=audit_state,
+        )
+    # Returned rather than raised: the caller decides, so that a caller which
+    # must roll its transaction back can record the refusal durably afterwards.
+    denial = FinancialIntegrityError(
+        "DOCUMENT_REVIEW_UNSATISFIED: invoice cannot proceed while its source document "
+        "has undecided, flagged or stale field reviews — " + "; ".join(blocking[:20])
+    )
+    denial.audit_action_type = f"INVOICE_{action}_BLOCKED_UNREVIEWED"
+    denial.audit_after_state = audit_state
+    return denial

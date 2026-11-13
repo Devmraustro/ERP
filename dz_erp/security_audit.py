@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
 
+from .review_policy import evaluate_document_review_policy
 from .database import (
     AUDIT_KEY_SUFFIX,
     AUDIT_KEYRING_SUFFIX,
@@ -1325,3 +1326,80 @@ def restore_and_verify_backup(
         "trial_balance_credit_dzd": format_dzd(total_credit),
         "audit_chains_valid": True,
     }
+
+
+# ===========================================================================
+# Phase 46 - review-policy verdict under document RBAC (integrated from PR #7)
+# ===========================================================================
+# Reads the same evidence the invoice-approval gate will later judge, inside one
+# transaction scoped by the verified credential, so a reviewer sees exactly what
+# will be enforced rather than a second, possibly divergent, computation.
+
+def evaluate_document_review_policy_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    document_id: str,
+) -> Dict[str, Any]:
+    """The Phase 29 review-policy verdict for one document, under document RBAC.
+
+    Everything the verdict depends on (document row, extracted fields, review
+    decisions) is read inside one transaction scoped by the verified
+    credential — the same evidence the invoice-approval gate will later judge,
+    so a reviewer sees exactly what will be enforced. A cross-company attempt
+    is audited (and committed) exactly like the per-document file read before
+    the error is raised.
+    """
+    denial: Optional[Exception] = None
+    evaluation: Optional[Dict[str, Any]] = None
+
+    with db.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (requesting_user_id,)).fetchone()
+        if not user or not user["is_active"]:
+            denial = AuthorizationError("User is inactive or revoked.")
+        else:
+            doc = conn.execute(
+                "SELECT company_id FROM source_documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if not doc:
+                denial = ValueError("Source document not found.")
+            elif doc["company_id"] != user["company_id"]:
+                db.append_audit_event(
+                    conn=conn,
+                    company_id=doc["company_id"],
+                    actor_user_id=requesting_user_id,
+                    action_type="SECURITY_CROSS_COMPANY_READ_BLOCKED",
+                    target_model="source_documents",
+                    target_id=document_id,
+                    after_state={
+                        "attacker_company_id": user["company_id"],
+                        "target_company_id": doc["company_id"],
+                    },
+                )
+                denial = TenantIsolationError("Cross-company read access denied.")
+            else:
+                company_id = int(user["company_id"])
+                doc_row = dict(
+                    conn.execute(
+                        "SELECT * FROM source_documents WHERE id = ?", (document_id,)
+                    ).fetchone()
+                )
+                fields = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ?",
+                        (company_id, document_id),
+                    ).fetchall()
+                ]
+                decisions = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM ocr_field_reviews WHERE company_id = ? AND document_id = ?",
+                        (company_id, document_id),
+                    ).fetchall()
+                ]
+                evaluation = evaluate_document_review_policy(doc_row, fields, decisions)
+
+    if denial is not None:
+        raise denial
+    assert evaluation is not None
+    return evaluation

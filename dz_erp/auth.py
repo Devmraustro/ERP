@@ -48,6 +48,101 @@ LOGIN_LOCKOUT_SECONDS = 15 * 60  # 15 minutes
 MAX_PASSWORD_LENGTH = 1024  # bound PBKDF2 work per request
 PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
 
+# --------------------------------------------------------------------------
+# Password policy (SEC-13)
+# --------------------------------------------------------------------------
+# One chokepoint, used by every path that can create or change a credential:
+# the admin API, the CLI bootstrap (``--bootstrap-admin``), the secure
+# provisioning wrapper, and self-service / administrative password rotation.
+# The enforced floor stays at 8 characters for V1 compatibility; deployments
+# SHOULD raise ``ERP_PASSWORD_MIN_LENGTH`` to 12+ (NIST SP 800-63B rev.4).
+MIN_PASSWORD_LENGTH = 8
+RECOMMENDED_PASSWORD_MIN_LENGTH = 12
+MAX_PASSWORD_MIN_LENGTH = 64
+ENV_PASSWORD_MIN_LENGTH = "ERP_PASSWORD_MIN_LENGTH"
+
+WEAK_PASSWORDS = frozenset(
+    {
+        "password",
+        "password1",
+        "passw0rd",
+        "12345678",
+        "123456789",
+        "1234567890",
+        "qwerty12",
+        "qwertyui",
+        "azertyui",
+        "motdepasse",
+        "changeme",
+        "letmein1",
+        "iloveyou",
+        "welcome1",
+        "admin123",
+        "administrateur",
+    }
+)
+
+
+class PasswordPolicyError(ValueError):
+    """A password that does not satisfy the policy."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.detail = message
+
+
+def configured_password_min_length(env: Optional[dict] = None) -> int:
+    """Effective minimum password length (``ERP_PASSWORD_MIN_LENGTH``, floored at 8)."""
+    source = os.environ if env is None else env
+    raw = str(source.get(ENV_PASSWORD_MIN_LENGTH) or "").strip()
+    if not raw:
+        return MIN_PASSWORD_LENGTH
+    try:
+        configured = int(raw)
+    except (TypeError, ValueError):
+        return MIN_PASSWORD_LENGTH
+    if configured < MIN_PASSWORD_LENGTH:
+        return MIN_PASSWORD_LENGTH
+    return min(configured, MAX_PASSWORD_MIN_LENGTH)
+
+
+def validate_password_policy(
+    password: str,
+    *,
+    username: Optional[str] = None,
+    company_name: Optional[str] = None,
+    env: Optional[dict] = None,
+) -> str:
+    """Validate ``password`` against the unified policy; raise :class:`PasswordPolicyError` on failure."""
+    if not isinstance(password, str) or not password:
+        raise PasswordPolicyError("PASSWORD_REQUIRED", "Password must be a non-empty string.")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise PasswordPolicyError(
+            "PASSWORD_TOO_LONG",
+            f"Password exceeds the maximum accepted length of {MAX_PASSWORD_LENGTH} characters.",
+        )
+    minimum = configured_password_min_length(env)
+    if len(password) < minimum:
+        raise PasswordPolicyError(
+            "PASSWORD_TOO_SHORT",
+            f"Password must be at least {minimum} characters long.",
+        )
+    if not password.strip():
+        raise PasswordPolicyError("PASSWORD_WHITESPACE_ONLY", "Password must contain more than whitespace.")
+    folded = password.casefold()
+    for identifier, code in (
+        (username, "PASSWORD_EQUALS_USERNAME"),
+        (company_name, "PASSWORD_EQUALS_COMPANY_NAME"),
+    ):
+        candidate = (identifier or "").strip().casefold()
+        if candidate and folded == candidate:
+            raise PasswordPolicyError(code, "Password must not be the account's own username or company name.")
+    if folded in WEAK_PASSWORDS:
+        raise PasswordPolicyError("PASSWORD_TOO_COMMON", "Password is a commonly-guessed value; choose another.")
+    return password
+
+
 # Roles recognised by the schema CHECK constraint on users.role.
 VALID_ROLES = (
     "clerk",
@@ -196,6 +291,20 @@ def verify_password(password: str, stored_hash: Optional[str]) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+def _stored_iterations(stored_hash: Optional[str]) -> Optional[int]:
+    """Return the PBKDF2 iteration count of ``stored_hash``, or ``None`` if unparseable."""
+    if not stored_hash or not isinstance(stored_hash, str):
+        return None
+    parts = stored_hash.split("$")
+    if len(parts) != 4 or parts[0] != PASSWORD_HASH_ALGORITHM:
+        return None
+    try:
+        iterations = int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    return iterations if iterations >= 1 else None
+
+
 # --------------------------------------------------------------------------
 # Token primitives
 # --------------------------------------------------------------------------
@@ -280,6 +389,8 @@ class AuthManager:
     ) -> Dict[str, Any]:
         if role not in VALID_ROLES:
             raise ValueError(f"Unknown role '{role}'. Expected one of {list(VALID_ROLES)}.")
+        # SEC-13: every credential-creation path passes through one policy.
+        validate_password_policy(password, username=username)
         password_hash = hash_password(password, iterations=self._pbkdf2_iterations)
         now = _utcnow()
         with self._db.transaction() as conn:
@@ -304,32 +415,70 @@ class AuthManager:
                 )
         return {"user_id": user_id, "username": username, "role": role, "company_id": company_id}
 
-    def set_password(self, user_id: int, new_password: str, *, actor_user_id: Optional[int] = None) -> None:
+    def set_password(
+        self,
+        user_id: int,
+        new_password: str,
+        *,
+        actor_user_id: Optional[int] = None,
+        current_password: Optional[str] = None,
+    ) -> None:
         """Rotate a user's password and revoke every token already issued to them."""
-        password_hash = hash_password(new_password, iterations=self._pbkdf2_iterations)
         now = _utcnow()
+        rejection: Optional[Exception] = None
         with self._db.transaction() as conn:
             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if not user:
                 raise ValueError(f"User {user_id} does not exist.")
-            conn.execute(
-                "UPDATE users SET password_hash = ?, password_updated_at = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
-                (password_hash, _iso(now), user_id),
-            )
-            conn.execute(
-                "UPDATE auth_tokens SET revoked_at = ?, revocation_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
-                (_iso(now), "PASSWORD_ROTATED", user_id),
-            )
-            if actor_user_id is not None:
+            if current_password is not None and not verify_password(current_password, user["password_hash"]):
                 self._db.append_audit_event(
                     conn=conn,
                     company_id=int(user["company_id"]),
-                    actor_user_id=actor_user_id,
-                    action_type="AUTH_PASSWORD_ROTATED",
+                    actor_user_id=actor_user_id if actor_user_id is not None else user_id,
+                    action_type="AUTH_PASSWORD_CHANGE_REJECTED",
                     target_model="users",
                     target_id=str(user_id),
-                    after_state={"username": user["username"], "tokens_revoked": True},
+                    after_state={"reason": "CURRENT_PASSWORD_INVALID"},
                 )
+                rejection = InvalidCredentialError("The current password is incorrect.")
+            if rejection is None:
+                validate_password_policy(new_password, username=user["username"])
+                password_hash = hash_password(new_password, iterations=self._pbkdf2_iterations)
+                conn.execute(
+                    "UPDATE users SET password_hash = ?, password_updated_at = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
+                    (password_hash, _iso(now), user_id),
+                )
+                revoked = conn.execute(
+                    "UPDATE auth_tokens SET revoked_at = ?, revocation_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
+                    (_iso(now), "PASSWORD_ROTATED", user_id),
+                ).rowcount
+                effective_actor = actor_user_id if actor_user_id is not None else (user_id if current_password is not None else None)
+                if effective_actor is not None:
+                    self._db.append_audit_event(
+                        conn=conn,
+                        company_id=int(user["company_id"]),
+                        actor_user_id=effective_actor,
+                        action_type="AUTH_PASSWORD_ROTATED",
+                        target_model="users",
+                        target_id=str(user_id),
+                        after_state={
+                            "username": user["username"],
+                            "tokens_revoked": True,
+                            "revoked_count": int(revoked or 0),
+                            "mode": "self_service" if current_password is not None else "administrative_reset",
+                        },
+                    )
+        if rejection is not None:
+            raise rejection
+
+    def change_own_password(self, user_id: int, current_password: str, new_password: str) -> None:
+        """Self-service rotation: prove the old credential, then replace it."""
+        self.set_password(
+            user_id,
+            new_password,
+            actor_user_id=user_id,
+            current_password=current_password,
+        )
 
     def deactivate_user(self, user_id: int, *, actor_user_id: Optional[int] = None, reason: str = "DEACTIVATED") -> int:
         """Disable a user and immediately revoke all of their live tokens."""
@@ -407,6 +556,13 @@ class AuthManager:
             self._register_failed_login(account, username, now)
             raise InvalidCredentialError("Invalid username or password.")
 
+        # SEC-13: transparently upgrade credentials stored under an older PBKDF2
+        # iteration floor upon successful verification.
+        upgraded_hash: Optional[str] = None
+        stored_iterations = _stored_iterations(account["password_hash"])
+        if stored_iterations is not None and stored_iterations < self._pbkdf2_iterations:
+            upgraded_hash = hash_password(password, iterations=self._pbkdf2_iterations)
+
         # Phase 2 — mint the token and reset the failure counters atomically.
         token = generate_session_token()
         token_hash = hash_token(token)
@@ -426,6 +582,21 @@ class AuthManager:
                 "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?",
                 (account["id"],),
             )
+            if upgraded_hash is not None:
+                conn.execute(
+                    "UPDATE users SET password_hash = ?, password_updated_at = ? WHERE id = ?",
+                    (upgraded_hash, _iso(now), account["id"]),
+                )
+                self._audit(
+                    conn,
+                    account,
+                    "AUTH_PASSWORD_REHASHED",
+                    {
+                        "username": account["username"],
+                        "from_iterations": stored_iterations,
+                        "to_iterations": self._pbkdf2_iterations,
+                    },
+                )
             self._audit(
                 conn,
                 account,

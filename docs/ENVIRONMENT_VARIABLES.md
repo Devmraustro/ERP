@@ -31,7 +31,8 @@ Categories: **SECRET** (must come from a secret manager, never from a file in th
 | --- | --- | --- | --- | --- |
 | `ERP_HOST` | TUNING | `127.0.0.1` | Bind address | Loopback only. Only set `0.0.0.0` behind a TLS-terminating reverse proxy. |
 | `ERP_PORT` | TUNING | `8000` | Bind port | 8000 |
-| `ERP_TRUSTED_PROXIES` | TUNING | none | CIDR list whose `X-Forwarded-For` is honoured | **No forwarded header is trusted**; the peer address is used. Correct and safe default. |
+| `ERP_ALLOWED_HOSTS` | TUNING | `localhost,127.0.0.1,[::1],testserver` | Comma/space-separated allow-list of `Host` header names (supports `*.domain` subdomain wildcards; port suffixes stripped) | **Only loopback/test hostnames are accepted**; any unknown, empty, or malformed `Host` header is refused with HTTP `400` and logged as `SECURITY_HOST_HEADER_REJECTED`. |
+| `ERP_TRUSTED_PROXIES` | TUNING | none | CIDR list whose `X-Forwarded-For` is honoured | **No forwarded header is trusted**; the peer address is used (`uvicorn` runs with `proxy_headers=False`). Correct and safe default. |
 | `ERP_DOCS_ENABLED` | TUNING | `false` | Serves `/docs`, `/redoc`, `/openapi.json` | Disabled (404). Do not enable in staging or production. |
 
 ## Operations
@@ -40,6 +41,7 @@ Categories: **SECRET** (must come from a secret manager, never from a file in th
 | --- | --- | --- | --- | --- |
 | `ERP_LOG_LEVEL` | TUNING | `INFO` | Root log level | INFO |
 | `ERP_TOKEN_TTL_SECONDS` | TUNING | `DEFAULT_TOKEN_TTL_SECONDS` | Bearer session lifetime | Default |
+| `ERP_PASSWORD_MIN_LENGTH` | TUNING | `8` (recommended `12`) | Unified minimum password length across CLI, admin API, and password rotation (`dz_erp/auth.py`, floored at `8`, max `64`) | `8` |
 | `ERP_MIN_FREE_BYTES` | TUNING | implementation default | Readiness fails when free disk falls below this | Default threshold |
 | `ERP_BACKUP_MAX_AGE_SECONDS` | TUNING | implementation default | Readiness marks the backup stale past this age | Default |
 | `ERP_BACKUP_RETAIN_DAILY` | TUNING | implementation default | Daily backups retained | Default |

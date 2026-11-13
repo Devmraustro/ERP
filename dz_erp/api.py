@@ -22,7 +22,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import (
     Depends,
@@ -54,7 +54,15 @@ from .intake_ocr import (
     upload_and_process_supplier_document,
 )
 from .review_policy import ReviewPolicyValueError
-from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
+from .net import (
+    TrustedProxyPolicy,
+    allowed_hosts_from_env,
+    describe_allowed_hosts,
+    describe_trusted_proxy_policy,
+    host_is_allowed,
+    parse_allowed_hosts,
+    trusted_proxy_policy_from_env,
+)
 from .rate_limit import (
     RequestThrottle,
     describe_throttle_policy,
@@ -238,6 +246,7 @@ def create_erp_fastapi_app(
     trusted_proxies: Optional[TrustedProxyPolicy] = None,
     docs_enabled: bool = False,
     throttle: Optional[RequestThrottle] = None,
+    allowed_hosts: Optional[Sequence[str]] = None,
 ) -> FastAPI:
     # Secure default: docs disabled unless explicitly enabled for local development
     docs_url = "/docs" if docs_enabled else None
@@ -271,12 +280,42 @@ def create_erp_fastapi_app(
     # explicitly configured, X-Forwarded-For is ignored and the direct peer
     # address is used.  See dz_erp/net.py.
     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
+    # SEC-15: Host header validation. ``None`` reads ERP_ALLOWED_HOSTS, falling
+    # back strictly to the loopback/test set — never "accept anything".
+    app.state.allowed_hosts = (
+        parse_allowed_hosts(allowed_hosts)
+        if allowed_hosts is not None
+        else allowed_hosts_from_env()
+    )
     # Phase 35 (SEC-13): request/login throttling. Defaults to the store
     # selected by ERP_RATE_LIMIT_BACKEND; an explicit throttle wins so tests and
     # a multi-worker deployment can inject one shared store.
     app.state.throttle = (
         throttle if throttle is not None else RequestThrottle(store=store_from_env(db))
     )
+
+    @app.middleware("http")
+    async def _validate_host_header(request: Request, call_next):
+        """SEC-15: Fail-closed Host-header allow-list enforcement."""
+        host = request.headers.get("host")
+        if not host_is_allowed(host, app.state.allowed_hosts):
+            corr_id = getattr(request.state, "request_id", None)
+            if not corr_id:
+                corr_id, _ = sanitize_request_id(request.headers.get("X-Request-Id"))
+            logger.log(
+                "WARNING",
+                "SECURITY_HOST_HEADER_REJECTED",
+                corr_id,
+                host=str(host or "")[:255],
+                path=request.url.path,
+                method=request.method,
+            )
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Invalid Host header."},
+                headers={"X-Request-Id": corr_id},
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def _security_headers(request: Request, call_next):
@@ -627,6 +666,7 @@ def create_erp_fastapi_app(
         return {
             "company_id": auth.company_id,
             "rate_limit": described,
+            "allowed_hosts": describe_allowed_hosts(app.state.allowed_hosts),
         }
 
     @app.get("/api/v1/auth/session")

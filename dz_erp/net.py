@@ -29,7 +29,16 @@ import os
 from typing import Iterable, List, Optional, Tuple
 
 ENV_TRUSTED_PROXIES = "ERP_TRUSTED_PROXIES"
+ENV_ALLOWED_HOSTS = "ERP_ALLOWED_HOSTS"
 UNKNOWN_IP = "unknown"
+
+#: Hostnames accepted when ``ERP_ALLOWED_HOSTS`` is unset. They cover loopback
+#: development, the embedded desktop service on 127.0.0.1, and the Starlette
+#: TestClient (`testserver`), and are the *only* names an unconfigured
+#: deployment will answer to: a request with any other ``Host`` header is
+#: refused with HTTP 400. A staging/production deployment sets its real name(s)
+#: via ``ERP_ALLOWED_HOSTS``.
+DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]", "testserver")
 
 
 class TrustedProxyPolicy:
@@ -151,4 +160,113 @@ def describe_trusted_proxy_policy(policy: TrustedProxyPolicy) -> dict:
             else "forwarded headers are honoured only for requests arriving from a trusted proxy"
         ),
         "env_override": ENV_TRUSTED_PROXIES,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Host header validation (SEC-15)
+# ---------------------------------------------------------------------------
+# ``Host`` is caller-controlled. Behind a proxy that routes by name (or a cache
+# that keys on it), an unvalidated ``Host`` enables cache poisoning, vhost
+# confusion, and absolute-URL poisoning. The reverse proxy SHOULD reject
+# unknown names first; this in-process allow-list makes the guarantee
+# independent of proxy configuration mistakes.
+
+
+def _strip_port(host: str) -> str:
+    """Drop a trailing ``:port`` from a Host value, keeping IPv6 literals intact."""
+    if not host:
+        return ""
+    if host.startswith("["):
+        closing = host.find("]")
+        if closing == -1:
+            return ""
+        rest = host[closing + 1 :]
+        if not rest:
+            return host[: closing + 1]
+        if rest.startswith(":") and rest[1:].isdigit():
+            return host[: closing + 1]
+        return ""
+    if host.count(":") == 1:
+        name, _, port = host.partition(":")
+        if port.isdigit():
+            return name
+        return ""
+    if ":" in host:
+        return ""
+    return host
+
+
+def parse_allowed_hosts(raw: object) -> Tuple[str, ...]:
+    """Normalise a comma/space separated host list into comparable patterns.
+
+    Entries are lower-cased, port suffixes are dropped, and a leading ``*.`` is
+    preserved as a subdomain wildcard. Empty or malformed entries are ignored
+    rather than widening the allow-list.
+    """
+    if isinstance(raw, (list, tuple, set)):
+        items = [str(item) for item in raw]
+    else:
+        items = str(raw or "").replace(",", " ").split()
+    result: List[str] = []
+    for item in items:
+        candidate = item.strip().lower()
+        if not candidate:
+            continue
+        wildcard = candidate.startswith("*.")
+        if wildcard:
+            candidate = candidate[2:]
+        candidate = _strip_port(candidate)
+        if not candidate or "/" in candidate or any(ch.isspace() for ch in candidate):
+            continue
+        if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in candidate):
+            continue
+        result.append(f"*.{candidate}" if wildcard else candidate)
+    return tuple(dict.fromkeys(result))
+
+
+def allowed_hosts_from_env(env: Optional[dict] = None) -> Tuple[str, ...]:
+    """Effective allow-list: ``ERP_ALLOWED_HOSTS`` or ``DEFAULT_ALLOWED_HOSTS``."""
+    source = os.environ if env is None else env
+    parsed = parse_allowed_hosts(source.get(ENV_ALLOWED_HOSTS) or "")
+    return parsed or DEFAULT_ALLOWED_HOSTS
+
+
+def host_is_allowed(host_header: Optional[str], allowed: Iterable[str]) -> bool:
+    """Whether a ``Host`` header value matches the allow-list.
+
+    A missing, empty, or malformed header (including multiple values joined by
+    commas or embedded whitespace/control characters) is refused: ``no name``
+    must never mean ``any name``.
+    """
+    raw = str(host_header or "").strip().lower()
+    if not raw or "," in raw or "/" in raw or any(ch.isspace() for ch in raw):
+        return False
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in raw):
+        return False
+    host = _strip_port(raw)
+    if not host:
+        return False
+    for pattern in allowed:
+        if pattern.startswith("*."):
+            suffix = pattern[1:]  # ".example.dz"
+            if host.endswith(suffix) and len(host) > len(suffix):
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def describe_allowed_hosts(allowed: Iterable[str]) -> dict:
+    """Machine-readable description of the active Host policy (for admins)."""
+    entries = list(allowed)
+    return {
+        "allowed_hosts": entries,
+        "allowed_host_count": len(entries),
+        "wildcards": [entry for entry in entries if entry.startswith("*.")],
+        "env_override": ENV_ALLOWED_HOSTS,
+        "default_behaviour": (
+            "only loopback/test names are accepted; set ERP_ALLOWED_HOSTS to the "
+            "deployment's public hostname(s) before exposing the API"
+        ),
     }

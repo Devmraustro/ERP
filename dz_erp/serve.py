@@ -59,28 +59,64 @@ def _has_any_user(db_path: Path) -> bool:
 
 
 def _bootstrap_admin(db_path: Path, username: str, company_name: str) -> int:
-    """Create the first company and an admin user, returning the user id."""
+    """Create the first company and an admin user, returning the user id.
+
+    Prompts for the credential before writing to disk so an aborted prompt
+    leaves no orphaned company row, and compensates if user creation fails.
+    """
     from .database import ERPDatabase
 
+    password = getpass.getpass(f"Password for '{username}': ")
     db = ERPDatabase(str(db_path))
-    conn = db._create_connection()
-    try:
-        cur = conn.execute(
-            "INSERT INTO companies (code, name, nif, created_at) VALUES (?, ?, ?, ?)",
-            (f"BOOT-{username.upper()}", company_name, None, _utcnow().isoformat()),
+    company_code = f"BOOT-{username.upper()}"
+
+    created_company = False
+    existing_users = 0
+    with db.transaction() as conn:
+        existing = conn.execute(
+            "SELECT id FROM companies WHERE code = ?", (company_code,)
+        ).fetchone()
+        if existing:
+            company_id = int(existing["id"])
+            existing_users = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE company_id = ?", (company_id,)
+                ).fetchone()["n"]
+            )
+        else:
+            cur = conn.execute(
+                "INSERT INTO companies (code, name, nif, created_at) VALUES (?, ?, ?, ?)",
+                (company_code, company_name, None, _utcnow().isoformat()),
+            )
+            company_id = int(cur.lastrowid)
+            created_company = True
+
+    if existing_users:
+        raise SystemExit(
+            f"Company '{company_code}' already exists with {existing_users} user(s): "
+            "this database is already bootstrapped."
         )
-        company_id = int(cur.lastrowid)
-    finally:
-        conn.close()
 
     auth = AuthManager(db)
-    user = auth.create_user(
-        username=username,
-        password=getpass.getpass(f"Password for '{username}': "),
-        role="admin",
-        company_id=company_id,
-        actor_user_id=None,
-    )
+    try:
+        user = auth.create_user(
+            username=username,
+            password=password,
+            role="admin",
+            company_id=company_id,
+            actor_user_id=None,
+        )
+    except Exception as exc:
+        if created_company:
+            with db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM companies WHERE id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM users WHERE company_id = ?)",
+                    (company_id, company_id),
+                )
+        raise SystemExit(
+            f"Could not create admin '{username}' in company {company_id}: {exc}."
+        ) from exc
     return int(user["user_id"])
 
 
@@ -176,8 +212,15 @@ def main(argv: Optional[list] = None) -> int:
 
     import uvicorn
 
+    # SEC-15: ``proxy_headers=False`` prevents uvicorn from rewriting
+    # ``request.client`` from X-Forwarded-For for loopback peers before
+    # dz_erp/net.py enforces ERP_TRUSTED_PROXIES.
     uvicorn.run(
-        build_app(), host=args.host, port=args.port, log_level=os.environ.get("ERP_LOG_LEVEL", "info")
+        build_app(),
+        host=args.host,
+        port=args.port,
+        log_level=os.environ.get("ERP_LOG_LEVEL", "info"),
+        proxy_headers=False,
     )
     return 0
 

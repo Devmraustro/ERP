@@ -56,6 +56,9 @@ executing the unsigned exe is blocked by this workstation's application-control 
 
 ## Quick Verification
 
+> **Current Integrated Release Candidate (Phases 29–58, 2026-11-13):**
+> On supported CPython `3.12.10` with hash-verified dependencies (`pip install --no-deps --require-hashes -r requirements.lock.hashes.txt`, 53 pinned distributions / 1,317 SHA-256 digests, `pip-audit` 0 advisories), the unified server + desktop + OCR review + security codebase passes **all tests with 0 failures** and **40/40** synthetic staging acceptance checks (`tools/staging_acceptance.py`), plus whole-tree `ruff check .` (exit `0`). See [`docs/release/RELEASE_EVIDENCE_INDEX.md`](docs/release/RELEASE_EVIDENCE_INDEX.md) and [`docs/release/final/ERP_PRODUCTION_RELEASE_HANDOVER.md`](docs/release/final/ERP_PRODUCTION_RELEASE_HANDOVER.md) for current gate status (`G1`–`G4` PASS; `G5` Algerian `expert-comptable` sign-off and `G6` production infrastructure BLOCKED). Historical milestone notes below are preserved for audit traceability.
+
 Verified at code head `4225f36c56fed66700d61ffe832db7373214a93d` (2026-10-25):
 GitHub Actions run [`40210565234`](https://github.com/Devmraustro/ERP/actions/runs/40210565234)
 is green on Linux Python 3.11 and 3.12 (562 passed, 3 skipped, 88 % coverage each)

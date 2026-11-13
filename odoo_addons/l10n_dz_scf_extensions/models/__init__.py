@@ -1,2 +1,2 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-from . import res_partner_dz
+from . import res_partner_dz as res_partner_dz

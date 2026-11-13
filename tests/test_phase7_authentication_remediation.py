@@ -981,7 +981,7 @@ def test_reopening_a_migrated_database_is_idempotent(tmp_path: Path) -> None:
             "INSERT INTO companies (id, code, name, created_at) VALUES (1, 'DZ1', 'Tenant Alpha', '2026-01-01')"
         )
     auth = AuthManager(db, pbkdf2_iterations=FAST_ITERATIONS)
-    auth.create_user(username="u1", password="P#2026x", role="clerk", company_id=1)
+    auth.create_user(username="u1", password="Prov#2026x", role="clerk", company_id=1)
     del db, auth
 
     db2 = ERPDatabase(db_path)  # must not raise on the second open
@@ -1019,7 +1019,7 @@ def test_list_active_tokens_exposes_no_secrets(env: SimpleNamespace) -> None:
 
 def test_unknown_role_is_refused(env: SimpleNamespace) -> None:
     with pytest.raises(ValueError):
-        env.auth.create_user(username="x", password="P#2026x", role="superuser", company_id=1)
+        env.auth.create_user(username="x", password="Prov#2026x", role="superuser", company_id=1)
 
 
 def test_empty_password_is_refused(env: SimpleNamespace) -> None:

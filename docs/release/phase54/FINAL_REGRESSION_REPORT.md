@@ -4,7 +4,10 @@
 **Repository Root:** `/home/user/ERP` (`https://github.com/Devmraustro/ERP.git`)  
 **Branch & Commit Tested:** `arena/63d762c8-erp` @ `33763c3`  
 **Local Execution Runtime:** Isolated CPython `3.12.10` (`--require-hashes` environment `/tmp/venv_phase52`, `54` distributions)  
-**Cross-Platform CI Matrix:** `.github/workflows/ci.yml` (`ubuntu-latest` Python `3.11` & `3.12` + `windows-latest` Python `3.12.10`; live pushed-SHA run recorded in Phase 57)
+**Cross-Platform CI Execution:** GitHub Actions Run [`43510611640`](https://github.com/Devmraustro/ERP/actions/runs/43510611640) on `15078e98fed56d12c3cae276509c5dc0377e1895` — **`3/3` jobs `SUCCESS`**:
+- `Test, coverage and static checks (Python 3.11)` (`ubuntu-latest`, job `132179564702`): **`SUCCESS`** (`3m34s`, includes `staging_acceptance.py` + `risk_register_counts.py`)
+- `Test, coverage and static checks (Python 3.12)` (`ubuntu-latest`, job `132179564575`): **`SUCCESS`** (`13m32s`)
+- `Key rotation, backup and recovery on Windows` (`windows-latest`, Python `3.12.10`, job `132179564128`): **`SUCCESS`** (`3m18s`, includes Windows NTFS junction/reparse-point suites + PowerShell `staging_acceptance.py`)
 
 ---
 

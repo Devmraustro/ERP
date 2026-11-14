@@ -730,6 +730,36 @@ def _resolve_audit_keyring(db_path: str, explicit: Optional[bytes]) -> tuple:
     return KeyRing.bootstrap("audit", _resolve_audit_secret(db_path, explicit)), ring_path
 
 
+def _create_private_database_file(db_path: Path) -> None:
+    """Create a *new* database file owner-only (``0600``) before SQLite opens it.
+
+    SQLite creates a missing database with ``0666 & ~umask`` - ``0644`` under the
+    usual ``022`` - so a deployment bootstrapped from an ordinary shell left the
+    whole ledger, the user table and the password hashes world-readable; the key
+    files beside it were already ``0600``. SQLite gives the ``-wal`` and ``-shm``
+    files the mode of the main database, so restricting this one file covers all
+    three.
+
+    Only a file this call creates is touched. An existing database keeps the
+    mode its operator chose: silently changing permissions on live data is not
+    this function's decision. Mode bits are not access control on Windows, so
+    nothing is done there (see risk S5).
+    """
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(str(db_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    try:
+        # os.open applies the umask, which can only narrow 0600 further (for
+        # example to 0400 under umask 0277). Set the mode exactly so the owner
+        # can always write the database it just created.
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+
 class ERPDatabase:
     """Thread-safe transactional database manager with audit hash-chaining."""
 
@@ -778,6 +808,7 @@ class ERPDatabase:
             pass
         else:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            _create_private_database_file(Path(db_path))
             # sqlite3.Connection's context manager commits/rolls back but does
             # not close the connection. Close it explicitly so WAL checkpointing
             # is completed here, not later during unrelated read-only inspection

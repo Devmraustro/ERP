@@ -147,11 +147,6 @@ class ReversalInput(BaseModel):
     reason: str
 
 
-class ReversalApprovalDecisionInput(BaseModel):
-    approve: bool
-    reason: str = ""
-
-
 class FieldDecisionInput(BaseModel):
     """One field-review decision (Phase 46, from PR #7).
 
@@ -994,12 +989,46 @@ def create_erp_fastapi_app(
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    def _is_reversal_invoice(company_id: int, invoice_id: int) -> bool:
+        """Is ``invoice_id`` a credit note (``IN_REFUND``) of the caller's company?
+
+        A credit note has its own approval and posting functions, with their own
+        state machine (``NeedsReview`` -> ``PendingApproval`` -> ``Approved`` ->
+        ``Posted``). The three workflow routes below are shared by both document
+        types, so they ask this question and dispatch.
+
+        Defect this repairs (release-closure phase 67): the reversal functions
+        were registered on a second set of routes with the *same* path templates
+        (``/api/v1/invoices/{reversal_invoice_id}/submit-approval`` ...). The
+        router matches the first registration, so those routes were unreachable
+        and a credit note created over HTTP could never be approved or posted -
+        its journal entry stayed ``DRAFT`` and the supplier ledger was never
+        corrected.
+
+        The lookup is scoped to the caller's company. A row in another company
+        answers ``False`` and falls through to the ordinary handler, which
+        refuses it exactly as it always has - no new cross-tenant signal.
+        """
+        with db.transaction() as conn:
+            row = conn.execute(
+                "SELECT invoice_type FROM supplier_invoices WHERE id = ? AND company_id = ?",
+                (invoice_id, company_id),
+            ).fetchone()
+        return bool(row) and row["invoice_type"] == "IN_REFUND"
+
     @app.post("/api/v1/invoices/{invoice_id}/submit-approval")
     def api_submit_approval(
         invoice_id: int,
         auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
+            if _is_reversal_invoice(auth.company_id, invoice_id):
+                return submit_reversal_for_approval(
+                    db=db,
+                    company_id=auth.company_id,
+                    user_id=auth.user_id,
+                    reversal_invoice_id=invoice_id,
+                )
             return submit_invoice_for_approval(
                 db=db,
                 company_id=auth.company_id,
@@ -1018,6 +1047,15 @@ def create_erp_fastapi_app(
         auth: AuthenticatedUser = Depends(_authenticate),
     ) -> Dict[str, Any]:
         try:
+            if _is_reversal_invoice(auth.company_id, invoice_id):
+                return decide_reversal_approval(
+                    db=db,
+                    company_id=auth.company_id,
+                    approver_user_id=auth.user_id,
+                    reversal_invoice_id=invoice_id,
+                    approve=body.approve,
+                    reason=body.reason,
+                )
             return decide_invoice_approval(
                 db=db,
                 company_id=auth.company_id,
@@ -1040,6 +1078,14 @@ def create_erp_fastapi_app(
         if not idempotency_key:
             raise HTTPException(status_code=400, detail="Missing mandatory Idempotency-Key header.")
         try:
+            if _is_reversal_invoice(auth.company_id, invoice_id):
+                return post_reversal(
+                    db=db,
+                    company_id=auth.company_id,
+                    accountant_user_id=auth.user_id,
+                    reversal_invoice_id=invoice_id,
+                    idempotency_key=idempotency_key,
+                )
             return post_supplier_invoice(
                 db=db,
                 company_id=auth.company_id,
@@ -1068,64 +1114,6 @@ def create_erp_fastapi_app(
                 accountant_user_id=auth.user_id,
                 original_invoice_id=invoice_id,
                 reason=body.reason,
-                idempotency_key=idempotency_key,
-            )
-        except (AuthorizationError, TenantIsolationError) as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except FinancialIntegrityError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post("/api/v1/invoices/{reversal_invoice_id}/submit-approval")
-    def api_submit_reversal_approval(
-        reversal_invoice_id: int,
-        auth: AuthenticatedUser = Depends(_authenticate),
-    ) -> Dict[str, Any]:
-        try:
-            return submit_reversal_for_approval(
-                db=db,
-                company_id=auth.company_id,
-                user_id=auth.user_id,
-                reversal_invoice_id=reversal_invoice_id,
-            )
-        except (AuthorizationError, TenantIsolationError) as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except FinancialIntegrityError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @app.post("/api/v1/invoices/{reversal_invoice_id}/decide-approval")
-    def api_decide_reversal_approval(
-        reversal_invoice_id: int,
-        body: ReversalApprovalDecisionInput,
-        auth: AuthenticatedUser = Depends(_authenticate),
-    ) -> Dict[str, Any]:
-        try:
-            return decide_reversal_approval(
-                db=db,
-                company_id=auth.company_id,
-                approver_user_id=auth.user_id,
-                reversal_invoice_id=reversal_invoice_id,
-                approve=body.approve,
-                reason=body.reason,
-            )
-        except (AuthorizationError, TenantIsolationError) as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except FinancialIntegrityError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @app.post("/api/v1/invoices/{reversal_invoice_id}/post")
-    def api_post_reversal(
-        reversal_invoice_id: int,
-        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-        auth: AuthenticatedUser = Depends(_authenticate),
-    ) -> Dict[str, Any]:
-        if not idempotency_key:
-            raise HTTPException(status_code=400, detail="Missing mandatory Idempotency-Key header.")
-        try:
-            return post_reversal(
-                db=db,
-                company_id=auth.company_id,
-                accountant_user_id=auth.user_id,
-                reversal_invoice_id=reversal_invoice_id,
                 idempotency_key=idempotency_key,
             )
         except (AuthorizationError, TenantIsolationError) as exc:

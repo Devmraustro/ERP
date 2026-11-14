@@ -1481,6 +1481,26 @@ def create_reversal_request(
         if not orig or orig["workflow_state"] != "Posted":
             raise FinancialIntegrityError("Only a Posted invoice can be reversed.")
 
+        # One invoice has at most one credit note: its journal entry number
+        # (RAVOIR/<year>/<invoice id>) is unique by construction. A second
+        # request under a new idempotency key used to reach that UNIQUE
+        # constraint and surface as an unhandled sqlite3.IntegrityError - an
+        # HTTP 500 for what is an ordinary, refusable business condition. Refuse
+        # it here, by name, before anything is written.
+        existing = conn.execute(
+            """
+            SELECT id, workflow_state FROM supplier_invoices
+            WHERE company_id = ? AND reversal_of_invoice_id = ? AND invoice_type = 'IN_REFUND'
+            ORDER BY id LIMIT 1
+            """,
+            (company_id, original_invoice_id),
+        ).fetchone()
+        if existing:
+            raise FinancialIntegrityError(
+                f"Invoice {original_invoice_id} already has a reversal "
+                f"(credit note {existing['id']}, state '{existing['workflow_state']}')."
+            )
+
         orig_je = conn.execute("SELECT * FROM journal_entries WHERE id = ?", (orig["journal_entry_id"],)).fetchone()
         orig_je_lines = conn.execute(
             "SELECT * FROM journal_entry_lines WHERE journal_entry_id = ?",

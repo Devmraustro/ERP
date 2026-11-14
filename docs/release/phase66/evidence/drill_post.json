@@ -1,0 +1,56 @@
+{
+ "healthz": 200,
+ "readyz": [
+  200,
+  "degraded",
+  {
+   "database": "ok",
+   "vault": "ok",
+   "key_custody": "ok",
+   "disk": "ok",
+   "ocr": "ok",
+   "backup": "fail"
+  }
+ ],
+ "admin_login": 200,
+ "deactivated_user_still_refused": 401,
+ "trial_balance": [
+  200,
+  true,
+  "37763.42",
+  "37763.42"
+ ],
+ "tb_rows_identical_to_pre_disaster": true,
+ "invoices": [
+  200,
+  7,
+  [
+   "DuplicateRejected",
+   "NeedsReview",
+   "Posted"
+  ]
+ ],
+ "partners": [
+  200,
+  4,
+  [
+   "SARL Apres Rotation",
+   "SARL Apres Rotation 2"
+  ]
+ ],
+ "stock": "41.000000",
+ "vault_document_decrypts_and_matches_sha256": [
+  true,
+  true
+ ],
+ "write_on_restored_copy": 200,
+ "audit_chain_after_resume": {
+  "valid": true,
+  "checked_count": 53,
+  "key_versions": {
+   "1": 49,
+   "2": 4
+  }
+ },
+ "immutability_on_restored": "refused: FINANCIAL_INTEGRITY_VIOLATION: Posted journal entry line amounts and a"
+}

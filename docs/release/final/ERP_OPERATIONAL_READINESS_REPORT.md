@@ -3,6 +3,13 @@
 **Feature freeze:** in force for the whole phase. No module, screen, workflow or AI capability was
 added. Every code change below is a defect repair traced to a failed acceptance check.
 
+> **Phase 60 addendum (2026-11-14).** The restore path that this report marks `NOT EXECUTED` has since
+> been executed on CPython **3.12.10** against the same code (`c03062f`): full suite **1007 passed /
+> 0 failed / 21 skipped**, staging acceptance **40/40**, `ops_backup verify --deep` **ok**. See
+> [`../phase60/RESTORE_PATH_VERIFICATION_CPYTHON_3_12_10.md`](../phase60/RESTORE_PATH_VERIFICATION_CPYTHON_3_12_10.md).
+> The 3.11.2 figures below are kept as the phase-59 record. `G5` and `G6` are unchanged, and so is the
+> classification.
+
 ---
 
 ## 1. Exact repository, branch and HEAD
@@ -211,6 +218,7 @@ Ordered, and none of them is something this session can do:
    runbook and a real restore drill. **This alone unblocks `G6`.**
 3. **Run the suite on CPython 3.12.10** (or 3.11.17+) and confirm the 22 restore-path tests pass — the
    only thing standing between "22 red" and "0 red" here.
+   *Done on Linux in phase 60 — 0 red. Still to do on Windows 3.12.10, and with the Qt suites.*
 4. **Windows UAT**: install, log in, switch to Arabic, review and correct a field, submit, approve as a
    second user, post, reverse — and **screenshot each step**. Also check High-DPI at 150 %.
 5. **Decide the GR/IR account** (`380` vs `408`) with the expert and, if needed, change the product

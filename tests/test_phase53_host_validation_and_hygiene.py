@@ -194,6 +194,66 @@ def test_bootstrap_admin_leaves_no_orphan_company_when_password_fails(tmp_path: 
     assert count == 0
 
 
+def test_bootstrap_admin_loads_the_scf_chart(tmp_path: Path) -> None:
+    """A bootstrapped deployment must be able to record an invoice.
+
+    `--bootstrap-admin` created the company and the admin user but never loaded
+    the SCF chart, so a freshly installed server answered `GET /api/v1/accounts`
+    with an empty list and every master-data write failed with "… is not an
+    account of this company's SCF chart". Posting validates account codes, so the
+    deployment was unusable for its stated purpose while reporting itself
+    healthy. The desktop bootstrap always loaded the chart; the CLI path did not.
+    """
+    from dz_erp.database import ERPDatabase
+
+    db_path = tmp_path / "boot.sqlite3"
+    with patch("dz_erp.serve.getpass.getpass", return_value="Str0ng-Admin-Pass!2026"):
+        user_id = _bootstrap_admin(db_path, "admin", "Chart Check")
+    assert user_id >= 1
+
+    db = ERPDatabase(str(db_path))
+    with db.transaction() as conn:
+        counts = {
+            table: conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            for table in ("companies", "users", "accounts", "account_groups", "taxes")
+        }
+        loaded = conn.execute(
+            "SELECT COUNT(*) AS n FROM audit_events WHERE action_type = 'LOAD_CHART_TEMPLATE'"
+        ).fetchone()["n"]
+    assert counts["companies"] == 1
+    assert counts["users"] == 1
+    # The chart sizes are asserted as a floor, not an exact number: a future SCF
+    # template may legitimately add accounts, but a *missing* chart is the defect.
+    assert counts["accounts"] >= 290, f"chart not loaded: {counts}"
+    assert counts["account_groups"] >= 60, f"chart not loaded: {counts}"
+    assert counts["taxes"] >= 8, f"chart not loaded: {counts}"
+    assert loaded == 1, "the chart load must be recorded in the audit trail"
+
+
+def test_bootstrap_admin_rejects_a_weak_password_before_writing_anything(tmp_path: Path) -> None:
+    """The credential is validated before the first database write.
+
+    Loading the chart rewrites `accounts`, `account_groups`, `taxes` and
+    `timbre_rules` and writes an `audit_events` row. That row cannot be deleted
+    (`trg_audit_no_delete`), so a rejected password discovered *after* the chart
+    load would leave a company that can never be cleanly removed. Validating the
+    policy first - it needs no connection - keeps bootstrap atomic.
+    """
+    from dz_erp.database import ERPDatabase
+
+    db_path = tmp_path / "boot.sqlite3"
+    with patch("dz_erp.serve.getpass.getpass", return_value="short"):
+        with pytest.raises(SystemExit):
+            _bootstrap_admin(db_path, "admin", "Weak Check")
+
+    db = ERPDatabase(str(db_path))
+    with db.transaction() as conn:
+        for table in ("companies", "users", "accounts", "account_groups", "taxes"):
+            n = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            assert n == 0, f"{table} was written before the password was validated"
+        assert conn.execute("SELECT COUNT(*) AS n FROM audit_events").fetchone()["n"] == 0
+
+
 def test_repository_hygiene_and_packaging_configuration() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["tool"]["setuptools"]["packages"]["find"]["include"] == ["dz_erp*"]

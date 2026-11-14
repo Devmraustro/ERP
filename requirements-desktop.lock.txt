@@ -1,0 +1,34 @@
+# Desktop (GUI) dependency set for the Algerian AI ERP Platform.
+#
+# Install with:  pip install --no-deps --require-hashes -r requirements-desktop.lock.hashes.txt
+#
+# Why this file exists
+# --------------------
+# `PySide6` is an *optional extra* ([project.optional-dependencies].desktop) and
+# is deliberately absent from requirements.lock.txt: the headless server and the
+# CI matrix must never pull the Qt stack (see
+# tests/test_phase19_dependency_integrity.py::test_optional_desktop_extra_is_exact_pinned_and_absent_from_the_lockfile).
+# The Windows desktop procedure in docs/release/phase8/WINDOWS_DESKTOP_ACCEPTANCE.md
+# and docs/release/phase9/DESKTOP_ACCEPTANCE_REPORT.md, however, told the operator to
+# install a hash-locked desktop set that did not exist in the repository. An
+# operator following the documented procedure hit "No such file or directory"
+# and had no way to obtain a reproducible GUI environment.
+#
+# This is that set. It is layered *on top of* requirements.lock.txt, never
+# instead of it: the desktop client is a separate process that talks to the API
+# over HTTP, but the desktop test suite imports the server package too.
+#
+#     pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
+#     pip install --no-deps --require-hashes -r requirements-desktop.lock.hashes.txt
+#
+# PySide6 == PySide6-Essentials + PySide6-Addons + shiboken6, all at one version:
+# a mixed set fails at import with an ABI mismatch rather than at install time.
+#
+# Licences: PySide6 and shiboken6 are LGPL-3.0 (Qt for Python). Qt itself is
+# LGPL-3.0 for the modules used here; no GPL-only module is imported.
+#
+# Generated/verified with: python tools/generate_hash_lock.py --desktop --write
+PySide6==6.11.2
+PySide6-Essentials==6.11.2
+PySide6-Addons==6.11.2
+shiboken6==6.11.2

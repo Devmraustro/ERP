@@ -83,6 +83,8 @@ from .procurement_stock import (
 from .security_audit import (
     JsonlSecurityLog,
     StructuredRedactingLogger,
+    create_partner_secure,
+    create_product_secure,
     create_user_admin_secure,
     deactivate_user_secure,
     list_extracted_fields_secure,
@@ -182,6 +184,39 @@ class UserCreateInput(BaseModel):
     password: str
     role: str
     branch_id: Optional[int] = None
+
+
+class PartnerCreateInput(BaseModel):
+    """Supplier/customer master data entered by an operator.
+
+    Only the fiscal identifiers the Algerian invoicing rules verify are
+    declared; the tenant, the audit actor and the row id are server-derived.
+    """
+
+    name: str
+    partner_type: str = "supplier"
+    tax_regime: str = "REEL"
+    nif: Optional[str] = None
+    nis: Optional[str] = None
+    ai: Optional[str] = None
+    rc: Optional[str] = None
+    nin: Optional[str] = None
+    wilaya_code: Optional[str] = None
+    bank_rib: Optional[str] = None
+
+
+class ProductCreateInput(BaseModel):
+    """Item master data. Amounts stay strings to keep Decimal exactness."""
+
+    sku: str
+    name: str
+    uom: str = "UNIT"
+    is_storable: bool = True
+    standard_cost_dzd: str = "0.000000"
+    stock_account_code: Optional[str] = None
+    clearing_account_code: Optional[str] = None
+    expense_account_code: Optional[str] = None
+    income_account_code: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -1379,5 +1414,77 @@ def create_erp_fastapi_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"company_id": auth.company_id, **result}
+
+    @app.post("/api/v1/partners")
+    def api_create_partner(
+        body: PartnerCreateInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create a supplier/customer of the caller's company.
+
+        Phase 59B: without this route a freshly installed company could never
+        name the supplier that ``POST /api/v1/invoices`` requires, so the first
+        invoice was unreachable except through a SQL prompt. The tenant comes
+        from the verified credential, the fiscal identifiers are checked with
+        the existing Algerian verifier, and the creation is audited
+        (``PARTNER_CREATED``). A duplicate NIF is a conflict (409); a malformed
+        identifier is unprocessable (422).
+        """
+        try:
+            partner = create_partner_secure(
+                db,
+                auth.user_id,
+                name=body.name,
+                partner_type=body.partner_type,
+                tax_regime=body.tax_regime,
+                nif=body.nif,
+                nis=body.nis,
+                ai=body.ai,
+                rc=body.rc,
+                nin=body.nin,
+                wilaya_code=body.wilaya_code,
+                bank_rib=body.bank_rib,
+            )
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if partner is None:  # pragma: no cover - defensive
+            raise HTTPException(status_code=409, detail="Partner already exists.")
+        return {"company_id": auth.company_id, **partner}
+
+    @app.post("/api/v1/products")
+    def api_create_product(
+        body: ProductCreateInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create an item of the caller's company, audited (``PRODUCT_CREATED``).
+
+        Prices are parsed with the Decimal guard the posting engine uses, and
+        any account-code override must exist in the company's SCF chart.
+        """
+        try:
+            product = create_product_secure(
+                db,
+                auth.user_id,
+                sku=body.sku,
+                name=body.name,
+                uom=body.uom,
+                is_storable=body.is_storable,
+                standard_cost_dzd=body.standard_cost_dzd,
+                stock_account_code=body.stock_account_code,
+                clearing_account_code=body.clearing_account_code,
+                expense_account_code=body.expense_account_code,
+                income_account_code=body.income_account_code,
+            )
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, **product}
 
     return app

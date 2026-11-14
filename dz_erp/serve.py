@@ -24,11 +24,12 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .api import create_erp_fastapi_app
 from .auth import AuthManager
 from .intake_ocr import PrivateDocumentVault
+from .net import allowed_hosts_from_env, validate_allowed_hosts_for_bind
 
 
 def _utcnow() -> datetime:
@@ -46,6 +47,32 @@ def _required_path(env_name: str, default: Optional[str] = None) -> Path:
     return Path(value)
 
 
+def _positive_int_env(env_name: str, default: int) -> int:
+    """Read a positive integer setting, failing with an actionable message.
+
+    ``int(os.environ[...])`` on a typo raises a bare ``ValueError`` traceback
+    that names neither the variable nor the file the operator edited, and a
+    negative value used to reach the auth layer and abort there.  A startup
+    setting that cannot be honoured must say which setting it is.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise SystemExit(
+            f"{env_name}={raw!r} is not an integer. Set it to a positive whole "
+            f"number (default {default})."
+        ) from None
+    if value <= 0:
+        raise SystemExit(
+            f"{env_name}={value} must be a positive whole number "
+            f"(default {default})."
+        )
+    return value
+
+
 def _has_any_user(db_path: Path) -> bool:
     """True when the users table already contains a row."""
     import sqlite3
@@ -58,6 +85,44 @@ def _has_any_user(db_path: Path) -> bool:
         conn.close()
 
 
+def _discard_unbootstrapped_company(db: Any, company_id: int) -> bool:
+    """Undo a company created by this run whose provisioning then failed.
+
+    Returns ``True`` when the company was fully removed, ``False`` when it had to
+    stay behind (see below).
+
+    ``--bootstrap-admin`` is meant to be atomic, but "remove the company" is not
+    always possible once the SCF chart has been loaded:
+
+    * ``accounts``, ``account_groups``, ``taxes`` and ``timbre_rules`` reference
+      ``companies`` with ``ON DELETE RESTRICT``, so they are deleted first;
+    * ``load_official_odoo_chart`` writes an ``audit_events`` row
+      (``LOAD_CHART_TEMPLATE``), and that table carries
+      ``trg_audit_no_delete`` - deleting audit history is exactly what the
+      product exists to prevent, and it will not be worked around here.
+
+    So when the chart load already happened, the company row is kept and the
+    caller reports the exact state. A traceable half-built company is a better
+    failure than an untraceable database.
+    """
+    with db.transaction() as conn:
+        for table in ("accounts", "account_groups", "taxes", "timbre_rules"):
+            conn.execute(f"DELETE FROM {table} WHERE company_id = ?", (company_id,))
+        audit_rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM audit_events WHERE company_id = ?", (company_id,)
+        ).fetchone()["n"]
+        if audit_rows:
+            # The chart load was audited; the audit row cannot be deleted. Leave
+            # the (now empty) company in place and let the caller say so.
+            return False
+        conn.execute(
+            "DELETE FROM companies WHERE id = ? AND NOT EXISTS "
+            "(SELECT 1 FROM users WHERE company_id = ?)",
+            (company_id, company_id),
+        )
+    return True
+
+
 def _bootstrap_admin(db_path: Path, username: str, company_name: str) -> int:
     """Create the first company and an admin user, returning the user id.
 
@@ -67,6 +132,18 @@ def _bootstrap_admin(db_path: Path, username: str, company_name: str) -> int:
     from .database import ERPDatabase
 
     password = getpass.getpass(f"Password for '{username}': ")
+    # Validate the credential before touching the database. The policy check is
+    # pure - it needs no connection - so a rejected password must not create a
+    # company, load a chart, or write an audit row that then cannot be undone.
+    from .auth import PasswordPolicyError, validate_password_policy
+
+    try:
+        validate_password_policy(password, username=username)
+    except PasswordPolicyError as exc:
+        # Nothing has been written: no company, no chart, no audit row. Report
+        # through SystemExit like every other bootstrap refusal so the CLI
+        # contract stays "one exit code, one message".
+        raise SystemExit(f"Cannot bootstrap admin '{username}': {exc}") from exc
     db = ERPDatabase(str(db_path))
     company_code = f"BOOT-{username.upper()}"
 
@@ -97,6 +174,32 @@ def _bootstrap_admin(db_path: Path, username: str, company_name: str) -> int:
             "this database is already bootstrapped."
         )
 
+    # A company without a chart of accounts cannot record a single invoice:
+    # posting needs account codes, and every master-data write validates against
+    # the SCF. The desktop bootstrap (dz_erp/desktop/service.py) loads the chart
+    # as step 3 of its sequence; this CLI path did not, so a deployment created
+    # with --bootstrap-admin started with an empty `accounts` table and the first
+    # supplier/product/invoice write failed with "is not an account of this
+    # company's SCF chart". Load it here, before any user can log in.
+    try:
+        from .localization import load_official_odoo_chart
+
+        load_official_odoo_chart(db, company_id, apply_fixes_immediately=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        note = ""
+        if created_company:
+            removed = _discard_unbootstrapped_company(db, company_id)
+            note = (
+                " The partial company was removed."
+                if removed
+                else f" Company {company_id} was left in place because its chart load is "
+                "already recorded in the audit trail."
+            )
+        raise SystemExit(
+            f"Could not load the SCF chart of accounts for company {company_id}: {exc}."
+            f"{note} Fix the cause and re-run."
+        ) from exc
+
     auth = AuthManager(db)
     try:
         user = auth.create_user(
@@ -107,15 +210,17 @@ def _bootstrap_admin(db_path: Path, username: str, company_name: str) -> int:
             actor_user_id=None,
         )
     except Exception as exc:
+        note = ""
         if created_company:
-            with db.transaction() as conn:
-                conn.execute(
-                    "DELETE FROM companies WHERE id = ? AND NOT EXISTS "
-                    "(SELECT 1 FROM users WHERE company_id = ?)",
-                    (company_id, company_id),
-                )
+            removed = _discard_unbootstrapped_company(db, company_id)
+            note = (
+                " The partial company was removed."
+                if removed
+                else f" Company {company_id} was left in place with no user: its chart load is "
+                "already recorded in the audit trail, which cannot be deleted."
+            )
         raise SystemExit(
-            f"Could not create admin '{username}' in company {company_id}: {exc}."
+            f"Could not create admin '{username}' in company {company_id}: {exc}.{note}"
         ) from exc
     return int(user["user_id"])
 
@@ -152,7 +257,7 @@ def build_app(
         db,
         vault,
         auth_manager=auth_manager,
-        token_ttl_seconds=int(os.environ.get("ERP_TOKEN_TTL_SECONDS", "28800")),
+        token_ttl_seconds=_positive_int_env("ERP_TOKEN_TTL_SECONDS", 28800),
         trusted_proxies=None,  # fail-closed default; see dz_erp/net.py
         docs_enabled=docs_enabled,
     )
@@ -181,7 +286,7 @@ def main(argv: Optional[list] = None) -> int:
         help="Company name used with --bootstrap-admin.",
     )
     parser.add_argument("--host", default=os.environ.get("ERP_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("ERP_PORT", "8000")))
+    parser.add_argument("--port", type=int, default=_positive_int_env("ERP_PORT", 8000))
     args = parser.parse_args(argv)
 
     db_path = _required_path("ERP_DB_PATH")
@@ -209,6 +314,12 @@ def main(argv: Optional[list] = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Operational acceptance (Phase 59A): a listener that is reachable from
+    # other machines must have at least one hostname other machines may use.
+    # Without this the process starts, reports itself healthy, and answers
+    # every LAN request with 400 - see dz_erp.net.validate_allowed_hosts_for_bind.
+    validate_allowed_hosts_for_bind(args.host, allowed_hosts_from_env())
 
     import uvicorn
 

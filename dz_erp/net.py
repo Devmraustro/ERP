@@ -232,6 +232,53 @@ def allowed_hosts_from_env(env: Optional[dict] = None) -> Tuple[str, ...]:
     return parsed or DEFAULT_ALLOWED_HOSTS
 
 
+#: Hostnames that are only ever reachable from the machine running the service.
+#: A deployment bound to one of these addresses is a single-workstation
+#: deployment, so the loopback default allow-list is complete and correct.
+LOOPBACK_BIND_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def is_loopback_bind(host: Optional[str]) -> bool:
+    """Whether a bind address only reaches the local machine."""
+    return str(host or "").strip().lower() in LOOPBACK_BIND_HOSTS
+
+
+def validate_allowed_hosts_for_bind(host: Optional[str], allowed: Iterable[str]) -> None:
+    """Refuse to start a non-loopback listener that answers no remote ``Host``.
+
+    ``DEFAULT_ALLOWED_HOSTS`` contains only loopback names and ``testserver``.
+    Starting ``uvicorn`` on ``0.0.0.0`` (or a LAN address) with that default
+    produces a server that *announces itself as running* while refusing every
+    request a colleague's browser makes with ``400 Invalid Host header`` -
+    an outage that looks like a firewall problem and is diagnosed from logs
+    only with difficulty.  Operational acceptance therefore requires the
+    misconfiguration to stop the process at start-up with an actionable
+    message instead.
+
+    A deployment that genuinely intends to answer only loopback traffic must
+    bind loopback explicitly; ``ERP_ALLOWED_HOSTS`` is the documented way to
+    name the hostnames/IPs a LAN deployment answers to.
+    """
+    if is_loopback_bind(host):
+        return
+    patterns = tuple(allowed)
+    if patterns and patterns != DEFAULT_ALLOWED_HOSTS:
+        return
+    raise SystemExit(
+        f"Refusing to listen on {host!r} with no LAN hostnames configured.\n"
+        "The default Host-header allow-list only covers loopback "
+        f"({', '.join(DEFAULT_ALLOWED_HOSTS)}), so every request from another\n"
+        "machine would be rejected with HTTP 400 while the server reports "
+        "itself healthy.\n"
+        "\n"
+        "Set ERP_ALLOWED_HOSTS to every name and address users will type in "
+        "their browser, e.g.\n"
+        "  ERP_ALLOWED_HOSTS=erp.example.dz,192.168.1.10\n"
+        "or bind loopback only (--host 127.0.0.1) for a single-workstation "
+        "deployment."
+    )
+
+
 def host_is_allowed(host_header: Optional[str], allowed: Iterable[str]) -> bool:
     """Whether a ``Host`` header value matches the allow-list.
 

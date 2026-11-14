@@ -552,6 +552,11 @@ def test_review_correction_box_explains_a_missing_value() -> None:
 
     dialog.provenance_label = label("")
     dialog.correction_edit = QLineEdit()
+    # Phase 59F added a hint that names the field when extraction produced no
+    # value at all; this test assembles the dialog by hand, so it must supply
+    # every widget the provenance renderer touches.
+    dialog.missing_hint = label("")
+    dialog._policy = {}
     dialog._theme = manager
     dialog._lang = "fr"
 

@@ -62,8 +62,16 @@ dz-erp = "dz_erp.desktop.app:main"
 # `ERP_VENDOR_DATA_DIR`).
 include = ["dz_erp*"]
 
+# The Algerian SCF chart is *data*: dz_erp.localization reads the vendored
+# official Odoo 18 `l10n_dz` template plus the reviewed fix/wilaya add-ons at
+# runtime and refuses to invent substitute account mappings.  `vendor/` is
+# therefore not a developer convenience: a wheel that omits it produces an
+# installation that starts, accepts a login, and then cannot localize a
+# company.  `setup.py` copies the chart into the package at build time, because
+# ``data_files`` installs relative to the interpreter prefix (outside
+# site-packages) and a symlinked directory is not representable in a wheel.
 [tool.setuptools.package-data]
-dz_erp = ["assets/fonts/*"]
+dz_erp = ["assets/fonts/*", "vendor/**/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

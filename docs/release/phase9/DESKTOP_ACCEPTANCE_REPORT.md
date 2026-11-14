@@ -52,7 +52,7 @@ not evidence of *UI acceptance*.
 ```powershell
 py -3.12 -m venv C:\erp-desk
 C:\erp-desk\Scripts\python -m pip install --require-hashes -r requirements.lock.hashes.txt
-C:\erp-desk\Scripts\python -m pip install --require-hashes -r requirements-desktop.lock.hashes.txt
+C:\erp-desk\Scripts\python -m pip install --no-deps --require-hashes -r requirements-desktop.lock.hashes.txt
 C:\erp-desk\Scripts\python -m pytest tests\test_phase26_desktop.py tests\test_phase27_desktop_ui.py `
     tests\test_phase27_review_api.py tests\test_phase28_desktop_users_ui.py -v
 ```

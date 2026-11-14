@@ -203,6 +203,21 @@ class ProductsView(_ListScreen):
     def __init__(self, theme_manager, client) -> None:
         super().__init__(theme_manager, client)
         self._payload_key = "products"
+        # Phase 59B: an item can be created from the list an employee is
+        # already looking at, without leaving the screen or using SQL.
+        self.create_button = Button(
+            tr(self._theme.language, "products_create"),
+            variant="primary",
+            on_click=self._open_create_dialog,
+        )
+        self.header.add_action(self.create_button)
+
+    def _open_create_dialog(self) -> None:
+        from .views_masterdata import CreateProductDialog
+
+        dialog = CreateProductDialog(self._theme.language, self._client, self)
+        if dialog.exec():
+            self.refresh()
 
     def _build_table(self) -> DataTable:
         table = DataTable([], search_keys=("sku", "name", "uom"))
@@ -232,6 +247,20 @@ class PartnersView(_ListScreen):
     def __init__(self, theme_manager, client) -> None:
         super().__init__(theme_manager, client)
         self._payload_key = "partners"
+        # Phase 59B: without this the first invoice had no supplier to name.
+        self.create_button = Button(
+            tr(self._theme.language, "partners_create"),
+            variant="primary",
+            on_click=self._open_create_dialog,
+        )
+        self.header.add_action(self.create_button)
+
+    def _open_create_dialog(self) -> None:
+        from .views_masterdata import CreatePartnerDialog
+
+        dialog = CreatePartnerDialog(self._theme.language, self._client, self)
+        if dialog.exec():
+            self.refresh()
 
     def _build_table(self) -> DataTable:
         table = DataTable([], search_keys=("name", "nif", "wilaya_code"), filter_key="partner_type")

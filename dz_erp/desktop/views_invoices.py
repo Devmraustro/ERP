@@ -317,6 +317,13 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
     validation warnings, and only the actions the stored state allows.
     """
 
+    # Server-evaluated review policy for this document, replaced wholesale on
+    # every refresh. Declared at class level as well as in ``__init__`` so a
+    # provenance lookup always reads "unknown" instead of raising
+    # AttributeError - including in tests that assemble the dialog without
+    # running the constructor.
+    _policy: Dict[str, Any] = {}
+
     def __init__(
         self,
         lang: str,
@@ -331,6 +338,9 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
         self._client = client
         self._invoice_id = int(invoice_row["id"])
         self._detail: Dict[str, Any] = {}
+        # Per-instance copy: the class-level default is shared state, so each
+        # dialog must own its own policy dict.
+        self._policy = {}
         self._theme = theme_manager
         self._init_workers()
         self.setWindowTitle(tr(lang, "review_title"))
@@ -360,6 +370,15 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
         self.warning_banner = Banner("", "warning")
         self.warning_banner.setVisible(False)
         root.addWidget(self.warning_banner)
+
+        # Phase 59B: an operator cannot fix what the screen does not name. The
+        # server already evaluates the review policy; until now the dialog let
+        # a reviewer press "submit" and answered only with a modal refusal that
+        # listed blockers in raw API vocabulary. The banner names them up
+        # front, in the operator's language, from the server's own verdict.
+        self.blockers_banner = Banner("", "danger")
+        self.blockers_banner.setVisible(False)
+        root.addWidget(self.blockers_banner)
 
         # -- body: fields | (lines + preview)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -396,6 +415,12 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
         correction_row.setSpacing(tokens.SPACING["sm"])
         self.provenance_label = label("", object_name="Muted", wrap=True)
         left_layout.addWidget(self.provenance_label)
+        # Shown only when the selected policy field has no extracted value:
+        # typing a value for a field the engine missed is manual
+        # transcription, and the operator has to be told that is what it is.
+        self.missing_hint = label("", object_name="Muted", wrap=True)
+        self.missing_hint.setVisible(False)
+        left_layout.addWidget(self.missing_hint)
         self.fields_table.on_selection(self._show_provenance)
 
         self.correction_edit = QLineEdit()
@@ -486,6 +511,48 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
 
         self.refresh()
 
+    # -- review policy blockers (Phase 59B) -----------------------------
+
+    def _render_review_blockers(self, policy: Optional[Dict[str, Any]], language: str) -> None:
+        """Show the server's unsatisfied review requirements, in operator words.
+
+        The dialog used to offer "submit" and answer only with a modal that
+        repeated the API's raw reason string. A reviewer then had to guess
+        which of several fields still needed attention. The verdict is
+        already computed server-side (``GET .../review-policy``); this renders
+        it and hides the banner the moment the policy is satisfied, so the
+        screen never claims a blocker that no longer exists.
+        """
+        self._policy = policy or {}
+        blocking = [str(item) for item in (self._policy.get("blocking") or [])]
+        if not blocking or self._policy.get("satisfied"):
+            self.blockers_banner.setVisible(False)
+            return
+        lines: List[str] = []
+        for item in blocking:
+            kind, _, detail = item.partition(":")
+            detail = detail.strip()
+            if kind == "REQUIRED_FIELD_NOT_DECIDED":
+                lines.append(tr(language, "review_blocker_required", name=detail))
+            elif kind == "FIELD_FLAGGED":
+                lines.append(tr(language, "review_blocker_flagged", name=detail))
+            elif kind == "DUPLICATE_EXTRACTION_ROWS":
+                lines.append(tr(language, "review_blocker_duplicate", name=detail))
+            elif kind == "INCONSISTENT_EXTRACTED_TOTALS":
+                lines.append(tr(language, "review_blocker_totals", detail=detail))
+            else:
+                lines.append(tr(language, "review_blocker_other", detail=item))
+        self.blockers_banner.set_text(
+            tr(language, "review_blockers_title") + " " + " · ".join(lines)
+        )
+        self.blockers_banner.setVisible(True)
+
+    def _selected_policy_field(self, field_name: str) -> Optional[Dict[str, Any]]:
+        for row in self._policy.get("fields") or []:
+            if str(row.get("field_name")) == field_name:
+                return dict(row)
+        return None
+
     # -- selection -----------------------------------------------------
 
     def _show_provenance(self, row: Optional[Dict[str, Any]]) -> None:
@@ -510,6 +577,13 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
         self.correction_edit.setPlaceholderText(
             tr(language, "review_value") if value else tr(language, "review_value_missing", field=name)
         )
+        # A policy field the engine never extracted has no row to click, so the
+        # operator cannot pre-select it in the table. Tell them, on the field
+        # that is selected, that manual transcription is the expected action.
+        policy_row = self._selected_policy_field(name)
+        missing = policy_row is not None and policy_row.get("value") in (None, "")
+        self.missing_hint.setText(tr(language, "review_missing_hint") if missing else "")
+        self.missing_hint.setVisible(bool(missing))
 
     # -- state ---------------------------------------------------------
 
@@ -567,9 +641,19 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
             fields: Dict[str, Any] = {"fields": [], "count": 0}
             doc_state: Optional[str] = None
             preview: Optional[Dict[str, Any]] = None
+            policy: Optional[Dict[str, Any]] = None
             if document_id:
                 try:
                     fields = self._client.document_fields(str(document_id))
+                    try:
+                        policy = self._client.document_review_policy(str(document_id))
+                    except ErpApiError as exc:
+                        # A role that may read the document but not the policy
+                        # still gets the fields (Phase 27 behaviour); the
+                        # blocker banner then simply stays hidden.
+                        if exc.status_code in (401, 403):
+                            raise
+                        policy = None
                     for row in self._client.documents(limit=500).get("documents", []):
                         if row.get("id") == str(document_id):
                             doc_state = str(row.get("workflow_state", ""))
@@ -585,6 +669,7 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
                 "doc_state": doc_state,
                 "preview": preview,
                 "partner_names": partner_names,
+                "policy": policy,
             }
 
         self.run_async(load, on_success=self._apply_loaded, on_error=self._show_action_error)
@@ -635,6 +720,8 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
             self.warning_banner.setVisible(True)
         else:
             self.warning_banner.setVisible(False)
+
+        self._render_review_blockers(data.get("policy"), language)
 
         field_rows = []
         for field in data["fields"].get("fields", []):
@@ -724,6 +811,7 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
         return name or None
 
     def _correct_selected_field(self) -> None:
+        """Edit an extracted value, or transcribe a field the engine missed."""
         field_name = self._require_selected_field()
         if not field_name:
             return
@@ -740,6 +828,30 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
             )
             return
         self._set_busy(True)
+        policy_row = self._selected_policy_field(field_name)
+        if policy_row is not None and policy_row.get("value") in (None, ""):
+            # Phase 59B: manual transcription. PATCH /fields can only modify a
+            # row that exists, so a required field the OCR engine never read
+            # used to answer 404 - the document could then never satisfy its
+            # own review policy and the invoice could never be submitted, with
+            # no screen explaining why. The documented entry point for this
+            # case is a CORRECTED decision, which creates the row with honest
+            # provenance ("[manual entry]", no measured confidence). No value
+            # is ever invented on the operator's behalf.
+            # ``expected_value`` is the emptiness the operator is looking at:
+            # if extraction lands a value between the read and this click, the
+            # service refuses instead of silently overwriting a machine
+            # reading the reviewer never saw.
+            self._decide_field(
+                document_id,
+                {
+                    "field_name": field_name,
+                    "decision": "CORRECTED",
+                    "value": new_value,
+                    "expected_value": "",
+                },
+            )
+            return
         self.run_async(
             self._client.edit_extracted_field,
             document_id,
@@ -747,6 +859,25 @@ class InvoiceReviewDialog(QDialog, WorkerOwner):
             new_value,
             on_success=lambda _result: self.refresh(),
             on_error=self._show_action_error,
+        )
+
+    def _decide_field(self, document_id: str, payload: Dict[str, Any]) -> None:
+        """Post one review decision and reload; refusals stay on screen."""
+        self.run_async(
+            self._client.decide_document_field,
+            document_id,
+            payload,
+            on_success=lambda _result: self.refresh(),
+            on_error=self._decide_failed,
+        )
+
+    def _decide_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self._apply_action_state()
+        _message_box().critical(
+            self,
+            tr(self._lang, "review_title"),
+            tr(self._lang, "review_decide_failed", detail=str(exc)),
         )
 
     def _submit_approval(self) -> None:

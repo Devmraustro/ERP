@@ -37,7 +37,12 @@ def vendor_data_dir() -> Path:
     2. Frozen builds (PyInstaller): the data directory bundled next to the
        executable payload (``sys._MEIPASS``); ``tools/build_desktop.py``
        bundles ``vendor/`` with ``--add-data``.
-    3. The repository checkout location - the behaviour every existing test
+    3. A non-editable installation (``pip install algerian-ai-erp``): the
+       chart data installed beside this module at ``dz_erp/vendor`` by the
+       ``[tool.setuptools.data-files]`` block in ``pyproject.toml``. Without
+       this step an installed wheel localizes nothing, and the failure only
+       appears once a company is created.
+    4. The repository checkout location - the behaviour every existing test
        and deployment relies on.
 
     The official Odoo 18.0 ``l10n_dz`` template files are MPL-2.0 (Odoo's
@@ -55,6 +60,9 @@ def vendor_data_dir() -> Path:
             candidate = Path(meipass) / "vendor"
             if candidate.is_dir():
                 return candidate
+    installed = Path(__file__).resolve().parent / "vendor"
+    if installed.is_dir():
+        return installed
     return REPO_ROOT / "vendor"
 
 # Verified account-type fixes from azinak/l10n-dz-account-fix/models/migration.py

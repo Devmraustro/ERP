@@ -1403,3 +1403,293 @@ def evaluate_document_review_policy_secure(
         raise denial
     assert evaluation is not None
     return evaluation
+
+
+# ----------------------------------------------------------------------
+# Master data (Phase 59B): suppliers, customers and products
+# ----------------------------------------------------------------------
+#
+# Before this section the product had *read* endpoints for `partners` and
+# `products` and no write path at all, in the API or in the desktop client.
+# A freshly installed company could therefore never create the supplier that
+# ``POST /api/v1/invoices`` requires by foreign key: the only way in was a SQL
+# prompt. Readiness for real work needs the first-run company to be able to
+# record its own master data, with the same verified controls as every other
+# write (server-derived tenant, role check, validation, audit event).
+
+#: Roles allowed to maintain master data. ``auditor`` is read-only by design
+#: (docs/SECURITY_RBAC_AUDIT_AND_BACKUP_SPEC.md); ``ocr_worker`` and
+#: ``warehouse`` do not own commercial counterparties.
+MASTER_DATA_WRITE_ROLES: Tuple[str, ...] = ("clerk", "approver", "accountant", "admin")
+
+PARTNER_TYPES = ("supplier", "customer", "both")
+PRODUCT_UOMS = ("UNIT", "KG", "L", "M", "M2", "M3", "HOUR", "DAY", "BOX", "PACK")
+
+_MAX_NAME = 200
+_MAX_SKU = 64
+_MAX_IDENTIFIER = 32
+
+
+def _clean_optional(value: Optional[str], *, limit: int, field: str) -> Optional[str]:
+    """Normalise an optional free-text field: strip, blank->None, bound length.
+
+    Identifiers arrive from a keyboard, a spreadsheet paste or an OCR sheet,
+    so surrounding whitespace is data entry noise, not content. Length is
+    bounded so a paste-bomb cannot fill the ledger's audit JSON.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        raise ValueError(f"{field} must be at most {limit} characters.")
+    return text
+
+
+def create_partner_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    *,
+    name: str,
+    partner_type: str = "supplier",
+    tax_regime: str = "REEL",
+    nif: Optional[str] = None,
+    nis: Optional[str] = None,
+    ai: Optional[str] = None,
+    rc: Optional[str] = None,
+    nin: Optional[str] = None,
+    wilaya_code: Optional[str] = None,
+    bank_rib: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a supplier/customer of the caller's company, audited.
+
+    Algerian fiscal identifiers are validated with the *existing* verifier
+    (``dz_erp.localization.validate_algerian_identifiers``) rather than a
+    second rule set, so a partner accepted here is exactly a partner the
+    invoicing rules will accept. The company is taken from the verified
+    credential - never from the request - and the creation appends a
+    hash-chained ``PARTNER_CREATED`` audit event carrying the fiscal
+    identifiers, because they are the values a tax inspection reconciles.
+    """
+    from .localization import validate_algerian_identifiers
+
+    partner_type_value = str(partner_type or "").strip().lower()
+    if partner_type_value not in PARTNER_TYPES:
+        raise ValueError(f"partner_type must be one of {list(PARTNER_TYPES)}.")
+    tax_regime_value = str(tax_regime or "").strip().upper()
+    if tax_regime_value not in ("REEL", "IFU", "EXEMPT", "FOREIGN"):
+        raise ValueError("tax_regime must be one of ['REEL', 'IFU', 'EXEMPT', 'FOREIGN'].")
+
+    clean_name = _clean_optional(name, limit=_MAX_NAME, field="name")
+    if not clean_name:
+        raise ValueError("name is required: enter the legal name of the counterparty.")
+
+    nif_v = _clean_optional(nif, limit=_MAX_IDENTIFIER, field="nif")
+    nis_v = _clean_optional(nis, limit=_MAX_IDENTIFIER, field="nis")
+    ai_v = _clean_optional(ai, limit=_MAX_IDENTIFIER, field="ai")
+    rc_v = _clean_optional(rc, limit=_MAX_IDENTIFIER, field="rc")
+    nin_v = _clean_optional(nin, limit=_MAX_IDENTIFIER, field="nin")
+    wilaya_v = _clean_optional(wilaya_code, limit=4, field="wilaya_code")
+    rib_v = _clean_optional(bank_rib, limit=40, field="bank_rib")
+
+    identifier_errors = validate_algerian_identifiers(nif=nif_v, nis=nis_v, ai=ai_v, rc=rc_v, nin=nin_v)
+    if identifier_errors:
+        raise ValueError(" ".join(identifier_errors))
+
+    user = require_role_secure(
+        db,
+        requesting_user_id,
+        MASTER_DATA_WRITE_ROLES,
+        action="create a supplier/customer record",
+        target_model="partners",
+        target_id="-",
+    )
+    company_id = int(user["company_id"])
+
+    with db.transaction() as conn:
+        if nif_v:
+            duplicate = conn.execute(
+                "SELECT id, name FROM partners WHERE company_id = ? AND nif = ?",
+                (company_id, nif_v),
+            ).fetchone()
+            if duplicate:
+                raise ValueError(
+                    f"A partner with NIF {nif_v} already exists in this company "
+                    f"('{duplicate['name']}', id={duplicate['id']})."
+                )
+        cur = conn.execute(
+            "INSERT INTO partners (company_id, name, partner_type, country_code, tax_regime,"
+            " nif, nis, ai, rc, nin, wilaya_code, bank_rib)"
+            " VALUES (?, ?, ?, 'DZ', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                company_id,
+                clean_name,
+                partner_type_value,
+                tax_regime_value,
+                nif_v,
+                nis_v,
+                ai_v,
+                rc_v,
+                nin_v,
+                wilaya_v,
+                rib_v,
+            ),
+        )
+        partner_id = int(cur.lastrowid)
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=int(user["id"]),
+            action_type="PARTNER_CREATED",
+            target_model="partners",
+            target_id=str(partner_id),
+            after_state={
+                "name": clean_name,
+                "partner_type": partner_type_value,
+                "tax_regime": tax_regime_value,
+                "nif": nif_v,
+                "nis": nis_v,
+                "ai": ai_v,
+                "rc": rc_v,
+                "wilaya_code": wilaya_v,
+            },
+        )
+
+    return {
+        "partner_id": partner_id,
+        "name": clean_name,
+        "partner_type": partner_type_value,
+        "tax_regime": tax_regime_value,
+        "nif": nif_v,
+        "nis": nis_v,
+        "ai": ai_v,
+        "rc": rc_v,
+        "wilaya_code": wilaya_v,
+    }
+
+
+def create_product_secure(
+    db: ERPDatabase,
+    requesting_user_id: int,
+    *,
+    sku: str,
+    name: str,
+    uom: str = "UNIT",
+    is_storable: bool = True,
+    standard_cost_dzd: str = "0.000000",
+    stock_account_code: Optional[str] = None,
+    clearing_account_code: Optional[str] = None,
+    expense_account_code: Optional[str] = None,
+    income_account_code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create an item of the caller's company, audited.
+
+    Monetary and quantity inputs are parsed by ``dz_erp.decimal_utils`` so a
+    binary float can never enter the inventory valuation (the same guard the
+    posting engine applies), and any account code the operator overrides must
+    exist in the company's verified SCF chart - a typo must not silently post
+    stock to an account that does not exist.
+    """
+    from .decimal_utils import format_dzd, to_decimal
+
+    clean_sku = _clean_optional(sku, limit=_MAX_SKU, field="sku")
+    if not clean_sku:
+        raise ValueError("sku is required: enter the item code used on invoices.")
+    clean_name = _clean_optional(name, limit=_MAX_NAME, field="name")
+    if not clean_name:
+        raise ValueError("name is required: enter the item label.")
+    uom_value = str(uom or "").strip().upper()
+    if uom_value not in PRODUCT_UOMS:
+        raise ValueError(f"uom must be one of {list(PRODUCT_UOMS)}.")
+
+    try:
+        # TEXT money columns take the canonical 2-decimal string: passing a
+        # Decimal to sqlite3 raises "type 'decimal.Decimal' is not supported",
+        # which escaped as an unhandled 500 (caught by the Phase 59B check).
+        cost = format_dzd(to_decimal(standard_cost_dzd or "0"))
+    except (ValueError, ArithmeticError) as exc:
+        raise ValueError(f"standard_cost_dzd is not a valid amount: {exc}") from exc
+    if to_decimal(cost) < 0:
+        raise ValueError("standard_cost_dzd cannot be negative.")
+
+    overrides = {
+        "stock_account_code": _clean_optional(stock_account_code, limit=16, field="stock_account_code"),
+        "clearing_account_code": _clean_optional(clearing_account_code, limit=16, field="clearing_account_code"),
+        "expense_account_code": _clean_optional(expense_account_code, limit=16, field="expense_account_code"),
+        "income_account_code": _clean_optional(income_account_code, limit=16, field="income_account_code"),
+    }
+
+    user = require_role_secure(
+        db,
+        requesting_user_id,
+        MASTER_DATA_WRITE_ROLES,
+        action="create an item record",
+        target_model="products",
+        target_id="-",
+    )
+    company_id = int(user["company_id"])
+
+    with db.transaction() as conn:
+        duplicate = conn.execute(
+            "SELECT id FROM products WHERE company_id = ? AND sku = ?",
+            (company_id, clean_sku),
+        ).fetchone()
+        if duplicate:
+            raise ValueError(f"An item with SKU '{clean_sku}' already exists (id={duplicate['id']}).")
+
+        for field, code in overrides.items():
+            if not code:
+                continue
+            known = conn.execute(
+                "SELECT code FROM accounts WHERE company_id = ? AND code = ?",
+                (company_id, code),
+            ).fetchone()
+            if not known:
+                raise ValueError(
+                    f"{field} '{code}' is not an account of this company's SCF chart."
+                )
+
+        cur = conn.execute(
+            "INSERT INTO products (company_id, sku, name, uom, is_storable, standard_cost_dzd,"
+            " stock_account_code, clearing_account_code, expense_account_code, income_account_code)"
+            " VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, '31'), COALESCE(?, '380'),"
+            " COALESCE(?, '600'), COALESCE(?, '700'))",
+            (
+                company_id,
+                clean_sku,
+                clean_name,
+                uom_value,
+                1 if is_storable else 0,
+                cost,
+                overrides["stock_account_code"],
+                overrides["clearing_account_code"],
+                overrides["expense_account_code"],
+                overrides["income_account_code"],
+            ),
+        )
+        product_id = int(cur.lastrowid)
+        db.append_audit_event(
+            conn=conn,
+            company_id=company_id,
+            actor_user_id=int(user["id"]),
+            action_type="PRODUCT_CREATED",
+            target_model="products",
+            target_id=str(product_id),
+            after_state={
+                "sku": clean_sku,
+                "name": clean_name,
+                "uom": uom_value,
+                "is_storable": bool(is_storable),
+                "standard_cost_dzd": cost,
+            },
+        )
+
+    return {
+        "product_id": product_id,
+        "sku": clean_sku,
+        "name": clean_name,
+        "uom": uom_value,
+        "is_storable": bool(is_storable),
+        "standard_cost_dzd": cost,
+    }

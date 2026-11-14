@@ -39,7 +39,7 @@ import zlib
 from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,6 +58,8 @@ from dz_erp.localization import load_official_odoo_chart
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCKFILE = REPO_ROOT / "requirements.lock.txt"
 HASH_LOCKFILE = REPO_ROOT / "requirements.lock.hashes.txt"
+DESKTOP_LOCKFILE = REPO_ROOT / "requirements-desktop.lock.txt"
+DESKTOP_HASH_LOCKFILE = REPO_ROOT / "requirements-desktop.lock.hashes.txt"
 
 FAST_ITERATIONS = 1000
 
@@ -110,9 +112,9 @@ SUPPLIER_SPEC = {
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-def _parse_lock() -> Dict[str, str]:
+def _parse_lock(path: Optional[Path] = None) -> Dict[str, str]:
     pins: Dict[str, str] = {}
-    for raw in LOCKFILE.read_text(encoding="utf-8").splitlines():
+    for raw in (path or LOCKFILE).read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -312,17 +314,64 @@ def test_no_installed_distribution_is_absent_from_the_lock() -> None:
 
     Anything installed but unpinned would be an undeclared dependency of the
     deployment. `pip` and `setuptools` are excluded: they are the installer's
-    own bootstrap tooling and cannot be installed by themselves.
+    own bootstrap tooling and cannot be installed by themselves. The Qt GUI
+    extra is excluded too, but only because it is pinned in its own lockfile
+    (``requirements-desktop.lock.txt``): a desktop test run installs the runtime
+    lock *and* the desktop lock, so those four names must be declared there.
     """
     pins = {name for name in _parse_lock()}
+    desktop_pins = set(_parse_lock(DESKTOP_LOCKFILE))
     allowed_extra = {"pip", "setuptools"}
     installed = {
         dist.metadata["Name"].lower().replace("_", "-")
         for dist in metadata.distributions()
         if dist.metadata["Name"]
     }
-    undeclared = installed - pins - allowed_extra
-    assert not undeclared, f"installed but not pinned in requirements.lock.txt: {sorted(undeclared)}"
+    undeclared = installed - pins - desktop_pins - allowed_extra
+    assert not undeclared, (
+        "installed but not pinned in requirements.lock.txt or "
+        f"requirements-desktop.lock.txt: {sorted(undeclared)}"
+    )
+
+
+def test_desktop_lockfile_pins_exactly_the_declared_gui_extra() -> None:
+    """The desktop procedure names a lockfile; it must exist and agree with pyproject.
+
+    Two documented Windows procedures instruct the operator to run
+    ``pip install --require-hashes -r requirements-desktop.lock.hashes.txt``.
+    That file was missing from the repository, so the documented install could
+    not be performed. It now exists, is hash-complete, and is kept in step with
+    the ``desktop`` extra by this test.
+    """
+    assert DESKTOP_LOCKFILE.exists(), "requirements-desktop.lock.txt is missing"
+    assert DESKTOP_HASH_LOCKFILE.exists(), "requirements-desktop.lock.hashes.txt is missing"
+
+    pins = _parse_lock(DESKTOP_LOCKFILE)
+    assert set(pins) == {
+        "pyside6",
+        "pyside6-essentials",
+        "pyside6-addons",
+        "shiboken6",
+    }, f"unexpected desktop pins: {sorted(pins)}"
+    # One shared version: a mixed Qt set is an ABI mismatch at import, not an
+    # install error, so it must be caught here.
+    assert len(set(pins.values())) == 1, f"PySide6 parts disagree: {pins}"
+
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    extras = re.search(
+        r"^\[project\.optional-dependencies\]\s*(.*?)^\[", text, re.MULTILINE | re.DOTALL
+    )
+    assert extras, "optional-dependencies section not found"
+    declared = dict(re.findall(r'"([A-Za-z0-9_.\-]+)==([^"]+)"', extras.group(1)))
+    gui = {name.lower(): version for name, version in declared.items() if "pyside" in name.lower()}
+    assert gui == {"pyside6": pins["pyside6"]}, f"extra and lockfile disagree: {gui} vs {pins}"
+
+    body = DESKTOP_HASH_LOCKFILE.read_text(encoding="utf-8")
+    blocks = re.split(r"\n(?=[A-Za-z0-9_.\-]+==)", body)
+    hashed = [b for b in blocks if re.match(r"^[A-Za-z0-9_.\-]+==", b.strip())]
+    assert len(hashed) == len(pins), f"{len(hashed)} hashed pins for {len(pins)} pinned"
+    for block in hashed:
+        assert "--hash=sha256:" in block, f"pin without a digest: {block.splitlines()[0]!r}"
 
 
 def test_every_pin_carries_at_least_one_hash() -> None:

@@ -1293,7 +1293,11 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # Phase 46: the two Phase 29 document-review operations that the review
     # gates depend on are now exposed - POST .../fields/decide and GET
     # .../review-policy - both authenticated like the rest, so 27 -> 29.
-    assert len(protected) == 29, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
+    # Phase 59B: master-data entry from the desktop app added the two create
+    # operations the operator workflow needs - POST /api/v1/partners and
+    # POST /api/v1/products - which are authenticated and RBAC-gated like
+    # every other write, so 29 -> 31.
+    assert len(protected) == 31, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

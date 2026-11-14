@@ -22,7 +22,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import (
     Depends,
@@ -54,7 +54,15 @@ from .intake_ocr import (
     upload_and_process_supplier_document,
 )
 from .review_policy import ReviewPolicyValueError
-from .net import TrustedProxyPolicy, describe_trusted_proxy_policy, trusted_proxy_policy_from_env
+from .net import (
+    TrustedProxyPolicy,
+    allowed_hosts_from_env,
+    describe_allowed_hosts,
+    describe_trusted_proxy_policy,
+    host_is_allowed,
+    parse_allowed_hosts,
+    trusted_proxy_policy_from_env,
+)
 from .rate_limit import (
     RequestThrottle,
     describe_throttle_policy,
@@ -75,6 +83,8 @@ from .procurement_stock import (
 from .security_audit import (
     JsonlSecurityLog,
     StructuredRedactingLogger,
+    create_partner_secure,
+    create_product_secure,
     create_user_admin_secure,
     deactivate_user_secure,
     list_extracted_fields_secure,
@@ -176,6 +186,39 @@ class UserCreateInput(BaseModel):
     branch_id: Optional[int] = None
 
 
+class PartnerCreateInput(BaseModel):
+    """Supplier/customer master data entered by an operator.
+
+    Only the fiscal identifiers the Algerian invoicing rules verify are
+    declared; the tenant, the audit actor and the row id are server-derived.
+    """
+
+    name: str
+    partner_type: str = "supplier"
+    tax_regime: str = "REEL"
+    nif: Optional[str] = None
+    nis: Optional[str] = None
+    ai: Optional[str] = None
+    rc: Optional[str] = None
+    nin: Optional[str] = None
+    wilaya_code: Optional[str] = None
+    bank_rib: Optional[str] = None
+
+
+class ProductCreateInput(BaseModel):
+    """Item master data. Amounts stay strings to keep Decimal exactness."""
+
+    sku: str
+    name: str
+    uom: str = "UNIT"
+    is_storable: bool = True
+    standard_cost_dzd: str = "0.000000"
+    stock_account_code: Optional[str] = None
+    clearing_account_code: Optional[str] = None
+    expense_account_code: Optional[str] = None
+    income_account_code: Optional[str] = None
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -238,6 +281,7 @@ def create_erp_fastapi_app(
     trusted_proxies: Optional[TrustedProxyPolicy] = None,
     docs_enabled: bool = False,
     throttle: Optional[RequestThrottle] = None,
+    allowed_hosts: Optional[Sequence[str]] = None,
 ) -> FastAPI:
     # Secure default: docs disabled unless explicitly enabled for local development
     docs_url = "/docs" if docs_enabled else None
@@ -271,12 +315,42 @@ def create_erp_fastapi_app(
     # explicitly configured, X-Forwarded-For is ignored and the direct peer
     # address is used.  See dz_erp/net.py.
     app.state.proxy_policy = trusted_proxies or trusted_proxy_policy_from_env()
+    # SEC-15: Host header validation. ``None`` reads ERP_ALLOWED_HOSTS, falling
+    # back strictly to the loopback/test set — never "accept anything".
+    app.state.allowed_hosts = (
+        parse_allowed_hosts(allowed_hosts)
+        if allowed_hosts is not None
+        else allowed_hosts_from_env()
+    )
     # Phase 35 (SEC-13): request/login throttling. Defaults to the store
     # selected by ERP_RATE_LIMIT_BACKEND; an explicit throttle wins so tests and
     # a multi-worker deployment can inject one shared store.
     app.state.throttle = (
         throttle if throttle is not None else RequestThrottle(store=store_from_env(db))
     )
+
+    @app.middleware("http")
+    async def _validate_host_header(request: Request, call_next):
+        """SEC-15: Fail-closed Host-header allow-list enforcement."""
+        host = request.headers.get("host")
+        if not host_is_allowed(host, app.state.allowed_hosts):
+            corr_id = getattr(request.state, "request_id", None)
+            if not corr_id:
+                corr_id, _ = sanitize_request_id(request.headers.get("X-Request-Id"))
+            logger.log(
+                "WARNING",
+                "SECURITY_HOST_HEADER_REJECTED",
+                corr_id,
+                host=str(host or "")[:255],
+                path=request.url.path,
+                method=request.method,
+            )
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Invalid Host header."},
+                headers={"X-Request-Id": corr_id},
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def _security_headers(request: Request, call_next):
@@ -627,6 +701,7 @@ def create_erp_fastapi_app(
         return {
             "company_id": auth.company_id,
             "rate_limit": described,
+            "allowed_hosts": describe_allowed_hosts(app.state.allowed_hosts),
         }
 
     @app.get("/api/v1/auth/session")
@@ -1339,5 +1414,77 @@ def create_erp_fastapi_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"company_id": auth.company_id, **result}
+
+    @app.post("/api/v1/partners")
+    def api_create_partner(
+        body: PartnerCreateInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create a supplier/customer of the caller's company.
+
+        Phase 59B: without this route a freshly installed company could never
+        name the supplier that ``POST /api/v1/invoices`` requires, so the first
+        invoice was unreachable except through a SQL prompt. The tenant comes
+        from the verified credential, the fiscal identifiers are checked with
+        the existing Algerian verifier, and the creation is audited
+        (``PARTNER_CREATED``). A duplicate NIF is a conflict (409); a malformed
+        identifier is unprocessable (422).
+        """
+        try:
+            partner = create_partner_secure(
+                db,
+                auth.user_id,
+                name=body.name,
+                partner_type=body.partner_type,
+                tax_regime=body.tax_regime,
+                nif=body.nif,
+                nis=body.nis,
+                ai=body.ai,
+                rc=body.rc,
+                nin=body.nin,
+                wilaya_code=body.wilaya_code,
+                bank_rib=body.bank_rib,
+            )
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if partner is None:  # pragma: no cover - defensive
+            raise HTTPException(status_code=409, detail="Partner already exists.")
+        return {"company_id": auth.company_id, **partner}
+
+    @app.post("/api/v1/products")
+    def api_create_product(
+        body: ProductCreateInput,
+        auth: AuthenticatedUser = Depends(_authenticate),
+    ) -> Dict[str, Any]:
+        """Create an item of the caller's company, audited (``PRODUCT_CREATED``).
+
+        Prices are parsed with the Decimal guard the posting engine uses, and
+        any account-code override must exist in the company's SCF chart.
+        """
+        try:
+            product = create_product_secure(
+                db,
+                auth.user_id,
+                sku=body.sku,
+                name=body.name,
+                uom=body.uom,
+                is_storable=body.is_storable,
+                standard_cost_dzd=body.standard_cost_dzd,
+                stock_account_code=body.stock_account_code,
+                clearing_account_code=body.clearing_account_code,
+                expense_account_code=body.expense_account_code,
+                income_account_code=body.income_account_code,
+            )
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TenantIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"company_id": auth.company_id, **product}
 
     return app

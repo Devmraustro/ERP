@@ -57,6 +57,10 @@ from typing import Dict, List, Optional, Tuple
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCKFILE = REPO_ROOT / "requirements.lock.txt"
 HASH_LOCKFILE = REPO_ROOT / "requirements.lock.hashes.txt"
+# The GUI extra is locked separately so the headless install never pulls Qt;
+# see requirements-desktop.lock.txt for the full rationale.
+DESKTOP_LOCKFILE = REPO_ROOT / "requirements-desktop.lock.txt"
+DESKTOP_HASH_LOCKFILE = REPO_ROOT / "requirements-desktop.lock.hashes.txt"
 PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
 
 HEADER = """\
@@ -114,8 +118,34 @@ def fetch_digests(name: str, version: str) -> List[str]:
     return digests
 
 
-def build(pins: List[Tuple[str, str]]) -> str:
-    lines = [HEADER]
+DESKTOP_HEADER = """\
+# Hash-pinned DESKTOP lockfile for the Algerian AI ERP Platform.
+#
+# GENERATED FILE - do not edit by hand. Regenerate with:
+#     python tools/generate_hash_lock.py --desktop --write
+#
+# Install with:
+#     pip install --no-deps --require-hashes -r requirements.lock.hashes.txt
+#     pip install --no-deps --require-hashes -r requirements-desktop.lock.hashes.txt
+#
+# The first command is the server/runtime set and is mandatory; this file only
+# adds the optional Qt GUI extra. Both are `--no-deps`: the transitive closure of
+# each is enumerated here, and PySide6's own three-part split
+# (PySide6 / PySide6-Essentials / PySide6-Addons / shiboken6) is pinned at one
+# shared version because a mixed set is an ABI mismatch at import time.
+#
+# Sources: requirements-desktop.lock.txt (versions) + the PyPI JSON API (digests).
+# As with the runtime lockfile, every authentic distribution file for each
+# pinned version is listed so the same file is valid on Windows, Linux and macOS.
+#
+# What this enforces and what it does not is stated in requirements.lock.hashes.txt;
+# the same limits apply here verbatim.
+
+"""
+
+
+def build(pins: List[Tuple[str, str]], header: str = HEADER) -> str:
+    lines = [header]
     for name, version in sorted(pins, key=lambda item: item[0].lower()):
         digests = fetch_digests(name, version)
         # pip only continues a requirement when EVERY line but the last ends with
@@ -146,19 +176,24 @@ def summarise(text: str) -> Dict[str, int]:
     return entries
 
 
-def check(pins: List[Tuple[str, str]]) -> int:
-    if not HASH_LOCKFILE.exists():
-        print(f"MISSING: {HASH_LOCKFILE.name} does not exist")
+def check(
+    pins: List[Tuple[str, str]],
+    lockfile: Path = LOCKFILE,
+    hashes: Path = HASH_LOCKFILE,
+    regenerate: str = "python tools/generate_hash_lock.py --write",
+) -> int:
+    if not hashes.exists():
+        print(f"MISSING: {hashes.name} does not exist")
         return 1
-    text = HASH_LOCKFILE.read_text(encoding="utf-8")
+    text = hashes.read_text(encoding="utf-8")
     entries = summarise(text)
     expected = {f"{name}=={version}" for name, version in pins}
     problems: List[str] = []
 
     for missing in sorted(expected - set(entries)):
-        problems.append(f"{missing} is pinned in {LOCKFILE.name} but absent from {HASH_LOCKFILE.name}")
+        problems.append(f"{missing} is pinned in {lockfile.name} but absent from {hashes.name}")
     for extra in sorted(set(entries) - expected):
-        problems.append(f"{extra} is hashed in {HASH_LOCKFILE.name} but not pinned in {LOCKFILE.name}")
+        problems.append(f"{extra} is hashed in {hashes.name} but not pinned in {lockfile.name}")
     for name, count in sorted(entries.items()):
         if count == 0:
             problems.append(f"{name} has no hashes")
@@ -167,35 +202,53 @@ def check(pins: List[Tuple[str, str]]) -> int:
         print("FAILED - the hash lockfile does not match the version lockfile:")
         for problem in problems:
             print(f"  - {problem}")
-        print("\nRegenerate with: python tools/generate_hash_lock.py --write")
+        print(f"\nRegenerate with: {regenerate}")
         return 1
 
     print(f"OK - {len(entries)} pinned distributions, "
-          f"{sum(entries.values())} hashes, no drift from {LOCKFILE.name}.")
+          f"{sum(entries.values())} hashes, no drift from {lockfile.name}.")
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate or verify the hash-pinned lockfile.")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--write", action="store_true", help="Regenerate requirements.lock.hashes.txt")
-    group.add_argument("--check", action="store_true", help="Verify the hash lockfile matches the version pins")
-    args = parser.parse_args(argv)
-
-    pins = read_pins(LOCKFILE)
-    if args.check:
-        return check(pins)
-
-    print(f"Fetching digests for {len(pins)} pinned distributions from PyPI...")
-    text = build(pins)
-    HASH_LOCKFILE.write_text(text, encoding="utf-8")
+def _emit(pins: List[Tuple[str, str]], lockfile: Path, hashes: Path, header: str) -> int:
+    print(f"Fetching digests for {len(pins)} pinned distributions from {lockfile.name}...")
+    text = build(pins, header)
+    hashes.write_text(text, encoding="utf-8")
     entries = summarise(text)
-    print(f"Wrote {HASH_LOCKFILE.name}: {len(entries)} distributions, {sum(entries.values())} hashes.")
+    print(f"Wrote {hashes.name}: {len(entries)} distributions, {sum(entries.values())} hashes.")
     for name, count in sorted(entries.items()):
         if count == 0:
             print(f"ERROR: {name} produced no hashes", file=sys.stderr)
             return 1
     return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate or verify the hash-pinned lockfiles.")
+    parser.add_argument(
+        "--desktop",
+        action="store_true",
+        help="Operate on the desktop/Qt lockfile instead of the runtime one",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--write", action="store_true", help="Regenerate the hash lockfile")
+    group.add_argument("--check", action="store_true", help="Verify the hash lockfile matches the version pins")
+    args = parser.parse_args(argv)
+
+    if args.desktop:
+        lockfile, hashes = DESKTOP_LOCKFILE, DESKTOP_HASH_LOCKFILE
+        regenerate = "python tools/generate_hash_lock.py --desktop --write"
+    else:
+        lockfile, hashes = LOCKFILE, HASH_LOCKFILE
+        regenerate = "python tools/generate_hash_lock.py --write"
+
+    if not lockfile.exists():
+        print(f"MISSING: {lockfile.name} does not exist")
+        return 1
+    pins = read_pins(lockfile)
+    if args.check:
+        return check(pins, lockfile, hashes, regenerate)
+    return _emit(pins, lockfile, hashes, DESKTOP_HEADER if args.desktop else HEADER)
 
 
 if __name__ == "__main__":

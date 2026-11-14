@@ -2109,42 +2109,80 @@ def _apply_field_decision(
             )
         except ValueError as exc:
             raise ReviewPolicyValueError(str(exc)) from exc
-        if row is None:
+        # A *header* row that extraction created but could not read (its
+        # ``normalized_value`` is NULL) is transcribed on that same row; creating
+        # a second row would be a duplicate-evidence group. Line elements keep
+        # their own transcription path below (a line row always carries the JSON
+        # payload, so "empty" never occurs for them).
+        if row is None or (not is_line and current_value in (None, "")):
             if is_line:
                 raise ReviewPolicyValueError(
                     "Line rows are created by extraction only; transcribe the line on the invoice."
                 )
-            # Manual transcription entry point: create the field row with honest
-            # provenance — a human read the value, no engine measured it. This is
-            # how an Arabic-only document (or any unread field) becomes decidable
-            # without fabricating an engine reading.
-            conn.execute(
-                """
-                INSERT INTO ocr_extracted_fields (
-                    company_id, document_id, page_number, line_index, field_name,
-                    raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
-                    confidence_calibrated, bbox_json, conflict_values_json,
-                    ocr_model_version, human_override_value, edited_by_id, edited_at, created_at
-                ) VALUES (?, ?, 1, NULL, ?, ?, ?, NULL, 'not_measured', 'unavailable',
-                          0, '[]', NULL, ?, ?, ?, ?, ?)
-                """,
-                (
-                    company_id,
-                    document_id,
-                    field_name,
-                    HUMAN_ENTRY_RAW,
-                    reviewed_value,
-                    HUMAN_ENTRY_MODEL,
-                    reviewed_value,
-                    user_id,
-                    now_iso,
-                    now_iso,
-                ),
-            )
-            row = conn.execute(
-                "SELECT * FROM ocr_extracted_fields WHERE company_id = ? AND document_id = ? AND field_name = ?",
-                (company_id, document_id, field_name),
-            ).fetchone()
+            if row is None:
+                # Manual transcription entry point: create the field row with
+                # honest provenance — a human read the value, no engine
+                # measured it. This is how an Arabic-only document (or any
+                # unread field) becomes decidable without fabricating an
+                # engine reading.
+                conn.execute(
+                    """
+                    INSERT INTO ocr_extracted_fields (
+                        company_id, document_id, page_number, line_index, field_name,
+                        raw_text, normalized_value, confidence, confidence_kind, confidence_scope,
+                        confidence_calibrated, bbox_json, conflict_values_json,
+                        ocr_model_version, human_override_value, edited_by_id, edited_at, created_at
+                    ) VALUES (?, ?, 1, NULL, ?, ?, ?, NULL, 'not_measured', 'unavailable',
+                              0, '[]', NULL, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        company_id,
+                        document_id,
+                        field_name,
+                        HUMAN_ENTRY_RAW,
+                        reviewed_value,
+                        HUMAN_ENTRY_MODEL,
+                        reviewed_value,
+                        user_id,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+                # Re-read the row that was just inserted so the evidence block
+                # below records it as the authoritative row: a transcription is
+                # only complete when the decision names the row it created.
+                inserted = conn.execute(
+                    """
+                    SELECT * FROM ocr_extracted_fields
+                    WHERE company_id = ? AND document_id = ? AND field_name = ?
+                      AND line_index IS NULL
+                    ORDER BY page_number, id
+                    LIMIT 1
+                    """,
+                    (company_id, document_id, field_name),
+                ).fetchone()
+                if inserted is None:  # pragma: no cover - defensive
+                    raise FinancialIntegrityError(
+                        "TRANSCRIPTION_ROW_MISSING: the transcribed value could not be stored."
+                    )
+                row = inserted
+            else:
+                # Extraction created the row but could not read a value
+                # (``normalized_value`` is NULL). Inserting a *second* row here
+                # - which the service used to do whenever a value was supplied
+                # with no ``expected_value`` - creates a duplicate-evidence
+                # group, and the review policy then blocks the document
+                # forever. The human's transcription belongs on the row the
+                # human read; the engine's ``raw_text`` is preserved as
+                # evidence (Phase 59B).
+                conn.execute(
+                    """
+                    UPDATE ocr_extracted_fields
+                    SET human_override_value = ?, normalized_value = ?, edited_by_id = ?, edited_at = ?
+                    WHERE id = ?
+                    """,
+                    (reviewed_value, reviewed_value, user_id, now_iso, row["id"]),
+                )
         elif is_line:
             if field_name == LINE_PRICE_FIELD:
                 _rewrite_line_unit_price(conn, row, reviewed_value)
@@ -2162,6 +2200,14 @@ def _apply_field_decision(
                     f"FIELD_VALUE_CHANGED_SINCE_READ: expected {expected_value!r}, "
                     f"current {current_value!r}; re-read the field and correct again."
                 )
+            # Both a correction and a transcription land on the row the human
+            # actually read, setting the override *and* the normalized value.
+            # Transcription is the case where extraction created the row but
+            # could not read a value: writing only ``human_override_value``
+            # would leave the review policy reading ``normalized_value`` as
+            # still missing (so the transcription would never satisfy the
+            # field), while inserting a second row would create a
+            # duplicate-evidence group that blocks the document outright.
             conn.execute(
                 """
                 UPDATE ocr_extracted_fields

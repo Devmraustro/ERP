@@ -275,15 +275,23 @@ def verify_backup(
     checks["sha256_actual"] = actual_sha
     checks["size_bytes"] = actual_size
     if manifest is None:
+        # Fail closed. The archive is Fernet-encrypted, so without its sidecar
+        # manifest there is *nothing* to compare the bytes against: the file
+        # could be truncated, corrupted or swapped and this check would still
+        # report success. Reporting "ok" here is worse than reporting nothing -
+        # a monitor that stays green while the artefact is unverifiable is the
+        # failure mode the manifest exists to prevent.
         checks["sha256_matches"] = None
+        checks["failure"] = (
+            "MANIFEST_MISSING: no .manifest.json beside this artefact, so its "
+            "digest cannot be checked; treat the artefact as unverified"
+        )
     else:
         checks["sha256_expected"] = manifest.get("sha256")
         checks["sha256_matches"] = manifest.get("sha256") == actual_sha
         checks["size_matches"] = manifest.get("size_bytes") == actual_size
 
-    ok = checks["exists"] and (
-        checks["sha256_matches"] in (True, None)
-    ) and checks.get("size_matches", True)
+    ok = checks["exists"] and checks["sha256_matches"] is True and checks.get("size_matches", True)
 
     if deep and ok:
         if key is None:

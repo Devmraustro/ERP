@@ -37,7 +37,7 @@ Prerequisites: Windows 10/11 x64, CPython 3.12.10, network access to PyPI.
 ```powershell
 py -3.12 -m venv C:\erp-desk
 C:\erp-desk\Scripts\python -m pip install --require-hashes -r requirements.lock.hashes.txt
-C:\erp-desk\Scripts\python -m pip install --require-hashes -r requirements-desktop.lock.hashes.txt
+C:\erp-desk\Scripts\python -m pip install --no-deps --require-hashes -r requirements-desktop.lock.hashes.txt
 C:\erp-desk\Scripts\python -m pytest tests\test_phase26_desktop.py tests\test_phase27_review_api.py tests\test_phase28_*.py -v
 ```
 

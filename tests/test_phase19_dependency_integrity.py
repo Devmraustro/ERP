@@ -251,6 +251,65 @@ def test_optional_desktop_extra_is_exact_pinned_and_absent_from_the_lockfile() -
     assert "pyside6" not in lock_pins, "PySide6 must stay out of the headless lockfile"
 
 
+def test_ci_executes_the_desktop_suites_with_the_qt_extra_installed() -> None:
+    """Keeping Qt out of the runtime lock is only half the rule.
+
+    The desktop suites guard every test with ``importorskip("PySide6.QtWidgets")``
+    so a headless environment can still run the rest of the suite. The cost of
+    that guard is that a CI matrix lacking PySide6 reports the desktop UI as
+    green by *skipping it* - the tests never execute and the record is
+    one-sided. Two documented Windows procedures depend on the Qt lockfile, so
+    CI has to exercise it too: this test pins the existence of a desktop job, the
+    install of the desktop lockfile, and the explicit no-skip rule.
+    """
+    workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "verify-desktop:" in workflow, "CI must run the Qt desktop suites"
+
+    job = workflow.split("verify-desktop:", 1)[1]
+    # The install must come from the hash lockfile: an unpinned PySide6 would let
+    # the Qt ABI drift under a fixed test suite.
+    assert "requirements-desktop.lock.hashes.txt" in job, "desktop job must install the hash lockfile"
+    assert "--require-hashes" in job, "desktop job must verify hashes"
+    assert "generate_hash_lock.py --desktop --check" in job, (
+        "desktop job must verify the lockfile has not drifted"
+    )
+    # Every Qt suite the Windows acceptance procedures name must run here.
+    for suite in (
+        "tests/test_phase26_desktop.py",
+        "tests/test_phase27_desktop_ui.py",
+        "tests/test_phase27_review_api.py",
+        "tests/test_phase28_desktop_users_ui.py",
+        "tests/test_phase29_desktop_redesign.py",
+    ):
+        assert suite in job, f"{suite} is not executed by the desktop CI job"
+    # A skip means PySide6 went missing again - the exact regression to prevent.
+    assert "skipped" in job and "sys.exit(1)" in job, "desktop job must fail when any test skips"
+
+
+def test_desktop_lockfile_covers_exactly_the_qt_extra() -> None:
+    """The GUI extra is locked in its own file, at one shared version."""
+    desktop = REPO_ROOT / "requirements-desktop.lock.txt"
+    hashed = REPO_ROOT / "requirements-desktop.lock.hashes.txt"
+    assert desktop.exists(), "requirements-desktop.lock.txt is missing"
+    assert hashed.exists(), "requirements-desktop.lock.hashes.txt is missing"
+
+    pins = dict(generate_hash_lock.read_pins(desktop))
+    assert {name.lower() for name in pins} == {
+        "pyside6",
+        "pyside6-essentials",
+        "pyside6-addons",
+        "shiboken6",
+    }, f"unexpected desktop pins: {sorted(pins)}"
+    assert len(set(pins.values())) == 1, f"PySide6 parts disagree: {pins}"
+
+    # Every pin must carry at least one digest, or --require-hashes cannot work.
+    text = hashed.read_text(encoding="utf-8")
+    for name, version in pins.items():
+        block = re.search(rf"^{re.escape(name)}=={re.escape(version)} \\?\n(.*?)(?=\n\S|\Z)", text, re.S | re.M)
+        assert block, f"{name}=={version} absent from the desktop hash lockfile"
+        assert "--hash=sha256:" in block.group(1), f"{name}=={version} has no digest"
+
+
 def test_supported_python_versions_are_declared_and_consistent() -> None:
     """The runtime floor must match the CI matrix, and the OCR engine must support it."""
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")

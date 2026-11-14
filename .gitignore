@@ -5,7 +5,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
+coverage.xml
+junit*.xml
+staging-acceptance*.log
 htmlcov/
 dist/
 build/
@@ -13,15 +18,27 @@ build/
 
 # Runtime & Temporary Artifacts
 *.db
+*.sqlite
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
 /tmp_runtime/
 .env
+.env.*
 *.secret
 *.key
-# Key-version registries and rotation journals: they contain key material or
-# operator activity records and must never be committed.
+*.pem
+*.crt
+*.pfx
+*.p12
+# Key-version registries, rotation journals, ledgers, and local checkpoints:
+# they contain key material or live operator activity records and must never be committed.
 *.keys.json
 *.rotation.jsonl
 *.rotation.lock
+*.rotation-ledger.jsonl
+*.checkpoint.json
+
+# OS Metadata
+.DS_Store
+Thumbs.db

@@ -145,6 +145,19 @@ class ErpClient:
             "GET", f"/api/v1/documents/{document_id}/fields", params={"limit": limit}
         )
 
+    def document_review_policy(self, document_id: str) -> Dict[str, Any]:
+        """Server-evaluated review policy: what still blocks this document."""
+        return self._request("GET", f"/api/v1/documents/{document_id}/review-policy")
+
+    def decide_document_field(self, document_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Record one human review decision (CONFIRMED/CORRECTED/FLAGGED/…).
+
+        ``CORRECTED`` on a field the engine never extracted is the documented
+        manual-transcription entry point: it creates the row with honest
+        provenance instead of fabricating an engine reading.
+        """
+        return self._request("POST", f"/api/v1/documents/{document_id}/fields/decide", json=payload)
+
     def document_content(self, document_id: str) -> Dict[str, Any]:
         """The decrypted source bytes plus preview metadata - never JSON-parsed.
 
@@ -218,6 +231,14 @@ class ErpClient:
     # ------------------------------------------------------------------
     # supplier invoice lifecycle
     # ------------------------------------------------------------------
+
+    def create_partner(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a supplier/customer (Phase 59B master-data write path)."""
+        return self._request("POST", "/api/v1/partners", json=payload)
+
+    def create_product(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Create an item of the company (Phase 59B master-data write path)."""
+        return self._request("POST", "/api/v1/products", json=payload)
 
     def create_invoice(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/api/v1/invoices", json=payload)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -358,3 +359,65 @@ def test_cli_verify_deep_restores(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_unknown_alert_event_is_rejected() -> None:
     with pytest.raises(ValueError):
         ops_alerts.emit("NOT_A_REAL_EVENT", "should not be sendable")
+
+
+def test_verify_refuses_an_artefact_whose_manifest_is_missing(tmp_path: Path) -> None:
+    """An unverifiable artefact must not report success.
+
+    The archive is Fernet-encrypted, so the SHA-256 in the sidecar manifest is
+    the only thing an integrity monitor can compare against without the key.
+    With the manifest gone there is nothing to compare, and `verify` used to
+    return ``ok: true`` for that case - a monitor that stays green while every
+    artefact could be truncated, corrupted or swapped. It now fails closed and
+    names the reason.
+    """
+    db, vault = _seed(tmp_path)
+    key = Fernet.generate_key()
+    backup_dir = tmp_path / "backups"
+    result = ops_backup.run_backup(db, vault, backup_dir, key, now=_stamp(0))
+    artefact = Path(result["backup"])
+
+    # Baseline: with its manifest the artefact verifies.
+    assert ops_backup.verify_backup(artefact, key=key)["ok"] is True
+
+    # A tampered archive is caught by the digest.
+    tampered = backup_dir / "erp-20260101T000000Z.erpbackup"
+    payload = bytearray(artefact.read_bytes())
+    payload[200] ^= 0xFF
+    tampered.write_bytes(bytes(payload))
+    shutil.copy(
+        ops_backup.manifest_path_for(artefact), ops_backup.manifest_path_for(tampered)
+    )
+    report = ops_backup.verify_backup(tampered, key=key)
+    assert report["ok"] is False
+    assert report["checks"]["sha256_matches"] is False
+
+    # The manifest missing entirely is not "nothing to check" - it is a failure.
+    orphan = backup_dir / "erp-20260102T000000Z.erpbackup"
+    shutil.copy(artefact, orphan)
+    report = ops_backup.verify_backup(orphan, key=key)
+    assert report["ok"] is False, "an artefact with no manifest cannot be verified"
+    assert report["checks"]["manifest_present"] is False
+    assert report["checks"]["sha256_matches"] is None
+    assert "MANIFEST_MISSING" in report["checks"]["failure"]
+
+    # And the directory-level verify must not report a clean sweep either.
+    assert ops_backup.verify_all(backup_dir, key=key, alert=False)["ok"] is False
+
+
+def test_a_deep_verify_without_a_key_reports_that_it_could_not_restore(tmp_path: Path) -> None:
+    """`--deep` without a key is an unperformed restore, not a passed one.
+
+    The shallow digest check still succeeds - the bytes really are unchanged -
+    but the report has to say the restore did not happen, so an operator reading
+    it cannot conclude the artefact was proven usable.
+    """
+    db, vault = _seed(tmp_path)
+    key = Fernet.generate_key()
+    backup_dir = tmp_path / "backups"
+    result = ops_backup.run_backup(db, vault, backup_dir, key, now=_stamp(0))
+
+    report = ops_backup.verify_backup(Path(result["backup"]), key=None, deep=True)
+    assert report["checks"]["sha256_matches"] is True
+    assert report["checks"]["deep"] == "skipped: no key supplied"
+    assert "deep_ok" not in report["checks"]

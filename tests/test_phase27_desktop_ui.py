@@ -35,6 +35,7 @@ pytest.importorskip("PySide6.QtWidgets")
 from PySide6.QtWidgets import QApplication, QDialog
 
 from dz_erp.desktop.api_client import ErpClient
+from dz_erp.desktop.i18n import tr
 from dz_erp.desktop.ui import VIEWS, InvoiceReviewDialog, MainWindow
 
 _ADMIN = ("admin", "Smoke#2026x")
@@ -148,20 +149,83 @@ def _service_with_fixtures(tmp_path: Path):
             "INSERT INTO ocr_extracted_fields (company_id, document_id, page_number, line_index, "
             "field_name, raw_text, normalized_value, confidence, confidence_kind, "
             "confidence_calibrated, bbox_json, ocr_model_version, created_at) "
-            "VALUES (1, 'doc-1', 1, 0, 'supplier_invoice_no', 'FAC-UI-001', 'FAC-UI-001', "
+            "VALUES (1, 'doc-1', 1, NULL, 'supplier_invoice_no', 'FAC-UI-001', 'FAC-UI-001', "
             "0.42, 'engine_line', 0, '{}', 'synthetic-ocr-1', '2026-10-27T10:00:01+00:00')"
         )
         conn.execute(
             "INSERT INTO ocr_extracted_fields (company_id, document_id, page_number, line_index, "
             "field_name, raw_text, normalized_value, confidence, confidence_kind, "
             "confidence_calibrated, bbox_json, ocr_model_version, created_at) "
-            "VALUES (1, 'doc-1', 1, 1, 'amount_ttc_dzd', '11 9OO DD', NULL, "
+            "VALUES (1, 'doc-1', 1, NULL, 'amount_ttc_dzd', '11 9OO DD', NULL, "
             "NULL, 'not_measured', 0, '{}', 'synthetic-ocr-1', '2026-10-27T10:00:01+00:00')"
         )
     service = EmbeddedErpService(
         db_path, tmp_path / "data" / "vault", security_log_path=tmp_path / "logs" / "security.jsonl"
     )
     return db_path, service
+
+
+#: Values a reviewer would read off the synthetic source document. The
+#: fixtures seed ``supplier_invoice_no`` and ``amount_ttc_dzd``; the rest are
+#: the fields the document review policy requires and which every real
+#: invoice carries, so the review completes them the way an operator does.
+_REVIEW_VALUES = {
+    "currency_code": "DZD",
+    "supplier_name": "Fournisseur Synthétique",
+    "supplier_nif": "001216099123456",
+    "invoice_number": "FAC-UI-001",
+    "invoice_date": "2026-10-20",
+    "amount_ht_dzd": "10000.00",
+    "amount_tva_dzd": "1900.00",
+    "amount_ttc_dzd": "11900.00",
+}
+
+
+def _row_index(dialog, field_name: str) -> int:
+    """Visible-table row index for a field name (never a hard-coded position).
+
+    The service orders extracted fields by ``(page, line_index, field_name)``,
+    so an assertion pinned to row 1 silently moved the moment a fixture gained
+    a field. Look the row up by what it *is*.
+    """
+    for index in range(dialog.fields_table.rowCount()):
+        item = dialog.fields_table.item(index, 0)
+        if item is not None and item.text() == field_name:
+            return index
+    raise AssertionError(f"{field_name} is not shown in the review table")
+
+
+def _satisfy_review_policy(client: ErpClient, document_id: str) -> None:
+    """Drive the review policy to satisfied through the public API only.
+
+    The gate is real and deliberate: ``submit-approval`` refuses a document
+    whose required fields have no human decision (``DOCUMENT_REVIEW_UNSATISFIED``).
+    That made this test's original expectation - "correct one field, then
+    submit" - unreachable ever since the Phase 34 gate landed; because the
+    module is skipped without PySide6, the stale expectation never ran. It is
+    completed here the documented way: CONFIRMED where extraction produced a
+    value, CORRECTED (manual transcription) where it did not.
+    """
+    for _ in range(6):
+        policy = client.document_review_policy(document_id)
+        if policy.get("satisfied"):
+            return
+        blocking = [b for b in policy.get("blocking", []) if b.startswith("REQUIRED_FIELD_NOT_DECIDED:")]
+        if not blocking:
+            raise AssertionError(f"review policy blocked for another reason: {policy['blocking']}")
+        for item in blocking:
+            name = item.split(":", 1)[1]
+            row = next(f for f in policy["fields"] if f["field_name"] == name)
+            if row.get("value") is not None:
+                body = {"field_name": name, "decision": "CONFIRMED", "expected_value": row["value"]}
+            else:
+                body = {
+                    "field_name": name,
+                    "decision": "CORRECTED",
+                    "value": _REVIEW_VALUES[name],
+                }
+            client.decide_document_field(document_id, body)
+    raise AssertionError("review policy was still unsatisfied after decisions")
 
 
 def _create_invoice_via_api(client: ErpClient) -> int:
@@ -257,22 +321,43 @@ def test_review_dialog_full_cycle_with_correction_and_audit(
         assert "Validated" in dialog.state_badge.text()
         assert dialog.fields_table.rowCount() == 2
         # amount_ttc_dzd: no confidence measured — displayed, never invented.
-        assert dialog.fields_table.item(1, 3).text() == "non mesurée"
+        ttc_row = _row_index(dialog, "amount_ttc_dzd")
+        assert dialog.fields_table.item(ttc_row, 3).text() == "non mesurée"
         # supplier_invoice_no: engine line confidence shown as measured.
-        assert dialog.fields_table.item(0, 3).text().startswith("0.42")
-        assert dialog.fields_table.item(0, 1).text() == "FAC-UI-001"  # raw OCR
+        no_row = _row_index(dialog, "supplier_invoice_no")
+        assert dialog.fields_table.item(no_row, 3).text().startswith("0.42")
+        assert dialog.fields_table.item(no_row, 1).text() == "FAC-UI-001"  # raw OCR
 
-        # Correction through the authorized API, on the uncertain field.
-        dialog.fields_table.selectRow(1)
+        # Manual transcription through the authorized API, on the field whose
+        # value the engine could not read (raw text kept, no normalized value).
+        # This is the documented "transcribe what the paper says" path: the
+        # value lands on the row the reviewer read, so raw text stays as
+        # evidence and the review policy sees a decided value.
+        dialog.fields_table.selectRow(ttc_row)
         dialog.correction_edit.setText("11900.00")
         dialog._correct_selected_field()
         _drain_until_idle(dialog)
-        row = [dialog.fields_table.item(1, c).text() for c in range(dialog.fields_table.columnCount())]
-        assert row[4] != "—"  # an override is now displayed
-        assert row[1] == "11 9OO DD"  # raw OCR text is preserved
-        assert row[2] == "11900.00"  # corrected current value
-        events = _audit(db_path, "OCR_HUMAN_FIELD_EDIT")
-        assert any(e["target_model"] == "ocr_extracted_fields" for e in events)
+        ttc_row = _row_index(dialog, "amount_ttc_dzd")
+        row = [
+            dialog.fields_table.item(ttc_row, c).text()
+            for c in range(dialog.fields_table.columnCount())
+        ]
+        assert row[0] == "amount_ttc_dzd"
+        assert row[1] == "11 9OO DD"  # raw OCR text is preserved as evidence
+        assert row[2] == "11900.00"  # transcribed current value
+        assert row[4] != tr("fr", "review_origin_auto")  # marked as human-verified
+        # No second row was created: a duplicate-evidence group would block the
+        # document forever (regression guard for the transcription path).
+        assert dialog.fields_table.rowCount() == 2
+        events = _audit(db_path, "OCR_FIELD_REVIEW_DECIDED")
+        assert any(
+            e["target_model"] == "ocr_field_reviews" and e["target_id"] for e in events
+        )
+
+        # The remaining required fields are completed exactly as a reviewer
+        # would (CONFIRMED where extraction read a value), so the document
+        # review gate - not the UI - decides whether submission is allowed.
+        _satisfy_review_policy(client, "doc-1")
 
         # Explicit submit → approve → post, each an explicit UI action.
         # Segregation of duties is a server control the UI inherits: the

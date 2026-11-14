@@ -281,7 +281,7 @@ This section is the current state. Where it differs from §1–§18, this sectio
 | CPython 3.12.10 Linux | `5234bf2` | local | 1007 passed · 0 failed · 21 skipped |
 | CPython 3.12.10 Linux | **`89a5fecede594e5e0f001fe2decad6379325964f`** | local | **1021 passed · 0 failed · 21 skipped (18 PySide6 not installed, 3 Windows-only)** · staging acceptance 40/40 |
 | CPython 3.11.2 Linux | `5234bf2` | local | 985 passed · 22 failed · 21 skipped — interpreter below the restore floor, not a regression |
-| Any CI | `89a5fecede594e5e0f001fe2decad6379325964f` | — | **not run** |
+| All four CI jobs | `85bc584` (docs commit on top of the candidate, same code) | CI run 43612393787, PR #11 | all `success`; counts unconfirmed |
 
 Detail: [`../phase62/CI_AND_TEST_EVIDENCE_AUDIT.md`](../phase62/CI_AND_TEST_EVIDENCE_AUDIT.md).
 

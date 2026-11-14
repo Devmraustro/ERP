@@ -10,7 +10,7 @@
 
 | Evidence | Covers | Does not cover |
 |---|---|---|
-| CI job "Windows, Python 3.12.10" (run 43607302657, job 132484610041, success) | A 10-file test subset and staging acceptance on a GitHub-hosted Windows runner | Installation from the lock on a clean machine; the desktop application; NTFS permissions; restore by an operator; the full suite |
+| CI job "Windows, Python 3.12.10" (run 43607302657 on `5234bf2` and run 43612393787 on the candidate's code, both success) | A 10-file test subset and staging acceptance on a GitHub-hosted Windows runner | Installation from the lock on a clean machine; the desktop application; NTFS permissions; restore by an operator; the full suite |
 | CI job "Desktop UI (Qt)" (job 132484609813, success) | Qt tests on Linux with an off-screen display | Windows rendering, fonts, right-to-left layout on Windows, the packaged executable |
 | `docs/DESKTOP_APPLICATION.md` §8.2 | One recorded packaging run on a developer workstation (128.3 MiB executable, SHA-256 recorded there) | A clean machine; the current commit |
 | Phase 60 restore-path verification | Restore works on CPython 3.12.10 on Linux | Restore on Windows |

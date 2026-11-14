@@ -78,8 +78,10 @@ three commits). The suite was re-run on the fixed tree:
 |---|---|---|
 | `89a5fecede594e5e0f001fe2decad6379325964f` (release candidate) | CPython 3.12.10 | **1021 passed · 0 failed · 21 skipped (18 PySide6 not installed, 3 Windows-only)** |
 
-CI has **not** yet run on that commit: the working branch has no pull request. Until it does, the four
-CI jobs are evidence for `5234bf2` only, not for the release candidate.
+**CI on the candidate (added after PR #11 was opened).** Run [43612393787](https://github.com/Devmraustro/ERP/actions/runs/43612393787), event `pull_request` (PR #11), head `85bc584fcf4de483acadda57f9edef155d07c6b5` — the documentation commit directly on top of the candidate, identical code — 2026-11-14T15:51:11Z → 16:06:22Z: **all four jobs `success`** (Python 3.11 3 m 34 s, Python 3.12 15 m 7 s, Windows 3.12.10 3 m 6 s, Desktop Qt 2 m 58 s). Test totals remain unconfirmed for the reason in §1.
+
+This is the first Windows and Qt evidence for the three fixes. A later documentation-only commit records
+this result; CI for that commit is not cited here.
 
 ## 6. Findings
 
@@ -88,5 +90,5 @@ CI jobs are evidence for `5234bf2` only, not for the release candidate.
 | C62-1 | CI test counts cannot be confirmed from here | Release owner | Follow §1 once; paste the four JUnit totals into §3 |
 | C62-2 | The 3.12 Ubuntu job does not run staging acceptance or the risk-register gate | CI owner | Accepted as designed (gated to 3.11 to avoid duplicate work); stated so nobody reads the 3.12 job as covering them |
 | C62-3 | The Windows job runs a 10-file subset, not the full suite | CI owner | Open. Full-suite Windows evidence does not exist; Phase 64 cannot substitute for it |
-| C62-4 | Release-candidate commit has no CI run yet | Release owner | Open a PR from `arena/7054a9f7-erp` to the integration branch; require all four jobs |
+| C62-4 | Release-candidate commit had no CI run | Release owner | **Closed for job conclusions** by PR #11, run 43612393787 (§5). Totals still fall under C62-1. |
 | C62-5 | Actions pinned to Node.js 20 runtime (deprecation annotation) | CI owner | Low; update action versions in a separate, reviewed change |

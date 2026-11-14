@@ -12,15 +12,16 @@
 | | |
 |---|---|
 | Repository | `https://github.com/Devmraustro/ERP.git` |
-| Working branch | `arena/7054a9f7-erp` |
+| Working branch | `arena/7054a9f7-erp` — pull request #11 → `arena/63d762c8-erp`, open, **not merged** |
 | Based on | `arena/63d762c8-erp` @ `5234bf2a785612e6ba9b9c31a8e0d5e700bf4635` |
 | **Release-candidate commit (last code change)** | **`89a5fecede594e5e0f001fe2decad6379325964f`** |
 | Code commits on top of the base | `ac79921` database file `0600` · `c4c48a1` credit notes over HTTP · `89a5fec` restore / staging permissions |
 | Documentation | One commit after the candidate, documentation only (`docs/release/phase61`–`phase69`, `docs/release/final`) |
 | `main` | Untouched. Nothing was merged or pushed to `main`. |
 
-The candidate is **not** the commit CI has seen. CI evidence is for `5234bf2`; the three fixes have
-local evidence only.
+CI ran on the candidate's code through PR #11 (run 43612393787, head `85bc584`, the documentation
+commit directly on top of the candidate): all four jobs `success`. Test totals from CI are still
+unconfirmed, as for every run (Phase 62 §1).
 
 ## 2. Evidence by gate
 
@@ -28,7 +29,7 @@ local evidence only.
 |---|---|---|---|
 | Repository integrity | **PASS** | Phase 61: single clone, linear descent from `main`, PR #10 merged, no divergence | Source file for the expert questions missing (R61-1); two lists share the labels Q1–Q12 (R61-2); no branch protection (R61-3) |
 | CI on the integration head `5234bf2` | **PASS (conclusions only)** | Run 43607302657, four jobs `success` | Test totals from CI **unconfirmed** — logs and artifacts unreachable |
-| Tests on the candidate | **PASS locally** | CPython 3.12.10: **1021 passed · 0 failed · 21 skipped**; staging acceptance 40/40; Ruff clean; hash locks 53/1317 and 4/20; risk-register gate consistent | No CI run on the candidate. Qt tests not run locally (18 skips). No Windows run. 3.11.2 cannot run restore tests. |
+| Tests on the candidate | **PASS locally and in CI (conclusions)** | CPython 3.12.10: **1021 passed · 0 failed · 21 skipped**; staging acceptance 40/40; Ruff clean; hash locks 53/1317 and 4/20; risk-register gate consistent | CI run 43612393787 green on all four jobs, totals unconfirmed. Qt and Windows evidence is CI only (Windows: 10-file subset). |
 | Dependencies | **PASS** | Phase 63: hash-enforced install; `pip-audit` 0 known vulnerabilities on all three sets on 2026-11-14 | Point-in-time; repeat at release |
 | Security defaults | **PASS after fixes** | Phase 63 §3; three permission defects fixed with tests | Windows ACLs untested (S5). Five High register risks Open (S1, S3, C1, C2, C6). |
 | Windows installation | **BLOCKED — not executed** | Phase 64 execution package | No Windows machine |
@@ -58,7 +59,7 @@ local evidence only.
 | G5 | Expert determination on the compliance questions | Blocking | Company + licensed Expert-Comptable / Fiscaliste | Signed document per Phase 65 §2 |
 | G6 | Production infrastructure | Blocking | Operations owner | Phase 66 table completed from the real host |
 | P64 | Windows installation and desktop acceptance | Blocking | Named tester + business users | Phase 64 sign-off tables |
-| C62-4 | CI on the release candidate | Blocking for any merge | Release owner | Green run on `89a5fec` with totals read from the JUnit files |
+| C62-1 | CI test totals unconfirmed | Medium | Release owner | Totals read from the JUnit artifacts of run 43612393787 |
 | R61-2 | Which Q1–Q12 list is the list of record | High | Release owner | Written confirmation before the expert answers |
 | W67-3 | Stock deduction helper writes no stock move and no entry | High if exposed; unreachable today | Product owner + expert | Valuation rule decided; implementation with tests, or removal |
 | W67-4 | A rejected credit note blocks any later reversal of that invoice | Medium | Product owner + expert | Decision under P10-Q8 |
@@ -81,7 +82,7 @@ passed, essential workflows passed, security and dependency gates passed, and no
 defect. Of those, **G5, G6 and Windows are not met**, and nothing in this session can meet them.
 
 `STAGING ACCEPTED — PRODUCTION BLOCKED` would need an accepted staging environment. None exists: the
-acceptance instance was a loopback process in a sandbox, and the release candidate has not passed CI.
+acceptance instance was a loopback process in a sandbox.
 
 `INTEGRATION COMPLETE — RELEASE BLOCKED` is what the evidence supports: the code is integrated on one
 line of history, the suite is green locally on the candidate, the defects found were fixed and pinned

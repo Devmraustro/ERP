@@ -1,0 +1,55 @@
+{
+ "wrong_key": "refused: InvalidToken: ",
+ "tampered_artefact_one_bit": "refused: InvalidToken: ",
+ "negatives_left_no_database": true,
+ "restore": {
+  "wall_s": 0.017,
+  "db_sha256_verified": true,
+  "vault_files_verified": 1,
+  "trial_balance_debit_dzd": "37763.42",
+  "trial_balance_credit_dzd": "37763.42",
+  "audit_chains_valid": true
+ },
+ "restored_db_path": "/tmp/acc/restore/erp_snapshot.sqlite3",
+ "restored_layout": [
+  "600 erp_snapshot.sqlite3",
+  "600 erp_snapshot.sqlite3.audit.key",
+  "600 erp_snapshot.sqlite3.audit.keys.json",
+  "600 manifest.json",
+  "600 vault.vault.key",
+  "600 vault.vault.keys.json",
+  "600 vault/company_1/27c1fbad0165ffba43a3931665c79f6bfd05c0de839eae46a39eff797576082c.enc",
+  "700 vault",
+  "700 vault/company_1"
+ ],
+ "restored_fingerprint": {
+  "counts": {
+   "companies": 1,
+   "users": 6,
+   "partners": 4,
+   "products": 1,
+   "supplier_invoices": 7,
+   "journal_entries": 5,
+   "journal_entry_lines": 14,
+   "stock_moves": 2,
+   "stock_quants": 1,
+   "audit_events": 49,
+   "source_documents": 1
+  },
+  "posted_debit": "37763.42",
+  "posted_credit": "37763.42",
+  "last_audit_id": 49,
+  "ledger_sha256": "0f8a7503b6db81bb211e3e33b8bb142f574005a16f845c33b199e835463e074f"
+ },
+ "fingerprint_identical_to_recovery_point": true,
+ "integrity_check": "ok",
+ "foreign_key_violations": 0,
+ "post_backup_partner_present": 0,
+ "restored_audit_chain": {
+  "valid": true,
+  "checked_count": 49,
+  "key_versions": {
+   "1": 49
+  }
+ }
+}

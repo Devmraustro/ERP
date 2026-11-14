@@ -10,6 +10,14 @@ added. Every code change below is a defect repair traced to a failed acceptance 
 > The 3.11.2 figures below are kept as the phase-59 record. `G5` and `G6` are unchanged, and so is the
 > classification.
 
+> **Phases 61–69 addendum (2026-11-14) — current state.** Release closure was carried out on branch
+> `arena/7054a9f7-erp`. Release candidate **`89a5fecede594e5e0f001fe2decad6379325964f`**. Classification unchanged:
+> **`INTEGRATION COMPLETE — RELEASE BLOCKED`**; go/no-go: **NO-GO**. Five defects were found by
+> running the product and fixed with regression tests, including one where credit notes could not be
+> approved or posted over HTTP. **§19 below is the current summary and supersedes §15–§18 where they
+> differ**; the earlier sections are kept as the Phase 59 record. Full audit:
+> [`../phase69/FINAL_RELEASE_CANDIDATE_AUDIT.md`](../phase69/FINAL_RELEASE_CANDIDATE_AUDIT.md).
+
 ---
 
 ## 1. Exact repository, branch and HEAD
@@ -246,3 +254,85 @@ while restore remains unverified yields `STAGING READY — PRODUCTION INFRASTRUC
 
 **This classification is not a legal opinion, not a certification, and not approval by any Algerian
 authority or professional.**
+
+---
+
+## 19. Release-closure update — Phases 61–69 (2026-11-14)
+
+This section is the current state. Where it differs from §1–§18, this section applies.
+
+### 19.1 Branch and commit
+
+| | |
+|---|---|
+| Working branch | `arena/7054a9f7-erp`, from `arena/63d762c8-erp` @ `5234bf2a785612e6ba9b9c31a8e0d5e700bf4635` |
+| Release candidate (last code change) | `89a5fecede594e5e0f001fe2decad6379325964f` |
+| Code commits | `ac79921`, `c4c48a1`, `89a5fec` — defect fixes with regression tests; no feature, no accounting-rule change |
+| `main` | untouched |
+
+### 19.2 Test totals by platform
+
+| Platform | Commit | Source | Result |
+|---|---|---|---|
+| Python 3.11 Ubuntu | `5234bf2` | CI run 43607302657 | job `success`; **count unconfirmed** (logs unreachable) |
+| Python 3.12 Ubuntu | `5234bf2` | CI | job `success`; count unconfirmed |
+| Windows 3.12.10 | `5234bf2` | CI, 10-file subset | job `success`; count unconfirmed |
+| Desktop Qt | `5234bf2` | CI | job `success`; count unconfirmed |
+| CPython 3.12.10 Linux | `5234bf2` | local | 1007 passed · 0 failed · 21 skipped |
+| CPython 3.12.10 Linux | **`89a5fecede594e5e0f001fe2decad6379325964f`** | local | **1021 passed · 0 failed · 21 skipped (18 PySide6 not installed, 3 Windows-only)** · staging acceptance 40/40 |
+| CPython 3.11.2 Linux | `5234bf2` | local | 985 passed · 22 failed · 21 skipped — interpreter below the restore floor, not a regression |
+| All four CI jobs | `85bc584` (docs commit on top of the candidate, same code) | CI run 43612393787, PR #11 | all `success`; counts unconfirmed |
+
+Detail: [`../phase62/CI_AND_TEST_EVIDENCE_AUDIT.md`](../phase62/CI_AND_TEST_EVIDENCE_AUDIT.md).
+
+### 19.3 Dependency audit
+
+53 pins / 1317 hashes (server), 4 / 20 (desktop); hash-enforced install succeeds; `pip-audit` 2.10.1
+reports 0 known vulnerabilities on the server, Windows-only and desktop sets as of 2026-11-14. No
+dependency was changed. Detail: [`../phase63/DEPENDENCY_AND_SECURITY_CLOSURE.md`](../phase63/DEPENDENCY_AND_SECURITY_CLOSURE.md).
+
+### 19.4 Installation acceptance
+
+Linux, from the hash lock: executed. **Windows: not executed** — execution package in
+[`../phase64/WINDOWS_INSTALLATION_ACCEPTANCE.md`](../phase64/WINDOWS_INSTALLATION_ACCEPTANCE.md).
+Desktop user acceptance: not executed.
+
+### 19.5 Workflow acceptance
+
+25 workflows: 15 pass, 2 partial, 1 fail, 7 not tested (96 recorded checks, synthetic data). The
+failure is a library helper that no operator can reach. Not tested = not implemented in version 1
+(sales, payments, bank, period close, customs, fiscal periods). Detail:
+[`../phase67/END_TO_END_BUSINESS_ACCEPTANCE.md`](../phase67/END_TO_END_BUSINESS_ACCEPTANCE.md).
+
+### 19.6 Backup and restore
+
+Backup, deep verification, vault and audit key rotation, simulated loss, restore into an empty
+directory, restart and verification: passed on an 87 KB synthetic dataset. The restored copy was
+identical to the recovery point; a wrong key and a one-bit change were refused. **No RPO or RTO is
+claimed; none has been approved.** Detail: [`../phase66/RECOVERY_DRILL_REPORT.md`](../phase66/RECOVERY_DRILL_REPORT.md).
+
+### 19.7 Expert evidence (`G5`)
+
+**BLOCKED.** None exists. [`../phase65/EXPERT_APPROVAL_EVIDENCE.md`](../phase65/EXPERT_APPROVAL_EVIDENCE.md).
+
+### 19.8 Infrastructure evidence (`G6`)
+
+**BLOCKED.** 0 of 20 items provisioned.
+[`../phase66/PRODUCTION_INFRASTRUCTURE_ACCEPTANCE.md`](../phase66/PRODUCTION_INFRASTRUCTURE_ACCEPTANCE.md).
+
+### 19.9 Open risks
+
+Five High register risks remain Open (S1, S3, C1, C2, C6) and three Medium (C4, C5, D4). New findings
+with owners are listed in [`../phase69/FINAL_RELEASE_CANDIDATE_AUDIT.md`](../phase69/FINAL_RELEASE_CANDIDATE_AUDIT.md) §4.
+No known critical or high defect remains unfixed in code an operator can reach.
+
+### 19.10 Classification and decision
+
+# `INTEGRATION COMPLETE — RELEASE BLOCKED`
+
+**NO-GO for production.** `G5`, `G6` and Windows acceptance are open and cannot be closed by software.
+
+The classification names used in §18 ("PRODUCTION READY — VERIFIED", "STAGING READY — …") are
+superseded. The only classifications in use are: `DEVELOPMENT VERIFIED`,
+`INTEGRATION COMPLETE — RELEASE BLOCKED`, `STAGING ACCEPTED — PRODUCTION BLOCKED`,
+`PRODUCTION READY — CONTROLLED ROLLOUT`, `PRODUCTION RELEASE APPROVED`.

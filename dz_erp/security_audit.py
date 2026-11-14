@@ -893,7 +893,9 @@ def create_encrypted_backup(
     output_backup_path = Path(output_backup_path)
     output_backup_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = output_backup_path.parent / f".tmp_backup_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # The staging directory briefly holds a plaintext copy of the database and
+    # a manifest carrying every key version; it must not depend on the umask.
+    tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     try:
         db_snap_path = tmp_dir / "erp_snapshot.sqlite3"
@@ -1076,6 +1078,35 @@ def _lstat_restore_path(path: Path) -> Optional[os.stat_result]:
     return metadata
 
 
+def _make_restored_tree_private(restore_target_dir: Path, members: Any, *, created_target: bool) -> None:
+    """Restrict everything a restore wrote to the owning account.
+
+    The tar ``data`` filter keeps the group/other *read* bits recorded in the
+    archive, so the restored database and ``manifest.json`` (which carries every
+    audit and vault key version) came out ``0644`` whatever the umask was.
+
+    The key store tightens the directory to ``0700`` a few steps later, which
+    bounds the exposure but does not remove it: the files are readable during
+    extraction and verification under umask 022, and the documented promotion
+    step moves them into the live location still carrying ``0644`` - a restored
+    production database readable by every local account.
+
+    Every member was already checked to be a plain file or directory inside the
+    target, so nothing here follows a link.
+    POSIX mode bits do not express Windows ACLs (risk S5), so this is a no-op there.
+    """
+    if os.name == "nt":
+        return
+    if created_target:
+        os.chmod(restore_target_dir, 0o700)
+    for member in members:
+        path = restore_target_dir / member.name
+        if member.isdir():
+            os.chmod(path, 0o700)
+        elif member.isfile():
+            os.chmod(path, 0o600)
+
+
 def restore_and_verify_backup(
     backup_path: Path,
     backup_encryption_key: bytes,
@@ -1226,6 +1257,7 @@ def restore_and_verify_backup(
 
             restore_target_dir.mkdir(parents=True, exist_ok=True)
             tar.extractall(path=restore_target_dir, filter=safe_data_filter)
+            _make_restored_tree_private(restore_target_dir, members, created_target=not target_existed)
     except FinancialIntegrityError:
         raise
     except (tarfile.TarError, OSError) as exc:

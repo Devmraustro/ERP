@@ -1,0 +1,951 @@
+{
+ "note": "Synthetic data only. Session tokens redacted. Produced by the Phase 67 acceptance driver against a loopback server on CPython 3.12.10.",
+ "date": "2026-11-14",
+ "checks": [
+  {
+   "wf": "W01",
+   "check": "healthz",
+   "expected": "HTTP 200",
+   "actual": "200 {\"status\": \"ok\", \"service\": \"algerian-ai-erp\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "admin login",
+   "expected": "HTTP 200",
+   "actual": "200 {\"access_token\": \"dzsess_<redacted>\", \"token_type\": \"bearer\", \"expires_at\": \"2026-11-14T23:28:38.747169+00:00\", \"expires_in\": 28800, \"token_id\": 1, \"user\": {\"user_id\": 1, \"company_id\": 1, \"username",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "session resolved server-side",
+   "expected": "HTTP 200",
+   "actual": "200 {\"user_id\": 1, \"company_id\": 1, \"branch_id\": null, \"username\": \"admin\", \"role\": \"admin\", \"token_id\": 1, \"token_prefix\": \"dzsess_<redacted>\", \"expires_at\": \"2026-11-14T23:28:38.747169+00:00\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "anonymous refused",
+   "expected": "HTTP 401",
+   "actual": "401 {\"detail\": \"Missing Authorization header. Expected 'Authorization: Bearer <token>'.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "wrong password refused",
+   "expected": "HTTP 401",
+   "actual": "401 {\"detail\": \"Invalid username or password.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "unknown Host refused",
+   "expected": "HTTP 400",
+   "actual": "400 {\"detail\": \"Invalid Host header.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "company row",
+   "expected": 1,
+   "actual": 1,
+   "pass": true
+  },
+  {
+   "wf": "W02",
+   "check": "chart of accounts loaded",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"accounts\": [{\"id\": 1, \"code\": \"101\", \"name_fr\": \"Capital émis ou capital social ou fonds de dotation, ou fonds d’exploitation\", \"name_ar\": \"رأس المال الصادر أو رأس المال الاجتماعي\", \"account_type\": \"equity\", \"re",
+   "pass": true
+  },
+  {
+   "wf": "W02",
+   "check": "accounts used by workflows exist",
+   "expected": true,
+   "actual": {
+    "30": true,
+    "380": true,
+    "401": true,
+    "408": true,
+    "4456": true,
+    "642": true,
+    "411": true
+   },
+   "pass": true
+  },
+  {
+   "wf": "W02",
+   "check": "account count",
+   "expected": ">=250",
+   "actual": 294,
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "create user clerk1 (clerk)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"user\": {\"user_id\": 2, \"username\": \"clerk1\", \"role\": \"clerk\", \"company_id\": 1}}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "create user approver1 (approver)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"user\": {\"user_id\": 3, \"username\": \"approver1\", \"role\": \"approver\", \"company_id\": 1}}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "create user acct1 (accountant)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"user\": {\"user_id\": 4, \"username\": \"acct1\", \"role\": \"accountant\", \"company_id\": 1}}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "create user wh1 (warehouse)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"user\": {\"user_id\": 5, \"username\": \"wh1\", \"role\": \"warehouse\", \"company_id\": 1}}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "create user audit1 (auditor)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"user\": {\"user_id\": 6, \"username\": \"audit1\", \"role\": \"auditor\", \"company_id\": 1}}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "10-char password refused (min 12 configured)",
+   "expected": "HTTP 422",
+   "actual": "422 {\"detail\": \"Password must be at least 12 characters long.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "clerk cannot administer users",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"User administration is restricted to administrators.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W05",
+   "check": "supplier created",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"partner_id\": 1, \"name\": \"SARL Fournisseur Synthetique\", \"partner_type\": \"supplier\", \"tax_regime\": \"REEL\", \"nif\": \"001216000000123\", \"nis\": \"001216000000199\", \"ai\": \"19016000123\", \"rc\": \"19/00-0123456B21\", \"wilay",
+   "pass": true
+  },
+  {
+   "wf": "W04",
+   "check": "customer record created (master data only)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"partner_id\": 2, \"name\": \"EURL Client Synthetique\", \"partner_type\": \"customer\", \"tax_regime\": \"REEL\", \"nif\": \"001219000000456\", \"nis\": null, \"ai\": null, \"rc\": null, \"wilaya_code\": \"19\"}",
+   "pass": true
+  },
+  {
+   "wf": "W05",
+   "check": "invalid NIF refused",
+   "expected": "HTTP 422",
+   "actual": "422 {\"detail\": \"Invalid NIF '123': must be 15 or 20 digits.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W05",
+   "check": "duplicate NIF refused",
+   "expected": "HTTP 422",
+   "actual": "422 {\"detail\": \"A partner with NIF 001216000000123 already exists in this company ('SARL Fournisseur Synthetique', id=1).\"}",
+   "pass": true
+  },
+  {
+   "wf": "W05",
+   "check": "auditor cannot create partner",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"Role 'auditor' is not authorized for create a supplier/customer record; required one of ['clerk', 'approver', 'accountant', 'admin'].\"}",
+   "pass": true
+  },
+  {
+   "wf": "W05",
+   "check": "partners listed",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"partners\": [{\"id\": 2, \"name\": \"EURL Client Synthetique\", \"partner_type\": \"customer\", \"tax_regime\": \"REEL\", \"nif\": \"001219000000456\", \"wilaya_code\": \"19\"}, {\"id\": 1, \"name\": \"SARL Fournisseur Synthetique\", \"partn",
+   "pass": true
+  },
+  {
+   "wf": "W06",
+   "check": "storable product created",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"product_id\": 1, \"sku\": \"SYN-001\", \"name\": \"Article synthetique A\", \"uom\": \"UNIT\", \"is_storable\": true, \"standard_cost_dzd\": \"250.00\"}",
+   "pass": true
+  },
+  {
+   "wf": "W06",
+   "check": "unknown account refused",
+   "expected": "HTTP 422",
+   "actual": "422 {\"detail\": \"stock_account_code '99999' is not an account of this company's SCF chart.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W06",
+   "check": "duplicate SKU refused",
+   "expected": "HTTP 422",
+   "actual": "422 {\"detail\": \"An item with SKU 'SYN-001' already exists (id=1).\"}",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "supplier document uploaded to the encrypted vault",
+   "expected": "HTTP 200",
+   "actual": "200 {\"document_id\": \"1e2b706e-cbd3-4624-b9db-9af2c69fa138\", \"workflow_state\": \"NeedsReview\", \"security_status\": \"CLEAN\", \"ocr_engine\": \"pdfplumber\", \"ocr_model_version\": \"pdfplumber-0.11.10+pdfminer.six-20260107\", \"latency_ms\": 16.07,",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "vault blob is not plaintext PDF",
+   "expected": true,
+   "actual": {
+    "files": 1,
+    "starts_with_%PDF": [
+     false
+    ]
+   },
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "purchase order confirmed (library; no HTTP route)",
+   "expected": "CONFIRMED",
+   "actual": {
+    "po_id": 1,
+    "po_number": "PO-SYN-0001",
+    "po_line_ids": [
+     1
+    ],
+    "state": "CONFIRMED"
+   },
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "goods receipt 40 units -> stock entry",
+   "expected": "valuation 10000.00",
+   "actual": {
+    "grn_id": 1,
+    "grn_number": "GRN-SYN-0001",
+    "po_state": "RECEIVED",
+    "stock_journal_entry_id": 1,
+    "total_valuation_dzd": "10000.00",
+    "backorder_grn_id": null,
+    "idempotent_replay": false
+   },
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "receipt replay creates nothing",
+   "expected": "idempotent_replay, counts unchanged",
+   "actual": {
+    "replay": true,
+    "counts_equal": true
+   },
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "stock on hand 40",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"stock\": [{\"warehouse_code\": \"WH-MAIN\", \"sku\": \"SYN-001\", \"product_name\": \"Article synthetique A\", \"uom\": \"UNIT\", \"qty_on_hand\": \"40.000000\"}], \"count\": 1}",
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "auditor cannot create PO",
+   "expected": "refused",
+   "actual": "AuthorizationError: Role 'auditor' is not authorized for this action; required one of ('clerk', 'approver', 'a",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "purchase invoice entered, 3-way match clean",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 1, \"workflow_state\": \"Validated\", \"validation_errors\": [], \"payload_sha256\": \"3558a836f676c70bcfef26b9afc936d0efcf6dd92fdb2f58061e8e7ee18e3af8\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "post before approval refused",
+   "expected": "HTTP 409",
+   "actual": "409 {\"detail\": \"Cannot post invoice 1 in state 'Validated'; requires 'Approved' state.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "submitted for approval",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 1, \"approval_request_id\": 1, \"workflow_state\": \"PendingApproval\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "clerk cannot approve (role)",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"Role 'clerk' is not authorized for this action; required one of ('approver', 'accountant', 'admin').\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "approved by a second person",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 1, \"workflow_state\": \"Approved\", \"decision\": \"APPROVED\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "approver cannot post (role)",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"Role 'approver' is not authorized for this action; required one of ('accountant', 'admin').\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "post without Idempotency-Key refused",
+   "expected": "HTTP 400",
+   "actual": "400 {\"detail\": \"Missing mandatory Idempotency-Key header.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "invoice posted",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 1, \"workflow_state\": \"Posted\", \"journal_entry_id\": 2, \"entry_number\": \"ACH/2026/00001\", \"total_debit_dzd\": \"11900.00\", \"total_credit_dzd\": \"11900.00\", \"idempotent_replay\": false}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "replay with same key returns the same entry",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 1, \"workflow_state\": \"Posted\", \"journal_entry_id\": 2, \"entry_number\": \"ACH/2026/00001\", \"total_debit_dzd\": \"11900.00\", \"total_credit_dzd\": \"11900.00\", \"idempotent_replay\": true}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "second post with a new key refused",
+   "expected": "HTTP 409",
+   "actual": "409 {\"detail\": \"Invoice 1 is already Posted.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "no duplicate posting",
+   "expected": "1 new entry, 3 new lines, then unchanged",
+   "actual": {
+    "before": {
+     "journal_entries": 1,
+     "journal_entry_lines": 2,
+     "supplier_invoices": 1,
+     "stock_moves": 1,
+     "idempotency_records": 1
+    },
+    "after": {
+     "journal_entries": 2,
+     "journal_entry_lines": 5,
+     "supplier_invoices": 1,
+     "stock_moves": 1,
+     "idempotency_records": 2
+    },
+    "after_replays": {
+     "journal_entries": 2,
+     "journal_entry_lines": 5,
+     "supplier_invoices": 1,
+     "stock_moves": 1,
+     "idempotency_records": 2
+    }
+   },
+   "pass": true
+  },
+  {
+   "wf": "W09",
+   "check": "supplier balance (401, partner 1) from posted lines",
+   "expected": "11900.00",
+   "actual": "11900.00",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "exact duplicate invoice rejected",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 2, \"workflow_state\": \"DuplicateRejected\", \"validation_errors\": [\"EXACT_DUPLICATE_INVOICE_REF_OF_ID_1\", \"THREE_WAY_MATCH_QTY_MISMATCH:line=1,billed=40.000000>unbilled_received=0.000000\", \"THREE_WAY_MATCH_QTY_MISMATCH",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "re-typed duplicate number rejected",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 3, \"workflow_state\": \"DuplicateRejected\", \"validation_errors\": [\"EXACT_DUPLICATE_INVOICE_REF_OF_ID_1\", \"THREE_WAY_MATCH_QTY_MISMATCH:line=1,billed=40.000000>unbilled_received=0.000000\", \"THREE_WAY_MATCH_QTY_MISMATCH",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "wrong VAT total and over-billing held for review",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 4, \"workflow_state\": \"NeedsReview\", \"validation_errors\": [\"THREE_WAY_MATCH_QTY_MISMATCH:line=1,billed=40.000000>unbilled_received=0.000000\", \"HEADER_TVA_MISMATCH:sum_tva=1900.00!=header_tva=1800.00\", \"THREE_WAY_MATC",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "invalid invoice cannot be submitted",
+   "expected": "HTTP 422",
+   "actual": "422 {\"detail\": \"Cannot request approval for invoice in state 'NeedsReview'; must be 'Validated'.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "invalid invoice cannot be posted",
+   "expected": "HTTP 409",
+   "actual": "409 {\"detail\": \"Cannot post invoice 4 in state 'NeedsReview'; requires 'Approved' state.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "refused operations leave no financial state",
+   "expected": "journal unchanged",
+   "actual": {
+    "journal_entries": [
+     2,
+     2
+    ],
+    "lines": [
+     5,
+     5
+    ]
+   },
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "partial receipt 6/10 creates a backorder",
+   "expected": "PARTIALLY_RECEIVED + backorder",
+   "actual": {
+    "grn_id": 2,
+    "grn_number": "GRN-SYN-0002",
+    "po_state": "PARTIALLY_RECEIVED",
+    "stock_journal_entry_id": 3,
+    "total_valuation_dzd": "1800.00",
+    "backorder_grn_id": 3,
+    "idempotent_replay": false
+   },
+   "pass": true
+  },
+  {
+   "wf": "W10",
+   "check": "over-receipt refused",
+   "expected": "refused",
+   "actual": "FinancialIntegrityError: Receipt quantity 9.000000 exceeds remaining ordered quantity 4.000000.",
+   "pass": true
+  },
+  {
+   "wf": "W21",
+   "check": "cash invoice without stamp duty held for review",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 5, \"workflow_state\": \"NeedsReview\", \"validation_errors\": [\"TIMBRE_MISMATCH:declared=0.00!=expected=21.42_for_CASH\", \"TIMBRE_MISMATCH:declared=0.00!=expected=21.42_for_CASH\"], \"payload_sha256\": \"efdc26459571efa56c589",
+   "pass": true
+  },
+  {
+   "wf": "W07",
+   "check": "cash invoice with stamp duty 21.42 validated",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 6, \"workflow_state\": \"Validated\", \"validation_errors\": [], \"payload_sha256\": \"09dea9afa3a7cbadc5d7938a4ee8f51687540dfb18b89cb5360d753d4a96dd17\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "submit",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 6, \"approval_request_id\": 2, \"workflow_state\": \"PendingApproval\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "creator cannot approve own invoice (segregation of duties)",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"SEGREGATION_OF_DUTIES_VIOLATION: Invoice creator cannot approve their own invoice.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "approved",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 6, \"workflow_state\": \"Approved\", \"decision\": \"APPROVED\"}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "cash invoice posted",
+   "expected": "HTTP 200",
+   "actual": "200 {\"invoice_id\": 6, \"workflow_state\": \"Posted\", \"journal_entry_id\": 4, \"entry_number\": \"ACH/2026/00006\", \"total_debit_dzd\": \"2163.42\", \"total_credit_dzd\": \"2163.42\", \"idempotent_replay\": false}",
+   "pass": true
+  },
+  {
+   "wf": "W08",
+   "check": "cash invoice entry lines",
+   "expected": "380 Dr 1800 / 4456 Dr 342 / 642 Dr 21.42 / 401 Cr 2163.42",
+   "actual": [
+    {
+     "a": "380",
+     "d": "1800.00",
+     "c": "0.00"
+    },
+    {
+     "a": "4456",
+     "d": "342.00",
+     "c": "0.00"
+    },
+    {
+     "a": "642",
+     "d": "21.42",
+     "c": "0.00"
+    },
+    {
+     "a": "401",
+     "d": "0.00",
+     "c": "2163.42"
+    }
+   ],
+   "pass": true
+  },
+  {
+   "wf": "W09",
+   "check": "supplier balance after second invoice",
+   "expected": "14063.42",
+   "actual": "14063.42",
+   "pass": true
+  },
+  {
+   "wf": "W14",
+   "check": "stock deduction of 5 (library; no HTTP route)",
+   "expected": "41.000000",
+   "actual": {
+    "product_id": 1,
+    "warehouse_code": "WH-MAIN",
+    "qty_on_hand": "41.000000"
+   },
+   "pass": true
+  },
+  {
+   "wf": "W14",
+   "check": "deduction beyond stock refused",
+   "expected": "refused",
+   "actual": "FinancialIntegrityError: INSUFFICIENT_STOCK_ERROR: available=41.000000 < requested=1000.000000",
+   "pass": true
+  },
+  {
+   "wf": "W14",
+   "check": "stock on hand reconciles with stock_moves",
+   "expected": "on hand == sum(IN) - sum(OUT)",
+   "actual": {
+    "on_hand": "41.000000",
+    "net_moves": "46.000000",
+    "moves": [
+     {
+      "direction": "IN",
+      "qty": "40.000000"
+     },
+     {
+      "direction": "IN",
+      "qty": "6.000000"
+     }
+    ]
+   },
+   "pass": false
+  },
+  {
+   "wf": "W17",
+   "check": "clerk cannot request a reversal",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"Role 'clerk' is not authorized for this action; required one of ('accountant', 'admin').\"}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "reversal requested (credit note in NeedsReview)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"original_invoice_id\": 1, \"credit_note_invoice_id\": 7, \"reversal_journal_entry_id\": 5, \"reversal_entry_number\": \"RAVOIR/2026/00001\", \"reason\": \"Erreur de saisie - extourne synthetique\", \"workflow_state\": \"NeedsReview\", \"idempoten",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "replay returns the same credit note",
+   "expected": "HTTP 200",
+   "actual": "200 {\"original_invoice_id\": 1, \"credit_note_invoice_id\": 7, \"reversal_journal_entry_id\": 5, \"reversal_entry_number\": \"RAVOIR/2026/00001\", \"reason\": \"Erreur de saisie - extourne synthetique\", \"workflow_state\": \"NeedsReview\", \"idempoten",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "second reversal of the same invoice refused cleanly",
+   "expected": "HTTP 409",
+   "actual": "409 {\"detail\": \"Invoice 1 already has a reversal (credit note 7, state 'NeedsReview').\"}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "books unchanged while credit note is unapproved",
+   "expected": "14063.42",
+   "actual": "14063.42",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "credit note submitted",
+   "expected": "HTTP 200",
+   "actual": "200 {\"reversal_invoice_id\": 7, \"approval_request_id\": 3, \"workflow_state\": \"PendingApproval\"}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "requester cannot approve own reversal",
+   "expected": "HTTP 403",
+   "actual": "403 {\"detail\": \"SEGREGATION_OF_DUTIES_VIOLATION: Reversal requester cannot approve their own reversal.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "credit note approved by a second person",
+   "expected": "HTTP 200",
+   "actual": "200 {\"reversal_invoice_id\": 7, \"workflow_state\": \"Approved\", \"decision\": \"APPROVED\"}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "credit note posted",
+   "expected": "HTTP 200",
+   "actual": "200 {\"reversal_invoice_id\": 7, \"reversal_journal_entry_id\": 5, \"reversal_entry_number\": \"RAVOIR/2026/00001\", \"original_invoice_id\": 1, \"reason\": null, \"workflow_state\": \"Posted\", \"idempotent_replay\": false}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "credit note post replay",
+   "expected": "HTTP 200",
+   "actual": "200 {\"reversal_invoice_id\": 7, \"reversal_journal_entry_id\": 5, \"reversal_entry_number\": \"RAVOIR/2026/00001\", \"original_invoice_id\": 1, \"reason\": null, \"workflow_state\": \"Posted\", \"idempotent_replay\": true}",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "supplier balance after reversal",
+   "expected": "2163.42",
+   "actual": "2163.42",
+   "pass": true
+  },
+  {
+   "wf": "W17",
+   "check": "original invoice and its entry preserved",
+   "expected": "Posted, 11900.00, 3 original lines",
+   "actual": {
+    "invoice": {
+     "workflow_state": "Posted",
+     "amount_ttc_dzd": "11900.00",
+     "journal_entry_id": 2
+    },
+    "lines": [
+     {
+      "a": "380",
+      "d": "10000.00",
+      "c": "0.00"
+     },
+     {
+      "a": "4456",
+      "d": "1900.00",
+      "c": "0.00"
+     },
+     {
+      "a": "401",
+      "d": "0.00",
+      "c": "11900.00"
+     }
+    ]
+   },
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "direct SQL: UPDATE amount on posted journal line",
+   "expected": "refused by trigger",
+   "actual": "IntegrityError: FINANCIAL_INTEGRITY_VIOLATION: Posted journal entry line amounts and accounts are immutable.",
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "direct SQL: DELETE posted journal line",
+   "expected": "refused by trigger",
+   "actual": "IntegrityError: FINANCIAL_INTEGRITY_VIOLATION: Posted journal entry lines cannot be deleted.",
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "direct SQL: UPDATE posted journal entry total",
+   "expected": "refused by trigger",
+   "actual": "IntegrityError: FINANCIAL_INTEGRITY_VIOLATION: Posted journal entry cannot be modified or unposted.",
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "direct SQL: DELETE posted journal entry",
+   "expected": "refused by trigger",
+   "actual": "IntegrityError: FINANCIAL_INTEGRITY_VIOLATION: Posted journal entry cannot be deleted; use a reversal entry.",
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "direct SQL: UPDATE audit event",
+   "expected": "refused by trigger",
+   "actual": "IntegrityError: AUDIT_TAMPER_VIOLATION: audit_events is append-only; UPDATE is prohibited.",
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "direct SQL: DELETE audit event",
+   "expected": "refused by trigger",
+   "actual": "IntegrityError: AUDIT_TAMPER_VIOLATION: audit_events is append-only; DELETE is prohibited.",
+   "pass": true
+  },
+  {
+   "wf": "W18",
+   "check": "trial balance balanced",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"entry_state\": \"POSTED\", \"rows\": [{\"account_code\": \"30\", \"name_fr\": \"Stocks de marchandises\", \"name_ar\": \"مخزونات البضائع\", \"account_type\": \"asset_current\", \"debit_dzd\": \"11800.00\", \"credit_dzd\": \"0.00\"}, {\"accou",
+   "pass": true
+  },
+  {
+   "wf": "W18",
+   "check": "trial balance rows",
+   "expected": null,
+   "actual": {
+    "30": [
+     "11800.00",
+     "0.00"
+    ],
+    "380": [
+     "11800.00",
+     "21800.00"
+    ],
+    "401": [
+     "11900.00",
+     "14063.42"
+    ],
+    "4456": [
+     "2242.00",
+     "1900.00"
+    ],
+    "642": [
+     "21.42",
+     "0.00"
+    ],
+    "total": "37763.42"
+   },
+   "pass": true
+  },
+  {
+   "wf": "W18",
+   "check": "every journal entry balances individually",
+   "expected": "debit == credit per entry",
+   "actual": [
+    [
+     "STJ/1/00001",
+     "10000.00",
+     "10000.00"
+    ],
+    [
+     "ACH/2026/00001",
+     "11900.00",
+     "11900.00"
+    ],
+    [
+     "STJ/1/00002",
+     "1800.00",
+     "1800.00"
+    ],
+    [
+     "ACH/2026/00006",
+     "2163.42",
+     "2163.42"
+    ],
+    [
+     "RAVOIR/2026/00001",
+     "11900.00",
+     "11900.00"
+    ]
+   ],
+   "pass": true
+  },
+  {
+   "wf": "W19",
+   "check": "journal entry numbers unique",
+   "expected": "unique",
+   "actual": [
+    "STJ/1/00001",
+    "ACH/2026/00001",
+    "STJ/1/00002",
+    "ACH/2026/00006",
+    "RAVOIR/2026/00001"
+   ],
+   "pass": true
+  },
+  {
+   "wf": "W22",
+   "check": "G50 preparation workbook generated and marked not-a-filing",
+   "expected": "PREPARATION_WORKBOOK_ONLY marker present",
+   "actual": {
+    "company_id": 1,
+    "period": "2026-11",
+    "statutory_status": "PREPARATORY_WORKBOOK_REQUIRES_ONEC_EXPERT_COMPTABLE_SIGN_OFF",
+    "boxes": "…",
+    "traceability_count": 3,
+    "traceability": "…"
+   },
+   "pass": false
+  },
+  {
+   "wf": "W22",
+   "check": "cross-company G50 refused",
+   "expected": "refused",
+   "actual": "TenantIsolationError",
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "audit chain verifies",
+   "expected": true,
+   "actual": {
+    "valid": true
+   },
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "audit events recorded",
+   "expected": ">0",
+   "actual": {
+    "INVOICE_VALIDATED_STAGED": 6,
+    "AUTH_TOKEN_ISSUED": 6,
+    "AUTH_USER_CREATED": 5,
+    "PO_CONFIRMED": 2,
+    "PARTNER_CREATED": 2,
+    "INVOICE_POSTED": 2,
+    "INVOICE_APPROVED": 2,
+    "GOODS_RECEIPT_VALIDATED": 2,
+    "APPROVAL_REQUESTED": 2,
+    "STOCK_DEDUCTION": 1,
+    "SECURITY_USER_ADMIN_ACCESS_BLOCKED": 1,
+    "SECURITY_UNAUTHORIZED_ROLE_ACTION_BLOCKED": 1,
+    "REVERSAL_REQUESTED": 1,
+    "REVERSAL_POSTED": 1,
+    "REVERSAL_APPROVED": 1,
+    "REVERSAL_APPROVAL_REQUESTED": 1,
+    "PRODUCT_CREATED": 1,
+    "OCR_EXTRACTION_COMPLETED": 1,
+    "LOAD_CHART_TEMPLATE": 1,
+    "AUTH_LOGIN_FAILED": 1
+   },
+   "pass": true
+  },
+  {
+   "wf": "W24",
+   "check": "durable security log has refusal records and no secrets",
+   "expected": ">0 records; no password/token text",
+   "actual": {
+    "records": 71
+   },
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "deactivate user",
+   "expected": "HTTP 200",
+   "actual": "200 {\"company_id\": 1, \"user_id\": 5, \"username\": \"wh1\", \"is_active\": 0}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "deactivated user's live token refused",
+   "expected": "HTTP 401",
+   "actual": "401 {\"detail\": \"User account is inactive or revoked.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "admin cannot deactivate own account",
+   "expected": "HTTP 409",
+   "actual": "409 {\"detail\": \"An administrator cannot deactivate their own account.\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "logout (token revoke)",
+   "expected": "HTTP 200",
+   "actual": "200 {\"revoked\": true, \"reason\": \"USER_LOGOUT\"}",
+   "pass": true
+  },
+  {
+   "wf": "W01",
+   "check": "revoked token refused",
+   "expected": "HTTP 401",
+   "actual": "401 {\"detail\": \"Authentication credential has been revoked.\"}",
+   "pass": true
+  }
+ ],
+ "final_trial_balance": {
+  "company_id": 1,
+  "entry_state": "POSTED",
+  "rows": [
+   {
+    "account_code": "30",
+    "name_fr": "Stocks de marchandises",
+    "name_ar": "مخزونات البضائع",
+    "account_type": "asset_current",
+    "debit_dzd": "11800.00",
+    "credit_dzd": "0.00"
+   },
+   {
+    "account_code": "380",
+    "name_fr": "Marchandises stockées",
+    "name_ar": "المشتريات المخزنة",
+    "account_type": "asset_current",
+    "debit_dzd": "11800.00",
+    "credit_dzd": "21800.00"
+   },
+   {
+    "account_code": "401",
+    "name_fr": "Fournisseurs de stocks et services",
+    "name_ar": "موردو المخزونات والخدمات",
+    "account_type": "liability_payable",
+    "debit_dzd": "11900.00",
+    "credit_dzd": "14063.42"
+   },
+   {
+    "account_code": "4456",
+    "name_fr": "TVA récupérable et précompte",
+    "name_ar": "الرسم على القيمة المضافة القابل للاسترجاع",
+    "account_type": "asset_current",
+    "debit_dzd": "2242.00",
+    "credit_dzd": "1900.00"
+   },
+   {
+    "account_code": "642",
+    "name_fr": "Impôts et taxes non récupérables sur chiffre d'affaires",
+    "name_ar": "الضرائب والرسوم غير المسترجعة على رقم الأعمال وحقوق الطابع",
+    "account_type": "expense",
+    "debit_dzd": "21.42",
+    "credit_dzd": "0.00"
+   }
+  ],
+  "total_debit_dzd": "37763.42",
+  "total_credit_dzd": "37763.42",
+  "balanced": true
+ },
+ "row_counts": {
+  "journal_entries": 5,
+  "journal_entry_lines": 14,
+  "supplier_invoices": 7,
+  "stock_moves": 2,
+  "idempotency_records": 6
+ }
+}

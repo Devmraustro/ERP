@@ -1297,7 +1297,15 @@ def test_openapi_contract_declares_exactly_the_public_operations(env: SimpleName
     # operations the operator workflow needs - POST /api/v1/partners and
     # POST /api/v1/products - which are authenticated and RBAC-gated like
     # every other write, so 29 -> 31.
-    assert len(protected) == 31, f"expected 29 protected operations, got {len(protected)}: {sorted(protected)}"
+    # Release-closure phase 67: three of those 31 were never reachable. The
+    # reversal handlers were declared on /api/v1/invoices/{reversal_invoice_id}/
+    # submit-approval|decide-approval|post - a different *string* in this
+    # document, the same *URL* to the router, which always dispatched to the
+    # {invoice_id} routes registered first. They are gone; the three invoice
+    # operations now serve credit notes too (tests/test_phase67_reversal_over_http.py).
+    # No URL a client could call was removed, so 31 -> 28.
+    assert len(protected) == 28, f"expected 28 protected operations, got {len(protected)}: {sorted(protected)}"
+    assert not [p for p in protected if "reversal_invoice_id" in p]
 
 
 def test_openapi_contract_declares_no_identity_headers_as_parameters(env: SimpleNamespace) -> None:

@@ -1,0 +1,47 @@
+{
+ "write_after_rotation": 200,
+ "live_chain_after_rotation": {
+  "valid": true,
+  "checked_count": 49,
+  "last_hash": "0fcab5d70a9c9aba87bb077198314fa49218ba25ab11691b40e9fcc1f7d47fc3",
+  "event_count": 49,
+  "key_versions": {
+   "1": 49
+  }
+ },
+ "audit_events_by_key_version": null,
+ "backup": {
+  "rc": 0,
+  "name": "erp-20261114T152958Z.erpbackup",
+  "size_bytes": 87500,
+  "sha256": "3347f1bd4ce1726456080a9f823ad81fd32d090df9ab707fb3b22374b362242f",
+  "wall_s": 0.49
+ },
+ "source_fingerprint": {
+  "counts": {
+   "companies": 1,
+   "users": 6,
+   "partners": 4,
+   "products": 1,
+   "supplier_invoices": 7,
+   "journal_entries": 5,
+   "journal_entry_lines": 14,
+   "stock_moves": 2,
+   "stock_quants": 1,
+   "audit_events": 49,
+   "source_documents": 1
+  },
+  "posted_debit": "37763.42",
+  "posted_credit": "37763.42",
+  "last_audit_id": 49,
+  "ledger_sha256": "0f8a7503b6db81bb211e3e33b8bb142f574005a16f845c33b199e835463e074f"
+ },
+ "offhost_copy": {
+  "sha256_matches": true,
+  "wall_s": 0.0
+ },
+ "write_after_backup": {
+  "status": 200,
+  "partner_id": 5
+ }
+}
